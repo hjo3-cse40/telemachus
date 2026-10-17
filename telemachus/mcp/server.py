@@ -17,6 +17,8 @@ from typing import Any, Dict, List, Optional
 from telemachus.config.loader import get_account, get_enabled_accounts, load_accounts, load_env
 from telemachus.email.client import IMAPClient
 from telemachus.email.draft import create_draft
+from telemachus.email.indexer import index_emails
+from telemachus.email.store import EmailIndexStore
 from telemachus.email.triage import triage_messages
 
 PROTOCOL_VERSION = "2024-11-05"
@@ -110,8 +112,9 @@ class WarmLayaBridge:
                 self.process = None
 
 
-# Global warm bridge
+# Global warm bridge & SQLite index store
 laya_bridge = WarmLayaBridge()
+index_store = EmailIndexStore()
 
 TOOLS_DEFINITIONS = [
     {
@@ -228,6 +231,76 @@ TOOLS_DEFINITIONS = [
                 },
             },
             "required": ["to", "subject", "body"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "email_index",
+        "description": "Offline Mailbox Indexer: fetches batches of emails from the remote mailbox, tags them with Laya on MPS, and stores them in local SQLite. Safe, paginated, and skips already-indexed emails.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "account": {
+                    "type": "string",
+                    "description": "Account ID to index (e.g. 'yahoo'). Default: 'yahoo'.",
+                    "default": "yahoo",
+                },
+                "folder": {
+                    "type": "string",
+                    "description": "Folder to index (default: INBOX).",
+                    "default": "INBOX",
+                },
+                "max_count": {
+                    "type": "integer",
+                    "description": "Maximum number of unindexed emails to fetch and classify in this run (e.g. 25, 50, 100). Default: 50.",
+                    "default": 50,
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "email_search_index",
+        "description": "Instantly searches locally indexed emails in SQLite by keyword, sender, category (important_documents, personal_work, transactional, newsletter_marketing, suspicious_spam), or priority. Uses zero IMAP bandwidth and minimal tokens.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Optional keyword or search term to match against subject, body snippet, or sender.",
+                },
+                "category": {
+                    "type": "string",
+                    "description": "Filter by category: 'important_documents', 'personal_work', 'transactional', 'newsletter_marketing', 'suspicious_spam'.",
+                },
+                "attention": {
+                    "type": "string",
+                    "description": "Filter by priority: 'urgent_review', 'important_review', 'routine'.",
+                },
+                "account": {
+                    "type": "string",
+                    "description": "Filter by account ID (default: all or 'yahoo').",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum results to return (default: 10).",
+                    "default": 10,
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "email_index_stats",
+        "description": "Get high-level summary statistics of all locally indexed emails in SQLite, including total count, category distribution, priority breakdown, and date range.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "account": {
+                    "type": "string",
+                    "description": "Account ID to inspect, or omit for all accounts.",
+                },
+            },
             "additionalProperties": False,
         },
     },
@@ -351,6 +424,76 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
             f"To: {res['to']}\n"
             f"Subject: {res['subject']}\n"
             f"Status: Saved to remote drafts folder. Review and send from your mail client."
+        )
+
+    elif name == "email_index":
+        acc_id = arguments.get("account", "yahoo")
+        folder = arguments.get("folder", "INBOX")
+        max_count = min(200, max(1, int(arguments.get("max_count", 50))))
+
+        try:
+            res = index_emails(
+                account_id=acc_id,
+                folder=folder,
+                max_count=max_count,
+                predictor=laya_bridge.predict,
+                store=index_store,
+            )
+            return (
+                f"Mailbox Indexing Complete for [{res['account_id']}] (Folder: {res['folder']}):\n"
+                f"- Newly Indexed & Classified: {res.get('newly_indexed', 0)} emails\n"
+                f"- Total Now Cached Locally: {res.get('total_indexed', 0)} emails\n"
+                f"- Total Messages in Mailbox: {res.get('total_inbox_messages', 'unknown')}\n"
+                f"- Remaining Unindexed: {res.get('remaining_unindexed', 0)}\n"
+                f"You can now search these offline using 'email_search_index' or view breakdown with 'email_index_stats'."
+            )
+        except Exception as e:
+            return f"Error during indexing: {e}"
+
+    elif name == "email_search_index":
+        acc_id = arguments.get("account")
+        query = arguments.get("query")
+        category = arguments.get("category")
+        attention = arguments.get("attention")
+        limit = min(50, max(1, int(arguments.get("limit", 10))))
+
+        results = index_store.search(
+            account_id=acc_id,
+            query=query,
+            category=category,
+            attention=attention,
+            limit=limit,
+        )
+
+        if not results:
+            return "No matching emails found in local SQLite index. (Try running 'email_index' first to cache your inbox)."
+
+        lines = [f"Found {len(results)} matching email(s) in local SQLite index:"]
+        for r in results:
+            flags_info = f" [{r['category'].upper()}]" if r.get("category") else ""
+            lines.append(
+                f"- UID {r['uid']}: From '{r.get('sender', '')[:35]}' on {r.get('date_str', '')[:16]}{flags_info}\n"
+                f"  Subject: \"{r.get('subject', '')}\"\n"
+                f"  Snippet: \"{r.get('snippet', '')}\"\n"
+            )
+        return "\n".join(lines)
+
+    elif name == "email_index_stats":
+        acc_id = arguments.get("account")
+        stats = index_store.get_stats(account_id=acc_id)
+
+        if stats["total_indexed"] == 0:
+            return "No emails indexed in local SQLite yet. Run 'email_index' to start caching and tagging emails."
+
+        cat_lines = [f"  - {cat}: {cnt}" for cat, cnt in stats["categories"].items()]
+        attn_lines = [f"  - {attn}: {cnt}" for attn, cnt in stats["attention_breakdown"].items()]
+
+        return (
+            f"Local Email Index Statistics (Account: {stats['account_id']}):\n"
+            f"- Total Emails Indexed: {stats['total_indexed']}\n"
+            f"- Date Span Covered: {stats['earliest_date']} to {stats['latest_date']}\n"
+            f"- Category Breakdown:\n" + "\n".join(cat_lines) + "\n"
+            f"- Priority / Attention Breakdown:\n" + "\n".join(attn_lines)
         )
 
     else:

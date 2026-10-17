@@ -8,6 +8,8 @@ from typing import Optional
 from telemachus.config.loader import get_account, get_enabled_accounts, load_accounts
 from telemachus.email.client import IMAPClient
 from telemachus.email.draft import create_draft
+from telemachus.email.indexer import index_emails
+from telemachus.email.store import EmailIndexStore
 from telemachus.email.triage import triage_messages
 
 
@@ -170,6 +172,73 @@ def cmd_draft(args: argparse.Namespace) -> None:
     print(f"  Notice  : {res['message']}\n")
 
 
+def cmd_index(args: argparse.Namespace) -> None:
+    """Indexes mailbox messages into local SQLite database."""
+    print(f"Starting offline indexing for account [{args.account}] (Folder: {args.folder}, Limit: {args.max})...")
+    res = index_emails(
+        account_id=args.account,
+        folder=args.folder,
+        max_count=args.max,
+        batch_size=args.batch_size,
+    )
+    print("\n" + "=" * 76)
+    print(" Mailbox Indexing Summary")
+    print("=" * 76)
+    print(f"  Account             : {res['account_id']}")
+    print(f"  Folder              : {res['folder']}")
+    print(f"  Newly Indexed       : {res.get('newly_indexed', 0)} emails")
+    print(f"  Total Locally Cached: {res.get('total_indexed', 0)} emails")
+    if "total_inbox_messages" in res:
+        print(f"  Total in Remote     : {res['total_inbox_messages']}")
+        print(f"  Remaining Unindexed : {res.get('remaining_unindexed', 0)}")
+    print("=" * 76)
+
+
+def cmd_search(args: argparse.Namespace) -> None:
+    """Searches locally indexed emails in SQLite."""
+    store = EmailIndexStore()
+    results = store.search(
+        account_id=args.account,
+        query=args.query,
+        category=args.category,
+        attention=args.attention,
+        limit=args.limit,
+    )
+    if not results:
+        print("No matching emails found in local SQLite index.")
+        return
+
+    print("=" * 96)
+    print(f" Search Results ({len(results)} found in local SQLite index):")
+    print("=" * 96)
+    for r in results:
+        cat = r.get("category", "").upper()
+        attn = r.get("attention", "").upper()
+        subj = (r.get("subject", "")[:40] + "..") if len(r.get("subject", "")) > 42 else r.get("subject", "")
+        sender = (r.get("sender", "")[:26] + "..") if len(r.get("sender", "")) > 28 else r.get("sender", "")
+        print(f"UID {r['uid']:<8} | {cat:<20} | {attn:<16} | {sender:<28} | {subj}")
+    print("=" * 96)
+
+
+def cmd_stats(args: argparse.Namespace) -> None:
+    """Shows statistics of locally indexed emails in SQLite."""
+    store = EmailIndexStore()
+    stats = store.get_stats(account_id=args.account)
+    print("=" * 76)
+    print(f" Telemachus Email Index Statistics (Account: {stats['account_id']})")
+    print("=" * 76)
+    print(f"  Total Emails Indexed : {stats['total_indexed']}")
+    if stats["earliest_date"] and stats["latest_date"]:
+        print(f"  Date Span Covered    : {stats['earliest_date']} to {stats['latest_date']}")
+    print("\n  Category Breakdown:")
+    for cat, cnt in stats["categories"].items():
+        print(f"    - {cat:<22}: {cnt}")
+    print("\n  Priority / Attention Breakdown:")
+    for attn, cnt in stats["attention_breakdown"].items():
+        print(f"    - {attn:<22}: {cnt}")
+    print("=" * 76)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="python -m telemachus.email",
@@ -212,6 +281,28 @@ def main() -> None:
     p_draft.add_argument("--body", required=True, help="Draft body text")
     p_draft.add_argument("--drafts-folder", default=None, help="Drafts folder name")
     p_draft.set_defaults(func=cmd_draft)
+
+    # index
+    p_index = subparsers.add_parser("index", help="Index emails offline into local SQLite with Laya")
+    p_index.add_argument("--account", default="yahoo", help="Account ID (default: yahoo)")
+    p_index.add_argument("--folder", default="INBOX", help="IMAP folder (default: INBOX)")
+    p_index.add_argument("--max", type=int, default=50, help="Maximum emails to index in this run (default: 50)")
+    p_index.add_argument("--batch-size", type=int, default=10, help="Batch size per Laya inference pass (default: 10)")
+    p_index.set_defaults(func=cmd_index)
+
+    # search
+    p_search = subparsers.add_parser("search", help="Search locally indexed emails in SQLite")
+    p_search.add_argument("--account", default=None, help="Account ID filter")
+    p_search.add_argument("--query", "-q", default=None, help="Search text query")
+    p_search.add_argument("--category", "-c", default=None, help="Category filter")
+    p_search.add_argument("--attention", "-a", default=None, help="Priority/attention filter")
+    p_search.add_argument("--limit", type=int, default=10, help="Maximum results (default: 10)")
+    p_search.set_defaults(func=cmd_search)
+
+    # stats
+    p_stats = subparsers.add_parser("stats", help="Show statistics of locally indexed emails")
+    p_stats.add_argument("--account", default=None, help="Account ID filter")
+    p_stats.set_defaults(func=cmd_stats)
 
     args = parser.parse_args()
     args.func(args)
