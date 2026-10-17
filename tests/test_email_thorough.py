@@ -193,7 +193,7 @@ def run_tests():
 
     # 1. Initialize
     init_res = rpc_call({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-    assert init_res.get("result", {}).get("serverInfo", {}).get("name") == "telemachus-email"
+    assert init_res.get("result", {}).get("serverInfo", {}).get("name") in ("telemachus", "telemachus-email")
 
     # 2. Tools list
     tools_res = rpc_call({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})

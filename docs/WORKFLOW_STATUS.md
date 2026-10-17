@@ -22,11 +22,14 @@
   - [x] Implement safe drafting tool (`Drafts` folder output, no auto-send)
   - [x] Implement offline SQLite indexer (`data/email_index.sqlite3`) for large historical inboxes
   - [x] Wire all tools into OpenCode MCP server (`telemachus-email`) and standalone CLI
-- [ ] **Computer Filesystem Tool with Laya Guard**
-  - [ ] Hook into OpenCode execution cycle / MCP proxy
-  - [ ] Implement Tier 0 boundary checks (protect `/System`, `~/.ssh`, etc.)
-  - [ ] Implement Tier 1 Intent-Action alignment pass with Laya
-  - [ ] Replace hard `rm` with macOS `trash`
+- [x] **Computer Filesystem Tool with Laya Guard (Implemented & Tested)**
+  - [x] Hook into OpenCode execution cycle / MCP server (`telemachus`)
+  - [x] Implement Tier 0 boundary checks (protect `/System`, `~/.ssh`, `~/.gnupg`, foreign `.env`)
+  - [x] Implement Tier 1 Intent-Action alignment pass with Laya ModernBERT on MPS
+  - [x] Replace hard `rm` with macOS native `trash` (/usr/bin/trash) and audit logging
+  - [x] Implement token-bounded navigation (`fs_list`, `fs_read`, `fs_search`, `fs_grep`, `fs_stat`)
+  - [x] Implement surgical editing (`fs_edit`) and atomic writes (`fs_write`) with Git auto-checkpoints
+  - [x] Pass comprehensive test suite (25 tests covering boundaries, trash, checkpoints, explorer, editor, MCP)
 - [ ] **Deterministic Finance Tool**
   - [ ] Setup local SQLite / Plain Text Accounting (ledger/beancount) double-entry storage
   - [ ] Build deterministic balance & cashflow calculator
@@ -45,3 +48,4 @@
 - **Decision 3**: Tuning false positives: Abandon naive keyword blocking. Evaluate Intent-Action Alignment with Laya and use macOS Trash as an undoable safety net for deletions.
 - **Decision 4**: Email Multi-Account Strategy: Implemented `config/accounts.yaml` separating non-secret account definitions from private `.env` credentials. Validated Yahoo connection first with read-only IMAP inspections, 2-pass Laya ModernBERT categorization, and safe draft-only generation before adding Gmail accounts.
 - **Decision 5**: Offline SQLite Indexer: Rather than feeding hundreds of emails into Qwen's prompt and blowing the 64k context envelope, emails are crawled in batches into local SQLite with Laya ModernBERT classification tags. Qwen queries the index deterministically in under 50 tokens.
+- **Decision 6**: 4-Tier Guardrail for Filesystem & Shell: Built `telemachus/fs/` integrating Tier 0 zero-cost boundaries (protecting system roots and credentials like `~/.ssh`), Tier 1 Laya ModernBERT 2-pass intent alignment on MPS, Tier 2 macOS native `/usr/bin/trash` soft recovery, and Tier 3 Git auto-checkpointing and elevation confirmation. All 10 tools (`fs_list`, `fs_read`, `fs_search`, `fs_grep`, `fs_stat`, `fs_edit`, `fs_write`, `fs_delete`, `fs_run`, `fs_checkpoint`) are directly wired into the `telemachus` MCP server for OpenCode.

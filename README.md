@@ -87,11 +87,13 @@ Telemachus operates on a **dual-model cooperative architecture** to stay respons
   - Fast local ModernBERT triage on Apple Silicon MPS with 2-pass order de-biasing.
   - Offline SQLite mailbox indexer (`data/email_index.sqlite3`) for querying thousands of historical emails in <50 tokens.
   - Stdio MCP server registered in OpenCode (`telemachus-email`).
-- [ ] **2. Computer Files (with Laya Guard)**:
-  - Enables local file editing, search, and shell execution.
-  - Hard system boundaries protect root (`/System`, `/usr`, `~/.ssh`).
-  - Replaces permanent `rm` with macOS `trash` for reversible file operations.
-  - Laya verifies that destructive actions match explicit user intent to eliminate false-positive alerts.
+- [x] **2. Computer Files (with Laya Guard)**:
+  - Enables local file editing, search, navigation, and shell execution.
+  - Tier 0 deterministic boundaries protect system roots (`/System`, `/usr`, `/Library`, `/etc`) and sensitive credentials (`~/.ssh`, `~/.gnupg`, foreign `.env`).
+  - Tier 1 Laya ModernBERT classifier on Apple Silicon MPS with 2-pass order de-biasing verifies Intent-Action alignment.
+  - Tier 2 soft recovery replaces permanent `rm` with macOS native `/usr/bin/trash` (recoverable via Cmd+Z or Trash bin).
+  - Tier 3 automatic Git checkpointing before modifications, with interactive elevation for ambiguous actions.
+  - 10 new MCP tools registered in OpenCode (`telemachus` MCP server).
 - [ ] **3. Finances**:
   - Double-entry bookkeeping engine (SQLite / Plain Text Accounting) ensures arithmetic calculations are 100% exact.
   - Qwen 3.5 9B focuses on reasoning, budget forecasts, and financial scenario planning.
@@ -172,6 +174,64 @@ python3 tests/test_email_thorough.py
 
 ---
 
+## 📁 Computer Filesystem & Laya Guardrail Subsystem
+
+The filesystem subsystem provides complete, token-efficient workspace navigation and surgical file editing guarded by the 4-tier Laya Guardrail architecture.
+
+### The 4-Tier Guardrail Pipeline
+1. **Tier 0: Deterministic Boundary Shield (Zero Latency)**: Blocks operations attempting to modify core system paths (`/System`, `/usr`, `/etc`) or access sensitive security secrets (`~/.ssh`, `~/.gnupg`, `~/.aws`, foreign `.env` files). Catastrophic shell commands (`mkfs`, `fdisk`, `chmod -R 777 /`) are rejected immediately.
+2. **Tier 1: Intent-Action Alignment (Laya ModernBERT on MPS)**: Laya evaluates proposed mutations against the user's explicit prompt using 2-pass option-order de-biasing to ensure the model doesn't alter files outside what was requested.
+3. **Tier 2: Soft Recovery via macOS Trash**: Any file or directory deletion is routed through macOS native `/usr/bin/trash` instead of permanent `rm` or `unlink`. Every deleted item is recoverable via Cmd+Z or the macOS Trash bin, and logged to `data/trash_audit.jsonl`.
+4. **Tier 3: Git Auto-Checkpointing & Elevation**: Automatically captures a lightweight Git stash checkpoint before editing files in a repository. If Laya detects ambiguity or excessive blast radius, an elevation requirement is returned.
+
+### OpenCode MCP Tools (Filesystem)
+
+| Tool | Parameters | Description |
+| :--- | :--- | :--- |
+| `fs_list` | `path`, `depth`, `show_hidden` | List directory contents with depth controls, file sizes, and noise suppression (omits `.git`, `node_modules`, `.venv`). |
+| `fs_read` | `path`, `start_line`, `end_line` | Read text file with line numbers and windowing. Prevents reading binary files or flooding model context. |
+| `fs_search` | `pattern`, `root_dir`, `max_results` | Find files by name or path pattern across a directory tree. |
+| `fs_grep` | `query`, `root_dir`, `file_pattern`, `is_regex` | Search text or code patterns across files with line number context. |
+| `fs_stat` | `path` | Get file size, octal permissions, and timestamps. |
+| `fs_edit` | `path`, `target_content`, `replacement_content`, `user_intent`, `dry_run` | Surgically replace a unique code block with new content. Protected by LayaGuard with Git checkpointing. |
+| `fs_write` | `path`, `content`, `overwrite`, `user_intent` | Safely write or create a file with overwrite protection and Git checkpointing. |
+| `fs_delete` | `path`, `user_intent`, `confirmed` | Safely delete a file by moving it to macOS Trash (recoverable via Cmd+Z). Protected by LayaGuard. |
+| `fs_run` | `command`, `cwd`, `user_intent`, `timeout` | Execute a shell command vetted by Tier 0 and Tier 1 safety gates. |
+| `fs_checkpoint` | `path`, `message` | Manually capture a lightweight Git stash snapshot before risky tasks. |
+
+### CLI Command Reference
+
+Test and exercise filesystem tools directly:
+
+```bash
+# List directory with depth control
+python3 -m telemachus.fs list . --depth 2
+
+# Read lines with windowing
+python3 -m telemachus.fs read telemachus/fs/models.py --start 1 --end 25
+
+# Locate files by pattern
+python3 -m telemachus.fs search boundaries
+
+# Search text across codebase
+python3 -m telemachus.fs grep GuardVerdict --ext "*.py"
+
+# Evaluate an action against LayaGuard
+python3 -m telemachus.fs check read ~/.ssh/id_rsa
+python3 -m telemachus.fs check execute "chmod -R 777 /"
+
+# Safely delete via macOS Trash
+python3 -m telemachus.fs delete /tmp/test_file.txt --intent "delete test file"
+```
+
+### Running Test Suite
+
+```bash
+python3 -m unittest tests/test_fs_guard.py -v
+```
+
+---
+
 ## 📚 Detailed Documentation
 
 Comprehensive specifications are maintained in the [`docs/`](./docs) directory:
@@ -192,11 +252,11 @@ http://127.0.0.1:1234/v1
 ```
 
 ### 2. Verify OpenCode Configuration & MCP Server
-Verify OpenCode connects to LM Studio and the Telemachus email MCP server:
+Verify OpenCode connects to LM Studio and the Telemachus MCP server:
 ```bash
 opencode mcp list
 ```
-*(Should show `● ✓ telemachus-email connected`).*
+*(Should show `● ✓ telemachus connected`).*
 
 ### 3. Launch Telemachus
 Start OpenCode in this workspace:

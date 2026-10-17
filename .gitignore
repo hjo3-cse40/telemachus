@@ -36,6 +36,8 @@ data/private/
 *.db
 *.db-shm
 *.db-wal
+data/*.jsonl
+*.jsonl
 
 # Email Cache & Mailbox Dumps
 email_cache/

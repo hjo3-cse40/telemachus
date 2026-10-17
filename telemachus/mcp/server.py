@@ -20,6 +20,9 @@ from telemachus.email.draft import create_draft
 from telemachus.email.indexer import index_emails
 from telemachus.email.store import EmailIndexStore
 from telemachus.email.triage import triage_messages
+from telemachus.fs.checkpoint import create_git_checkpoint
+from telemachus.fs.editor import edit_file, run_command, safe_delete, write_file
+from telemachus.fs.explorer import grep_text, list_dir, read_file, search_files, stat_path
 
 PROTOCOL_VERSION = "2024-11-05"
 
@@ -304,6 +307,255 @@ TOOLS_DEFINITIONS = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "fs_list",
+        "description": "Lists directory contents with depth controls, file sizes, and noise suppression (omits .git, node_modules, .venv).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to directory (default: current workspace root '.').",
+                    "default": ".",
+                },
+                "depth": {
+                    "type": "integer",
+                    "description": "Maximum directory traversal depth (default: 2).",
+                    "default": 2,
+                },
+                "show_hidden": {
+                    "type": "boolean",
+                    "description": "Include hidden files (default: false).",
+                    "default": False,
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "fs_read",
+        "description": "Reads lines from a text file with line numbers and windowing. Prevents reading binary files or exceeding context limits.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Relative or absolute path to the file.",
+                },
+                "start_line": {
+                    "type": "integer",
+                    "description": "1-based starting line number (default: 1).",
+                    "default": 1,
+                },
+                "end_line": {
+                    "type": "integer",
+                    "description": "Optional 1-based ending line number.",
+                },
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "fs_search",
+        "description": "Finds files matching a filename or path pattern across a directory tree.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "Filename or substring to search for.",
+                },
+                "root_dir": {
+                    "type": "string",
+                    "description": "Root directory to search inside (default: '.').",
+                    "default": ".",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum number of file matches to return (default: 50).",
+                    "default": 50,
+                },
+            },
+            "required": ["pattern"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "fs_grep",
+        "description": "Searches file contents across a codebase for matching text or regex with file and line number context.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Text query or symbol to search for.",
+                },
+                "root_dir": {
+                    "type": "string",
+                    "description": "Directory root to search (default: '.').",
+                    "default": ".",
+                },
+                "file_pattern": {
+                    "type": "string",
+                    "description": "Optional file extension filter (e.g. '*.py' or '*.ts').",
+                },
+                "is_regex": {
+                    "type": "boolean",
+                    "description": "Whether query is a regular expression (default: false).",
+                    "default": False,
+                },
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "fs_stat",
+        "description": "Gets metadata, size, permissions, and timestamps for a specific file or directory.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to inspect.",
+                },
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "fs_edit",
+        "description": "Surgically replaces a unique code block in a file with new content. Protected by Tier 0-3 LayaGuard with automatic Git checkpointing.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to file to edit.",
+                },
+                "target_content": {
+                    "type": "string",
+                    "description": "Exact contiguous block of code to find and replace.",
+                },
+                "replacement_content": {
+                    "type": "string",
+                    "description": "New replacement content.",
+                },
+                "user_intent": {
+                    "type": "string",
+                    "description": "Stated purpose or user goal for this modification.",
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "If true, validates target match without writing changes.",
+                    "default": False,
+                },
+            },
+            "required": ["path", "target_content", "replacement_content"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "fs_write",
+        "description": "Safely creates a new file or overwrites an existing file. Protected by Tier 0-3 LayaGuard with automatic Git checkpointing.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path of file to write.",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Full file contents.",
+                },
+                "overwrite": {
+                    "type": "boolean",
+                    "description": "Whether to allow overwriting an existing file (default: false).",
+                    "default": False,
+                },
+                "user_intent": {
+                    "type": "string",
+                    "description": "Stated purpose or user goal for writing this file.",
+                },
+            },
+            "required": ["path", "content"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "fs_delete",
+        "description": "Safely deletes a file or directory by moving it to macOS Trash (recoverable via Cmd+Z). Protected by Tier 0-3 LayaGuard.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to file or directory to delete.",
+                },
+                "user_intent": {
+                    "type": "string",
+                    "description": "Stated reason or user prompt requesting the deletion.",
+                },
+                "confirmed": {
+                    "type": "boolean",
+                    "description": "Set to true if user has explicitly confirmed an elevated deletion.",
+                    "default": False,
+                },
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "fs_run",
+        "description": "Executes a shell command after vetting through Tier 0 boundary checks and Tier 1 Laya intent alignment.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "Shell command line to execute.",
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "Working directory (default: active workspace).",
+                },
+                "user_intent": {
+                    "type": "string",
+                    "description": "Stated user prompt justifying this command execution.",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "Execution timeout in seconds (default: 30).",
+                    "default": 30,
+                },
+            },
+            "required": ["command"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "fs_checkpoint",
+        "description": "Creates a manual Git checkpoint / stash snapshot before running risky operations.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path inside the Git repository (default: '.').",
+                    "default": ".",
+                },
+                "message": {
+                    "type": "string",
+                    "description": "Optional label or description for the checkpoint snapshot.",
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
 ]
 
 
@@ -496,6 +748,91 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
             f"- Priority / Attention Breakdown:\n" + "\n".join(attn_lines)
         )
 
+    elif name == "fs_list":
+        path = arguments.get("path", ".")
+        depth = int(arguments.get("depth", 2))
+        show_hidden = bool(arguments.get("show_hidden", False))
+        res = list_dir(path, max_depth=depth, show_hidden=show_hidden)
+        return json.dumps(res, indent=2)
+
+    elif name == "fs_read":
+        path = arguments.get("path", "")
+        start_line = int(arguments.get("start_line", 1))
+        end_line = arguments.get("end_line")
+        if end_line is not None:
+            end_line = int(end_line)
+        res = read_file(path, start_line=start_line, end_line=end_line)
+        if "error" in res:
+            return f"Error: {res['error']}"
+        return (
+            f"File: {res['path']} (lines {res['start_line']}-{res['end_line']} of {res['total_lines']}):\n\n"
+            f"{res['content']}"
+        )
+
+    elif name == "fs_search":
+        pattern = arguments.get("pattern", "")
+        root_dir = arguments.get("root_dir", ".")
+        max_results = int(arguments.get("max_results", 50))
+        res = search_files(pattern, root_dir=root_dir, max_results=max_results)
+        return json.dumps(res, indent=2)
+
+    elif name == "fs_grep":
+        query = arguments.get("query", "")
+        root_dir = arguments.get("root_dir", ".")
+        file_pattern = arguments.get("file_pattern")
+        is_regex = bool(arguments.get("is_regex", False))
+        res = grep_text(query, root_dir=root_dir, file_pattern=file_pattern, is_regex=is_regex)
+        return json.dumps(res, indent=2)
+
+    elif name == "fs_stat":
+        path = arguments.get("path", "")
+        res = stat_path(path)
+        return json.dumps(res, indent=2)
+
+    elif name == "fs_edit":
+        path = arguments.get("path", "")
+        target_content = arguments.get("target_content", "")
+        replacement_content = arguments.get("replacement_content", "")
+        user_intent = arguments.get("user_intent")
+        dry_run = bool(arguments.get("dry_run", False))
+        res = edit_file(
+            path,
+            target_content=target_content,
+            replacement_content=replacement_content,
+            user_intent=user_intent,
+            dry_run=dry_run,
+        )
+        return json.dumps(res, indent=2)
+
+    elif name == "fs_write":
+        path = arguments.get("path", "")
+        content = arguments.get("content", "")
+        overwrite = bool(arguments.get("overwrite", False))
+        user_intent = arguments.get("user_intent")
+        res = write_file(path, content=content, overwrite=overwrite, user_intent=user_intent)
+        return json.dumps(res, indent=2)
+
+    elif name == "fs_delete":
+        path = arguments.get("path", "")
+        user_intent = arguments.get("user_intent")
+        confirmed = bool(arguments.get("confirmed", False))
+        res = safe_delete(path, user_intent=user_intent, confirmed=confirmed)
+        return json.dumps(res, indent=2)
+
+    elif name == "fs_run":
+        command = arguments.get("command", "")
+        cwd = arguments.get("cwd")
+        user_intent = arguments.get("user_intent")
+        timeout = int(arguments.get("timeout", 30))
+        res = run_command(command, cwd=cwd, user_intent=user_intent, timeout=timeout)
+        return json.dumps(res, indent=2)
+
+    elif name == "fs_checkpoint":
+        path = arguments.get("path", ".")
+        message = arguments.get("message")
+        res = create_git_checkpoint(path, message=message)
+        return json.dumps(res.to_dict(), indent=2)
+
     else:
         raise ValueError(f"Unknown tool: {name}")
 
@@ -547,7 +884,7 @@ def run_server() -> None:
                 {
                     "protocolVersion": PROTOCOL_VERSION,
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "telemachus-email", "version": "0.1.0"},
+                    "serverInfo": {"name": "telemachus", "version": "0.2.0"},
                 },
             )
         elif method == "ping":
