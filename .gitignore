@@ -29,6 +29,7 @@ client_secrets.json
 # Private Personal Data & Storage
 private/
 data/private/
+data/synthetic_fs/
 *.sqlite
 *.sqlite3
 *.sqlite3-shm
