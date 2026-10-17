@@ -86,7 +86,7 @@ Telemachus operates on a **dual-model cooperative architecture** to stay respons
   - Safe drafting engine saving RFC822 drafts directly to remote `Drafts` folder (never sends).
   - Fast local ModernBERT triage on Apple Silicon MPS with 2-pass order de-biasing.
   - Offline SQLite mailbox indexer (`data/email_index.sqlite3`) for querying thousands of historical emails in <50 tokens.
-  - Stdio MCP server registered in OpenCode (`telemachus-email`).
+  - Stdio MCP server registered in OpenCode (`telemachus`).
 - [x] **2. Computer Files (with Laya Guard)**:
   - Enables local file editing, search, navigation, and shell execution.
   - Tier 0 deterministic boundaries protect system roots (`/System`, `/usr`, `/Library`, `/etc`) and sensitive credentials (`~/.ssh`, `~/.gnupg`, foreign `.env`).
@@ -257,6 +257,21 @@ Verify OpenCode connects to LM Studio and the Telemachus MCP server:
 opencode mcp list
 ```
 *(Should show `● ✓ telemachus connected`).*
+
+Ensure `~/.config/opencode/opencode.jsonc` contains the MCP definition:
+```json
+{
+  "mcp": {
+    "telemachus": {
+      "type": "local",
+      "command": ["/opt/homebrew/bin/python3", "-m", "telemachus.mcp"],
+      "environment": {
+        "PYTHONPATH": "/path/to/telemachus"
+      }
+    }
+  }
+}
+```
 
 ### 3. Launch Telemachus
 Start OpenCode in this workspace:
