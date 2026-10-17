@@ -1,0 +1,73 @@
+# Telemachus: Multi-Account Mailbox Configuration
+# Accounts define the connection parameters; secrets are read from .env
+
+accounts:
+  # ----------------------------------------------------------------------------
+  # 1. Yahoo Mail (Initial Test Account - Enabled)
+  # ----------------------------------------------------------------------------
+  - id: "yahoo"
+    name: "Yahoo Mail"
+    provider: "yahoo"
+    email_env_var: "TELEMACHUS_MAIL_YAHOO_USER"
+    pass_env_var: "TELEMACHUS_MAIL_YAHOO_PASS"
+    enabled: true
+    folders:
+      inbox: "INBOX"
+      drafts: "Drafts"
+    poll_limit: 10
+
+  # ----------------------------------------------------------------------------
+  # 2. Gmail Account 1 (Placeholder - Change enabled to true once credentials added)
+  # ----------------------------------------------------------------------------
+  - id: "gmail_1"
+    name: "Gmail (Personal)"
+    provider: "gmail"
+    email_env_var: "TELEMACHUS_MAIL_GMAIL1_USER"
+    pass_env_var: "TELEMACHUS_MAIL_GMAIL1_PASS"
+    enabled: false
+    folders:
+      inbox: "INBOX"
+      drafts: "[Gmail]/Drafts"
+    poll_limit: 10
+
+  # ----------------------------------------------------------------------------
+  # 3. Gmail Account 2
+  # ----------------------------------------------------------------------------
+  - id: "gmail_2"
+    name: "Gmail 2"
+    provider: "gmail"
+    email_env_var: "TELEMACHUS_MAIL_GMAIL2_USER"
+    pass_env_var: "TELEMACHUS_MAIL_GMAIL2_PASS"
+    enabled: false
+    folders:
+      inbox: "INBOX"
+      drafts: "[Gmail]/Drafts"
+    poll_limit: 10
+
+  # ----------------------------------------------------------------------------
+  # 4. Gmail Account 3
+  # ----------------------------------------------------------------------------
+  - id: "gmail_3"
+    name: "Gmail 3"
+    provider: "gmail"
+    email_env_var: "TELEMACHUS_MAIL_GMAIL3_USER"
+    pass_env_var: "TELEMACHUS_MAIL_GMAIL3_PASS"
+    enabled: false
+    folders:
+      inbox: "INBOX"
+      drafts: "[Gmail]/Drafts"
+    poll_limit: 10
+
+  # ----------------------------------------------------------------------------
+  # 5. Gmail Account 4
+  # ----------------------------------------------------------------------------
+  - id: "gmail_4"
+    name: "Gmail 4"
+    provider: "gmail"
+    email_env_var: "TELEMACHUS_MAIL_GMAIL4_USER"
+    pass_env_var: "TELEMACHUS_MAIL_GMAIL4_PASS"
+    enabled: false
+    folders:
+      inbox: "INBOX"
+      drafts: "[Gmail]/Drafts"
+    poll_limit: 10
