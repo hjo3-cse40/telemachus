@@ -15,10 +15,11 @@
 ## Tooling Implementation Checklist
 
 ### Core Domains
-- [ ] **Email Agent Tool**
-  - [ ] Connect to local Mail / IMAP with app-specific password or Apple Mail bridge
-  - [ ] Adapt Laya classifier from `email_laya_review.py` for inbox triage & spam scoring
-  - [ ] Implement safe drafting tool (`Drafts` folder output, no auto-send)
+- [x] **Email Agent Tool (Initial Yahoo Verified, 4 Gmails Ready)**
+  - [x] Connect to local Mail / IMAP with app-specific password via TLS
+  - [x] Multi-account architecture (`config/accounts.yaml` + private `.env`)
+  - [x] Adapt Laya classifier (`convaiinnovations/laya` ModernBERT on MPS) for inbox triage & category scoring
+  - [x] Implement safe drafting tool (`Drafts` folder output, no auto-send)
 - [ ] **Computer Filesystem Tool with Laya Guard**
   - [ ] Hook into OpenCode execution cycle / MCP proxy
   - [ ] Implement Tier 0 boundary checks (protect `/System`, `~/.ssh`, etc.)
@@ -40,3 +41,4 @@
 - **Decision 1**: Chose OpenCode CLI as the primary harness instead of continuing monolithic Odysseus development. OpenCode provides an established TUI and standard MCP support while keeping code execution isolated.
 - **Decision 2**: Dual-Model approach: Do not burden Qwen 3.5 9B with routing or multi-tool schema overhead. Use Laya (50ms ModernBERT) to filter schemas *before* Qwen's turn, and verify safety *before* execution.
 - **Decision 3**: Tuning false positives: Abandon naive keyword blocking. Evaluate Intent-Action Alignment with Laya and use macOS Trash as an undoable safety net for deletions.
+- **Decision 4**: Email Multi-Account Strategy: Implemented `config/accounts.yaml` separating non-secret account definitions from private `.env` credentials. Validated Yahoo connection first with read-only IMAP inspections, 2-pass Laya ModernBERT categorization, and safe draft-only generation before adding Gmail accounts.
