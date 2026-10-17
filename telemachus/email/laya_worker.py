@@ -18,6 +18,8 @@ os.environ["HF_HUB_OFFLINE"] = "1"
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
 os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
 os.environ["HF_HUB_DISABLE_IMPLICIT_TOKEN"] = "1"
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+os.environ["TQDM_DISABLE"] = "1"
 os.environ["USE_TF"] = "0"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 

@@ -6,9 +6,8 @@ import os
 from pathlib import Path
 import re
 import subprocess
-from typing import List, Optional
+from typing import Callable, List, Optional
 
-from telemachus.config.loader import find_project_root, load_env
 from telemachus.email.models import EmailMessage, TriageClassification
 
 # High-precision deterministic patterns that safeguard critical records
@@ -33,6 +32,7 @@ def run_laya_worker_batch(
     if not messages:
         return []
 
+    from telemachus.config.loader import load_env
     load_env()
     python_path = python_bin or os.environ.get(
         "LAYA_PYTHON", str(Path.home() / "laya/.venv/bin/python")
@@ -80,14 +80,30 @@ def run_laya_worker_batch(
 
 
 def triage_messages(
-    messages: List[EmailMessage], python_bin: Optional[str] = None
+    messages: List[EmailMessage],
+    python_bin: Optional[str] = None,
+    predictor: Optional[Callable[[List[dict]], List[dict]]] = None,
 ) -> List[TriageClassification]:
     """Triages a list of EmailMessage objects using Laya + deterministic guardrails."""
     if not messages:
         return []
 
-    # Get Laya predictions
-    laya_results = run_laya_worker_batch(messages, python_bin=python_bin)
+    if predictor:
+        records = [
+            {
+                "account_id": m.account_id,
+                "uid": m.uid,
+                "from": m.sender,
+                "subject": m.subject,
+                "body": m.body_text[:1500],
+                "attachments": [a["filename"] for a in m.attachments],
+            }
+            for m in messages
+        ]
+        laya_results = predictor(records)
+    else:
+        laya_results = run_laya_worker_batch(messages, python_bin=python_bin)
+
     laya_by_uid = {r["uid"]: r for r in laya_results if "uid" in r}
 
     triaged: List[TriageClassification] = []
