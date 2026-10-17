@@ -80,10 +80,13 @@ Telemachus operates on a **dual-model cooperative architecture** to stay respons
 
 ## 🛠️ The 4 Core Local Tools
 
-- [ ] **1. Emails**:
-  - Connects locally to your mailbox (Apple Mail bridge / direct IMAP).
-  - Uses Laya triage to classify spam, newsletters, and priority threads.
-  - Automatically drafts replies directly to your `Drafts` folder for review.
+- [x] **1. Emails (Shipped & Available in OpenCode MCP)**:
+  - Multi-account connection (1 active Yahoo, 4 Gmail placeholders ready) over direct TLS IMAP.
+  - Safe, non-destructive read-only fetching (`BODY.PEEK`) with strict 16KB per-email caps to protect model context.
+  - Safe drafting engine saving RFC822 drafts directly to remote `Drafts` folder (never sends).
+  - Fast local ModernBERT triage on Apple Silicon MPS with 2-pass order de-biasing.
+  - Offline SQLite mailbox indexer (`data/email_index.sqlite3`) for querying thousands of historical emails in <50 tokens.
+  - Stdio MCP server registered in OpenCode (`telemachus-email`).
 - [ ] **2. Computer Files (with Laya Guard)**:
   - Enables local file editing, search, and shell execution.
   - Hard system boundaries protect root (`/System`, `/usr`, `~/.ssh`).
@@ -95,6 +98,77 @@ Telemachus operates on a **dual-model cooperative architecture** to stay respons
 - [ ] **4. Anti-Bot Web Search**:
   - Connects via stealth browser / Chrome DevTools Protocol to bypass Cloudflare/Akamai bot blocking.
   - Uses `trafilatura` to distill clean Markdown, avoiding token bloat in the 64k context window.
+
+---
+
+## 📬 Email Subsystem & MCP Integration
+
+The email subsystem is fully operational and exposed both via CLI and as a native MCP server for OpenCode.
+
+### Architecture Highlights
+* **Configuration & Credential Isolation**: Accounts are defined in [`config/accounts.yaml`](./config/accounts.yaml), while credentials live strictly in a git-ignored `.env` file (see [`.env.example`](./.env.example)).
+* **Non-Destructive IMAP**: Always uses `BODY.PEEK[]` and read-only folder inspection so unread flags are preserved.
+* **Safe Drafting**: Writes drafts directly to the remote `Drafts` folder; never makes outbound SMTP connections.
+* **Laya MPS ModernBERT Triage**: Classifies emails into `important_documents`, `transactional`, `newsletter_marketing`, and `suspicious_spam`.
+* **Offline SQLite Indexer**: Crawls and stores historical emails into local SQLite (`data/email_index.sqlite3`) so Qwen can query thousands of emails deterministically via SQL without flooding the 64k context window.
+
+### OpenCode MCP Tools
+
+When using OpenCode (`opencode`), the `telemachus-email` MCP server provides:
+
+| Tool | Purpose |
+| :--- | :--- |
+| `email_status` | Check mailbox connection and unread counts across all accounts. |
+| `email_list` | List recent email headers in read-only mode without touching read flags. |
+| `email_show` | Read full cleaned text and attachment list for a specific message UID. |
+| `email_triage` | Classify recent unread emails with Laya on MPS and suggest priority. |
+| `email_draft` | Save an email draft into your remote `Drafts` folder for human review. |
+| `email_index` | Crawl and cache unindexed emails into local SQLite with Laya tags. |
+| `email_search_index` | Instantly search local SQLite index by keyword, sender, category, or priority. |
+| `email_index_stats` | View high-level statistics and category breakdown of all indexed emails. |
+
+### CLI Command Reference
+
+You can also run all email operations directly from terminal:
+
+```bash
+# Check mailbox status and connections
+python3 -m telemachus.email status
+
+# List recent emails (read-only)
+python3 -m telemachus.email list --limit 10
+python3 -m telemachus.email list --limit 10 --unread
+
+# Read full content of a specific email
+python3 -m telemachus.email show <UID>
+
+# Run Laya AI triage on recent emails
+python3 -m telemachus.email triage --limit 10
+
+# Safely save a draft to your Drafts folder
+python3 -m telemachus.email draft \
+  --to "user@example.com" \
+  --subject "Draft Subject" \
+  --body "Draft body content."
+
+# Index the next 50 unindexed emails into local SQLite
+python3 -m telemachus.email index --max 50
+
+# Search locally indexed emails in SQLite
+python3 -m telemachus.email search -q "PayPal"
+python3 -m telemachus.email search -c transactional
+
+# View index statistics
+python3 -m telemachus.email stats
+```
+
+### Running the Test Suite
+
+A comprehensive 8-step test suite validates connectivity, read-only guarantees, draft creation/cleanup, Laya classification, and MCP JSON-RPC protocol:
+
+```bash
+python3 tests/test_email_thorough.py
+```
 
 ---
 
@@ -117,12 +191,12 @@ Ensure LM Studio is serving `qwen/qwen3.5-9b` at:
 http://127.0.0.1:1234/v1
 ```
 
-### 2. Verify OpenCode Configuration
-Your configuration is located at `~/.config/opencode/opencode.jsonc`:
+### 2. Verify OpenCode Configuration & MCP Server
+Verify OpenCode connects to LM Studio and the Telemachus email MCP server:
 ```bash
-opencode --version
-opencode models lmstudio
+opencode mcp list
 ```
+*(Should show `● ✓ telemachus-email connected`).*
 
 ### 3. Launch Telemachus
 Start OpenCode in this workspace:
