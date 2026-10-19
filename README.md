@@ -345,8 +345,8 @@ Ensure `~/.config/opencode/opencode.jsonc` contains:
 ```
 *(The Ingress Proxy starts automatically whenever OpenCode connects to Telemachus MCP).*
 
-### 3. Launch Telemachus
-Start OpenCode in this workspace:
+### 3. Launch Telemachus (CLI Harness Only)
+Start OpenCode directly in this workspace:
 ```bash
 opencode
 ```
@@ -354,3 +354,32 @@ To resume the previous session:
 ```bash
 opencode -c
 ```
+
+---
+
+## 🎛️ Telemachus Terminal Cockpit (v1)
+
+Launch the unified Tokyo Night split cockpit pairing the visual operational dashboard with the OpenCode CLI harness:
+
+```bash
+# Launch the full split tmux cockpit (interactive dashboard + OpenCode harness)
+./bin/telemachus-cockpit
+
+# Or via Python module:
+python3 -m telemachus.cockpit
+```
+
+### Cockpit Controls & Features
+* **Mouse & Trackpad**: Full mouse mode enabled (`set -g mouse on`). Click any email row to view its preview snippet, drag borders to resize panes, and scroll chat histories with trackpad momentum.
+* **Top Telemetry Header**: Real-time monitor displaying active model (`qwen/qwen3.5-9b`), context budget (`14,820 / 65,536 tokens`), unified RAM breakdown (`11.2 / 18.0 GB - MLX 5.8G · Laya 0.8G · OS 4.6G`), and generation speed (`41.5 t/s`).
+* **Interactive Views**:
+  - `[1] Daily Ops`: Split view with the Email Triage Queue on top, and Laya Safety Guard + Odysseus Continual Memory feed on bottom.
+  - `[2] Memory Vault`: Browse and inspect the 59+ categorized memories across Privacy Tiers (`Private (0700)`, `Project`, `Public`).
+  - `[3] Safety Guard`: Deep inspection of protected path shields, trash audit history, and git auto-checkpoints.
+* **Hotkeys**:
+  - `[j] / [k]` or `[↑] / [↓]`: Navigate table rows.
+  - `[1] / [2] / [3]`: Switch view tabs.
+  - `[t]`: Dispatch an email triage prompt turn directly to the adjacent OpenCode pane.
+  - `[r]`: Refresh data from local stores.
+  - `[q]`: Quit cockpit.
+
