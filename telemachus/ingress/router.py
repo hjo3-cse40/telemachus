@@ -189,14 +189,14 @@ class IngressToolRouter:
         # Step 4: Domain-constrained top-K selection
         selected_names = set()
         if domain == "EMAIL":
-            # Prioritize email tools
+            # Prioritize email tools (matching email_ anywhere in the name for MCP prefixes)
             for name, score in sorted_tools:
-                if name.startswith("email_") and len(selected_names) < max_tools:
+                if "email_" in name.lower() and len(selected_names) < max_tools:
                     selected_names.add(name)
         elif domain == "FILESYSTEM":
-            # Prioritize fs tools
+            # Prioritize fs tools (matching fs_ anywhere in the name for MCP prefixes)
             for name, score in sorted_tools:
-                if name.startswith("fs_") and len(selected_names) < max_tools:
+                if "fs_" in name.lower() and len(selected_names) < max_tools:
                     selected_names.add(name)
         else:
             # HYBRID or GENERAL with high similarity
@@ -204,12 +204,18 @@ class IngressToolRouter:
                 if score >= min_similarity and len(selected_names) < max_tools:
                     selected_names.add(name)
 
-        # If domain heuristic was confident but semantic score fell slightly short, ensure top 2 domain tools are present
+        # If domain heuristic was confident but semantic score fell slightly short, ensure domain tools are present
         if not selected_names:
             if domain == "EMAIL":
-                selected_names = {"email_status", "email_list", "email_search_index"}
+                selected_names = {
+                    (t.get("name") or t.get("function", {}).get("name", ""))
+                    for t in tools if "email_" in (t.get("name") or t.get("function", {}).get("name", "")).lower()
+                }
             elif domain == "FILESYSTEM":
-                selected_names = {"fs_list", "fs_read", "fs_search"}
+                selected_names = {
+                    (t.get("name") or t.get("function", {}).get("name", ""))
+                    for t in tools if "fs_" in (t.get("name") or t.get("function", {}).get("name", "")).lower()
+                }
             else:
                 # Default to top 2 semantic matches
                 selected_names = {name for name, _ in sorted_tools[:2]}

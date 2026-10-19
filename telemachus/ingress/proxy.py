@@ -102,16 +102,25 @@ class IngressProxyHandler(http.server.BaseHTTPRequestHandler):
             conn.close()
 
     def _extract_last_user_prompt(self, messages: List[Dict[str, Any]]) -> str:
+        user_texts = []
         for m in reversed(messages):
             if m.get("role") == "user":
                 content = m.get("content", "")
-                if isinstance(content, str):
-                    return content
+                if isinstance(content, str) and content.strip():
+                    user_texts.append(content.strip())
                 elif isinstance(content, list):
-                    # Multi-part content
                     texts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
-                    return " ".join(texts)
-        return ""
+                    combined = " ".join(texts).strip()
+                    if combined:
+                        user_texts.append(combined)
+            if len(user_texts) >= 2:
+                break
+        if not user_texts:
+            return ""
+        # If the latest message is a brief follow-up (<45 chars), merge with preceding message for domain context
+        if len(user_texts[0]) < 45 and len(user_texts) > 1:
+            return f"{user_texts[1]} {user_texts[0]}"
+        return user_texts[0]
 
     def _handle_chat_completions(self) -> None:
         content_len = int(self.headers.get("Content-Length", 0))
