@@ -30,6 +30,7 @@ logger = logging.getLogger("telemachus.ingress")
 class IngressProxyHandler(http.server.BaseHTTPRequestHandler):
     """Handles incoming OpenAI-compatible API calls, prunes tools, and proxies upstream."""
 
+    protocol_version = "HTTP/1.1"
     router: IngressToolRouter = IngressToolRouter()
     upstream_host = "127.0.0.1"
     upstream_port = 1234
@@ -47,6 +48,42 @@ class IngressProxyHandler(http.server.BaseHTTPRequestHandler):
         else:
             self._proxy_passthrough("POST")
 
+    def _stream_response(self, resp: http.client.HTTPResponse) -> None:
+        """Streams upstream response with correct HTTP/1.1 chunked framing if needed."""
+        is_chunked = resp.getheader("Transfer-Encoding", "").lower() == "chunked"
+        self.send_response(resp.status, resp.reason)
+
+        for k, v in resp.getheaders():
+            # Skip hop-by-hop and framing headers that we manage explicitly
+            if k.lower() in ("transfer-encoding", "content-length", "connection", "server"):
+                continue
+            self.send_header(k, v)
+
+        if is_chunked:
+            self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("Connection", "keep-alive")
+        else:
+            cl = resp.getheader("Content-Length")
+            if cl:
+                self.send_header("Content-Length", cl)
+            self.send_header("Connection", "close")
+
+        self.end_headers()
+
+        while True:
+            chunk = resp.read(4096)
+            if not chunk:
+                break
+            if is_chunked:
+                self.wfile.write(f"{len(chunk):X}\r\n".encode("ascii") + chunk + b"\r\n")
+            else:
+                self.wfile.write(chunk)
+            self.wfile.flush()
+
+        if is_chunked:
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+
     def _proxy_passthrough(self, method: str) -> None:
         """Pipes non-chat requests (like /v1/models or /v1/embeddings) directly upstream."""
         content_len = int(self.headers.get("Content-Length", 0))
@@ -54,22 +91,11 @@ class IngressProxyHandler(http.server.BaseHTTPRequestHandler):
 
         conn = http.client.HTTPConnection(self.upstream_host, self.upstream_port, timeout=30)
         try:
-            headers = {k: v for k, v in self.headers.items() if k.lower() != "host"}
+            headers = {k: v for k, v in self.headers.items() if k.lower() not in ("host", "connection")}
             headers["Host"] = f"{self.upstream_host}:{self.upstream_port}"
             conn.request(method, self.path, body=body, headers=headers)
             resp = conn.getresponse()
-
-            self.send_response(resp.status, resp.reason)
-            for k, v in resp.getheaders():
-                self.send_header(k, v)
-            self.end_headers()
-
-            while True:
-                chunk = resp.read(8192)
-                if not chunk:
-                    break
-                self.wfile.write(chunk)
-            self.wfile.flush()
+            self._stream_response(resp)
         except Exception as e:
             self.send_error(502, f"Upstream LM Studio connection error: {e}")
         finally:
@@ -109,7 +135,6 @@ class IngressProxyHandler(http.server.BaseHTTPRequestHandler):
             prune_duration_ms = (time.perf_counter() - t0) * 1000
 
             if not pruned_tools:
-                # Remove tools field so model doesn't generate empty tool calls
                 payload.pop("tools", None)
                 payload.pop("tool_choice", None)
                 logger.info(
@@ -130,7 +155,7 @@ class IngressProxyHandler(http.server.BaseHTTPRequestHandler):
         # Forward upstream
         conn = http.client.HTTPConnection(self.upstream_host, self.upstream_port, timeout=120)
         try:
-            headers = {k: v for k, v in self.headers.items() if k.lower() not in ["host", "content-length"]}
+            headers = {k: v for k, v in self.headers.items() if k.lower() not in ("host", "content-length", "connection")}
             headers["Host"] = f"{self.upstream_host}:{self.upstream_port}"
             headers["Content-Length"] = str(len(modified_body))
             if pruning_meta:
@@ -139,19 +164,7 @@ class IngressProxyHandler(http.server.BaseHTTPRequestHandler):
 
             conn.request("POST", self.path, body=modified_body, headers=headers)
             resp = conn.getresponse()
-
-            self.send_response(resp.status, resp.reason)
-            for k, v in resp.getheaders():
-                self.send_header(k, v)
-            self.end_headers()
-
-            # Stream response back (supporting both SSE stream and full JSON)
-            while True:
-                chunk = resp.read(4096)
-                if not chunk:
-                    break
-                self.wfile.write(chunk)
-                self.wfile.flush()
+            self._stream_response(resp)
         except Exception as e:
             self.send_error(502, f"Upstream LM Studio communication error: {e}")
         finally:
