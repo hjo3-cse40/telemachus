@@ -57,9 +57,10 @@ Telemachus operates on a **dual-model cooperative architecture** to stay respons
 ```
 
 1. **Harness & Orchestration**: [OpenCode Interpreter](https://opencode.ai) (`opencode` CLI) manages sessions, user interactions, and MCP tool execution.
-2. **Generative Intelligence**: `qwen/qwen3.5-9b` (4-bit MLX, 64k context window) running locally via **LM Studio** (`http://127.0.0.1:1234/v1`).
-3. **Decision & Safety Coprocessor**: **Laya** (`convaiinnovations/laya`, ~421M ModernBERT-based classifier/router on MPS). Executes in ~50–100 ms to prune tool schemas before inference and verify system safety before execution.
-4. **Retrieval**: `nomic-embed` for semantic indexing and fast context lookups.
+2. **Ingress Tool Pruning Proxy**: Automated streaming proxy (`http://127.0.0.1:1235/v1`) powered by Laya domain routing and `nomic-embed-text-v1.5@q8_0`. Automatically prunes 18+ MCP tool schemas down to 3–5 relevant tools (or 0 for general queries), cutting prompt token overhead by 70–99% per turn.
+3. **Generative Intelligence**: `qwen/qwen3.5-9b` (4-bit MLX, 64k context window) running locally via **LM Studio** (`http://127.0.0.1:1234/v1`).
+4. **Decision & Safety Coprocessor**: **Laya** (`convaiinnovations/laya`, ~421M ModernBERT-based classifier/router on MPS). Executes in ~50–100 ms to evaluate Intent-Action alignment and enforce blast-radius safety.
+5. **Retrieval**: `nomic-embed-text-v1.5@q8_0` (768-dim GGUF) for semantic indexing, vector lookups, and fast tool cosine similarity.
 
 ---
 
@@ -232,6 +233,51 @@ python3 -m unittest tests/test_fs_guard.py -v
 
 ---
 
+## 📊 Empirical Benchmarks & Token Optimization
+
+Telemachus includes synthetic datasets and rigorous benchmarks to stress-test context memory limits, needle-in-the-haystack (NIAH) retrieval, and prompt token efficiency on Apple Silicon unified memory.
+
+### 1. Ingress Tool Pruning Benchmark (Before vs. After)
+
+Without pruning, passing all 18 MCP tool definitions wastes ~3,000 tokens on every turn. The Ingress Proxy intercepts calls on `http://127.0.0.1:1235/v1`, using Laya and Nomic Embed to dynamically prune the active toolset:
+
+| Scenario / Prompt Turn | Unpruned (Before) | Pruned via Ingress (After) | Tokens Saved | Context Reduction | Selected Tools |
+| :--- | :---: | :---: | :---: | :---: | :--- |
+| **Email Turn**<br>_`"Check my mailbox status and list unread emails"`_ | 3,030 tokens | **801 tokens** | **-2,229 tokens** | **-73.6%** | `email_status`, `email_list`, `email_show`, `email_draft` |
+| **Filesystem Turn**<br>_`"Search for files named README or config"`_ | 3,032 tokens | **847 tokens** | **-2,185 tokens** | **-72.1%** | `fs_list`, `fs_read`, `fs_search`, `fs_grep`, `fs_stat` |
+| **General Turn**<br>_`"Explain the difference between TCP and UDP"`_ | 3,032 tokens | **22 tokens** | **-3,010 tokens** | **-99.3%** | *(All 18 tools dropped)* |
+
+* **Session Impact**: In real operational testing across 1,000+ indexed emails and deep 15-level folder traversals, a complete multi-step session consumed only **14,000 tokens total (23% of the 64k window)**, leaving 77% of context headroom free.
+
+### 2. Synthetic Test Datasets
+
+We provide two isolated synthetic sandboxes for benchmarking:
+* **Synthetic Filesystem (`data/synthetic_fs/`)**: 527 files spanning wide catalogs (500 items), deep 15-level directories (`odysseus_plan.txt`), dense 4,000-line haystacks with 5 depth canaries, and edge cases (Latin-1, binary nulls, zero-byte).
+* **Synthetic Mailbox (`data/synthetic_email_index.sqlite3`)**: 1,000 categorized emails (transactional, documents, newsletters, spam) with injected canary references (e.g., flight booking `NZ742-AUCKLAND-2026-CONFIRMED`).
+
+### 3. Needle-in-the-Haystack (NIAH) Retrieval
+* **Intra-File Retrieval**: In a 4,000-line document, `read_file` safely truncates at 300 lines / 64 KB to protect context; `fs_grep` retrieves needles at 0%, 25%, 50%, 75%, and 100% depth in <0.02s.
+* **Deep Hierarchy Traversal**: Locates secrets buried 15 levels down in 17ms via `fs_search` + `fs_read`.
+* **Offline Mailbox Search**: Searches across 1,000+ indexed emails in 5ms using SQLite FTS, returning single matching headers in <60 tokens instead of flooding context with 73,000 brute-force tokens.
+
+### 4. Running the Benchmark Suite
+
+```bash
+# Run all filesystem limits and NIAH tests
+PYTHONPATH=. python3 -m unittest tests/benchmarks/test_fs_limits.py
+
+# Run email context scaling and search benchmarks
+PYTHONPATH=. python3 -m unittest tests/benchmarks/test_email_limits.py
+
+# Run Nomic embedding diagnostics
+PYTHONPATH=. python3 -m unittest tests/benchmarks/test_nomic_embed.py
+
+# Run end-to-end Ingress Before vs. After comparison
+PYTHONPATH=. python3 -m unittest tests/benchmarks/test_ingress_benchmark.py
+```
+
+---
+
 ## 📚 Detailed Documentation
 
 Comprehensive specifications are maintained in the [`docs/`](./docs) directory:
@@ -251,16 +297,17 @@ Ensure LM Studio is serving `qwen/qwen3.5-9b` at:
 http://127.0.0.1:1234/v1
 ```
 
-### 2. Verify OpenCode Configuration & MCP Server
-Verify OpenCode connects to LM Studio and the Telemachus MCP server:
-```bash
-opencode mcp list
-```
-*(Should show `● ✓ telemachus connected`).*
+### 2. Verify OpenCode Configuration & Ingress Proxy
+OpenCode connects to Telemachus through the automated Ingress Tool Pruning Proxy on port `1235` (which forwards to LM Studio on port `1234`).
 
-Ensure `~/.config/opencode/opencode.jsonc` contains the MCP definition:
-```json
+Ensure `~/.config/opencode/opencode.jsonc` contains:
+```jsonc
 {
+  "provider": {
+    "lmstudio": {
+      "options": { "baseURL": "http://127.0.0.1:1235/v1" }
+    }
+  },
   "mcp": {
     "telemachus": {
       "type": "local",
@@ -272,6 +319,7 @@ Ensure `~/.config/opencode/opencode.jsonc` contains the MCP definition:
   }
 }
 ```
+*(The Ingress Proxy starts automatically whenever OpenCode connects to Telemachus MCP).*
 
 ### 3. Launch Telemachus
 Start OpenCode in this workspace:
