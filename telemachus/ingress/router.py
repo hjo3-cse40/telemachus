@@ -26,6 +26,11 @@ FS_KEYWORDS = {
     "search", "delete", "trash", "remove", "cat", "stat", "ls", "tree", "command", "bash"
 }
 
+MEMORY_KEYWORDS = {
+    "memory", "remember", "recall", "fact", "preference", "preferences", "schedule",
+    "class", "classes", "profile", "identity", "know about me", "save memory"
+}
+
 
 def cosine_similarity(v1: List[float], v2: List[float]) -> float:
     dot = sum(a * b for a, b in zip(v1, v2))
@@ -125,14 +130,24 @@ class IngressToolRouter:
             re.search(r"\b(email|emails|inbox|mail|draft|unread|mailbox|triage|sender|recipient)\b", p_lower)
         )
 
-        if is_general_pattern and not (has_explicit_fs or has_email):
+        has_memory = bool(
+            re.search(r"\b(memory|remember|recall|fact|facts|preference|preferences|schedule|class|classes|profile|identity)\b", p_lower)
+        )
+
+        if is_general_pattern and not (has_explicit_fs or has_email or has_memory):
             return "GENERAL"
 
-        if has_email and not has_explicit_fs:
-            return "EMAIL"
-        if has_explicit_fs and not has_email:
-            return "FILESYSTEM"
-        if has_email and has_explicit_fs:
+        domains_detected = []
+        if has_email:
+            domains_detected.append("EMAIL")
+        if has_explicit_fs:
+            domains_detected.append("FILESYSTEM")
+        if has_memory:
+            domains_detected.append("MEMORY")
+
+        if len(domains_detected) == 1:
+            return domains_detected[0]
+        elif len(domains_detected) > 1:
             return "HYBRID"
         return "GENERAL"
 
@@ -159,6 +174,9 @@ class IngressToolRouter:
                 return filtered, {"domain": domain, "strategy": "heuristic_fallback"}
             elif domain == "FILESYSTEM":
                 filtered = [t for t in tools if "fs_" in (t.get("name") or t.get("function", {}).get("name", "")).lower()]
+                return filtered, {"domain": domain, "strategy": "heuristic_fallback"}
+            elif domain == "MEMORY":
+                filtered = [t for t in tools if "memory_" in (t.get("name") or t.get("function", {}).get("name", "")).lower()]
                 return filtered, {"domain": domain, "strategy": "heuristic_fallback"}
             return tools, {"domain": domain, "strategy": "unpruned_fallback"}
 
@@ -207,6 +225,15 @@ class IngressToolRouter:
             for name, score in sorted_tools:
                 if "fs_" in name.lower() and len(selected_names) < max_tools:
                     selected_names.add(name)
+        elif domain == "MEMORY":
+            # Always ensure memory_search is included
+            for name, _ in sorted_tools:
+                if "memory_search" in name.lower():
+                    selected_names.add(name)
+            # Add top matching memory tools up to max_tools
+            for name, score in sorted_tools:
+                if "memory_" in name.lower() and len(selected_names) < max_tools:
+                    selected_names.add(name)
         else:
             # HYBRID or GENERAL with high similarity
             for name, score in sorted_tools:
@@ -224,6 +251,11 @@ class IngressToolRouter:
                 selected_names = {
                     (t.get("name") or t.get("function", {}).get("name", ""))
                     for t in tools if "fs_" in (t.get("name") or t.get("function", {}).get("name", "")).lower()
+                }
+            elif domain == "MEMORY":
+                selected_names = {
+                    (t.get("name") or t.get("function", {}).get("name", ""))
+                    for t in tools if "memory_" in (t.get("name") or t.get("function", {}).get("name", "")).lower()
                 }
             else:
                 # Default to top 2 semantic matches

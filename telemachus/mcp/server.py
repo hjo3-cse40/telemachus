@@ -24,8 +24,10 @@ from telemachus.fs.checkpoint import create_git_checkpoint
 from telemachus.fs.editor import edit_file, run_command, safe_delete, write_file
 from telemachus.fs.explorer import grep_text, list_dir, read_file, search_files, stat_path
 from telemachus.ingress.proxy import start_ingress_proxy_background
+from telemachus.memory import MemoryCache, MemoryEntry, MemoryVault, PrivacyTier
 
 PROTOCOL_VERSION = "2024-11-05"
+
 
 
 class WarmLayaBridge:
@@ -557,6 +559,60 @@ TOOLS_DEFINITIONS = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "memory_search",
+        "description": "Searches the unified local memory vault (~/.memory) for personal facts, preferences, school schedule, and project states.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Text query or keyword to search in memory.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max results to return (default: 5).",
+                    "default": 5,
+                },
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "memory_save",
+        "description": "Saves an atomic fact, preference, or project update into the local memory vault (~/.memory).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "The atomic fact or preference text to record.",
+                },
+                "category": {
+                    "type": "string",
+                    "description": "Category label (e.g. 'fact', 'preference', 'project', 'finance').",
+                    "default": "fact",
+                },
+                "tier": {
+                    "type": "string",
+                    "description": "Privacy tier: 'tier_2_private' (default, local only) or 'tier_0_public' (cloud-safe).",
+                    "default": "tier_2_private",
+                },
+            },
+            "required": ["text"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "memory_status",
+        "description": "Returns current statistics and counts from the unified memory vault (~/.memory).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    },
 ]
 
 
@@ -833,6 +889,36 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
         message = arguments.get("message")
         res = create_git_checkpoint(path, message=message)
         return json.dumps(res.to_dict(), indent=2)
+
+    elif name == "memory_search":
+        query = arguments.get("query", "")
+        limit = int(arguments.get("limit", 5))
+        vault = MemoryVault()
+        cache = MemoryCache(vault=vault)
+        results = cache.search(query, limit=limit)
+        return json.dumps([r.to_dict() for r in results], indent=2)
+
+    elif name == "memory_save":
+        text = arguments.get("text", "")
+        category = arguments.get("category", "fact")
+        tier_str = arguments.get("tier", "tier_2_private")
+        vault = MemoryVault()
+        cache = MemoryCache(vault=vault)
+        entry = MemoryEntry(
+            text=text,
+            category=category,
+            tier=PrivacyTier.from_str(tier_str),
+            source="opencode",
+        )
+        vault.append_fact(entry)
+        cache.upsert_entry(entry)
+        return json.dumps({"status": "saved", "id": entry.id, "tier": entry.tier.value}, indent=2)
+
+    elif name == "memory_status":
+        vault = MemoryVault()
+        cache = MemoryCache(vault=vault)
+        stats = cache.get_stats()
+        return json.dumps(stats, indent=2)
 
     else:
         raise ValueError(f"Unknown tool: {name}")
