@@ -88,7 +88,37 @@ LLMs should **never** do raw accounting math. Instead:
 
 ---
 
-## 5. Recommended Additional Tools & Skills to Consider
+## 5. Core Tool 5: Job Application Tracker & Autofill Hub (Future Domain)
+
+### Requirements
+- Connect seamlessly to `~/task-tracker.csv`.
+- Track items, status, and priority across pipeline stages.
+- Auto-sync recruiter / platform emails (Ashby, Greenhouse, Lever, Indeed) directly to job status.
+- Parse job descriptions, tailor answers using verified project stories (SemiAI CRM, Airlock harness, Argus), and freeze PDFs in `resumes/by-application/`.
+
+### Tools Exposed to OpenCode
+1. `job_list_active(status_filter=None)`
+2. `job_update_status(company, role, new_status, notes=None)`
+3. `job_tailor_application(jd_url_or_text, target_resume="Documents/Resumes/resume.tex")`
+4. `job_stage_dossier(company, role, answers_dict)`
+
+---
+
+## 6. Telemachus Terminal Cockpit & Interactive Station (UI Roadmap)
+
+### Architecture
+- **Harness**: Native OpenCode interactive CLI session in primary right pane.
+- **Left Panel (Textual TUI)**: Dual-pane dashboard for Email Triage and Laya Safety / Trash monitor.
+- **Top Unified Telemetry Bar**: Single header line reporting:
+  - Active Model Loaded (e.g. `Qwen 3.5 9B MLX 4-bit`)
+  - Context Window Usage (e.g. `14,820 / 65,536 tokens`)
+  - Unified Memory Allocation (e.g. `RAM: 11.2 / 18.0 GB - MLX 5.8G | Laya 0.8G | OS 4.6G`)
+  - Generation Speed (e.g. `41.5 t/s`)
+- **Interaction**: Mouse mode enabled (`set -g mouse on` in tmux) for clickable table rows, border dragging, and trackpad scrolling, with an electric cyan/neon glowing prompt cursor.
+
+---
+
+## 7. Recommended Additional Tools & Skills to Consider
 
 To further reduce manual work and keep local model overhead minimal:
 
@@ -100,3 +130,4 @@ To further reduce manual work and keep local model overhead minimal:
    - Allows the agent to ingest whatever is on your clipboard or write drafted responses directly to clipboard for quick paste.
 4. **Git Safe-Branching Automation**:
    - Whenever working on code repositories, automatically ensure work happens on a feature branch, never modifying `main` directly.
+
