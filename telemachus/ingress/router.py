@@ -113,11 +113,12 @@ class IngressToolRouter:
         ]
         is_general_pattern = any(re.search(pat, p_lower) for pat in general_patterns)
 
-        # Check for explicit filesystem mentions (e.g. file, folder, path, specific extensions)
+        # Check for explicit filesystem mentions (e.g. file, folder, path, specific extensions, slashes, or file actions)
         has_explicit_fs = bool(
-            re.search(r"\b(file|files|folder|folders|directory|directories|path|repo|repository|disk|workspace)\b", p_lower)
-            or re.search(r"\b\w+\.(py|js|ts|json|txt|md|yaml|yml|log|csv|html)\b", p_lower)
-            or re.search(r"\b(grep|ls|cat|rm|touch|mkdir|cd|chmod)\b", p_lower)
+            re.search(r"\b(file|files|folder|folders|directory|directories|path|paths|repo|repository|disk|workspace)\b", p_lower)
+            or re.search(r"\b\w+\.(py|js|ts|json|txt|md|yaml|yml|log|csv|html|cfg|ini|sh)\b", p_lower)
+            or re.search(r"[a-zA-Z0-9_\-\.]/[a-zA-Z0-9_\-\.]+", p_lower)  # Path with slash e.g. data/synthetic_fs
+            or re.search(r"\b(grep|ls|cat|rm|touch|mkdir|cd|chmod|find|search|locate|read|inspect)\b", p_lower)
         )
 
         has_email = bool(
@@ -139,7 +140,7 @@ class IngressToolRouter:
         self,
         user_prompt: str,
         tools: List[Dict[str, Any]],
-        max_tools: int = 4,
+        max_tools: int = 5,
         min_similarity: float = 0.42,
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         """Filters input tool list to only the most relevant tools for the prompt."""
@@ -154,10 +155,10 @@ class IngressToolRouter:
         if not prompt_vec:
             # If embedding endpoint is unreachable, filter safely by domain heuristic
             if domain == "EMAIL":
-                filtered = [t for t in tools if (t.get("name") or t.get("function", {}).get("name", "")).startswith("email_")]
+                filtered = [t for t in tools if "email_" in (t.get("name") or t.get("function", {}).get("name", "")).lower()]
                 return filtered, {"domain": domain, "strategy": "heuristic_fallback"}
             elif domain == "FILESYSTEM":
-                filtered = [t for t in tools if (t.get("name") or t.get("function", {}).get("name", "")).startswith("fs_")]
+                filtered = [t for t in tools if "fs_" in (t.get("name") or t.get("function", {}).get("name", "")).lower()]
                 return filtered, {"domain": domain, "strategy": "heuristic_fallback"}
             return tools, {"domain": domain, "strategy": "unpruned_fallback"}
 
@@ -189,12 +190,20 @@ class IngressToolRouter:
         # Step 4: Domain-constrained top-K selection
         selected_names = set()
         if domain == "EMAIL":
-            # Prioritize email tools (matching email_ anywhere in the name for MCP prefixes)
+            # Always ensure core email inspection tools are included
+            for name, _ in sorted_tools:
+                if "email_list" in name.lower() or "email_show" in name.lower():
+                    selected_names.add(name)
+            # Add top matching email tools up to max_tools
             for name, score in sorted_tools:
                 if "email_" in name.lower() and len(selected_names) < max_tools:
                     selected_names.add(name)
         elif domain == "FILESYSTEM":
-            # Prioritize fs tools (matching fs_ anywhere in the name for MCP prefixes)
+            # Always ensure fs_read is included so the model can inspect file contents
+            for name, _ in sorted_tools:
+                if "fs_read" in name.lower():
+                    selected_names.add(name)
+            # Add top matching fs tools up to max_tools
             for name, score in sorted_tools:
                 if "fs_" in name.lower() and len(selected_names) < max_tools:
                     selected_names.add(name)
