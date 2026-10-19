@@ -32,6 +32,27 @@ MEMORY_KEYWORDS = {
 }
 
 
+# A question about what the assistant knows or remembers. Such a prompt always gets
+# memory_search and memory_source, whatever other domain it also mentions: "what do you
+# remember about my email preferences?" is a memory question, not an inbox task.
+MEMORY_RE = re.compile(
+    r"\b(memory|memories|remember|recall|you know about me|my (style|preferences?|rules|habits|schedule)|"
+    r"preference|preferences|profile)\b|기억",
+    re.I,
+)
+MEMORY_CORE_TOOLS = ("memory_search", "memory_source")
+
+
+def ensure_memory_tools(prompt: str, tools: List[Dict[str, Any]], selected: set) -> set:
+    if not MEMORY_RE.search(prompt or ""):
+        return selected
+    for t in tools:
+        name = t.get("name") or t.get("function", {}).get("name", "")
+        if any(name.lower().endswith(core) for core in MEMORY_CORE_TOOLS):
+            selected.add(name)
+    return selected
+
+
 def cosine_similarity(v1: List[float], v2: List[float]) -> float:
     dot = sum(a * b for a, b in zip(v1, v2))
     norm1 = math.sqrt(sum(a * a for a in v1))
@@ -170,10 +191,16 @@ class IngressToolRouter:
         if not prompt_vec:
             # If embedding endpoint is unreachable, filter safely by domain heuristic
             if domain == "EMAIL":
-                filtered = [t for t in tools if "email_" in (t.get("name") or t.get("function", {}).get("name", "")).lower()]
+                filtered = [
+                    t for t in tools
+                    if any(k in (t.get("name") or t.get("function", {}).get("name", "")).lower() for k in ("email_", "memory_search"))
+                ]
                 return filtered, {"domain": domain, "strategy": "heuristic_fallback"}
             elif domain == "FILESYSTEM":
-                filtered = [t for t in tools if "fs_" in (t.get("name") or t.get("function", {}).get("name", "")).lower()]
+                names = ensure_memory_tools(user_prompt, tools, {
+                    (t.get("name") or t.get("function", {}).get("name", "")) for t in tools
+                    if "fs_" in (t.get("name") or t.get("function", {}).get("name", "")).lower()})
+                filtered = [t for t in tools if (t.get("name") or t.get("function", {}).get("name", "")) in names]
                 return filtered, {"domain": domain, "strategy": "heuristic_fallback"}
             elif domain == "MEMORY":
                 filtered = [t for t in tools if "memory_" in (t.get("name") or t.get("function", {}).get("name", "")).lower()]
@@ -194,7 +221,7 @@ class IngressToolRouter:
         # Step 3: Check if prompt needs ANY tools
         eff_min_sim = 0.52 if domain == "GENERAL" else min_similarity
         top_score = sorted_tools[0][1] if sorted_tools else 0.0
-        if domain == "GENERAL" and top_score < eff_min_sim:
+        if domain == "GENERAL" and top_score < eff_min_sim and not MEMORY_RE.search(user_prompt or ""):
             # Pure conversational, mathematical, or coding logic turn -> drop all tools
             return [], {
                 "domain": "GENERAL",
@@ -210,7 +237,8 @@ class IngressToolRouter:
         if domain == "EMAIL":
             # Always ensure core email inspection tools are included
             for name, _ in sorted_tools:
-                if "email_list" in name.lower() or "email_show" in name.lower():
+                # memory_search: a reply needs the user's style rules and what is known about the recipient.
+                if "email_list" in name.lower() or "email_show" in name.lower() or "memory_search" in name.lower():
                     selected_names.add(name)
             # Add top matching email tools up to max_tools
             for name, score in sorted_tools:
@@ -261,6 +289,7 @@ class IngressToolRouter:
                 # Default to top 2 semantic matches
                 selected_names = {name for name, _ in sorted_tools[:2]}
 
+        selected_names = ensure_memory_tools(user_prompt, tools, selected_names)
         pruned = [
             t for t in tools
             if (t.get("name") or t.get("function", {}).get("name", "")) in selected_names

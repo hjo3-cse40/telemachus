@@ -152,6 +152,57 @@ class TestMemoryVaultAndCache(unittest.TestCase):
         events = [json.loads(line) for line in self.vault.events_file.read_text().splitlines() if line.strip()]
         self.assertTrue(any(e["event"] == "TEST_EVENT" for e in events))
 
+    def _add_facts(self, texts, tier=PrivacyTier.TIER_2_PRIVATE):
+        for text in texts:
+            entry = MemoryEntry(text=text, tier=tier)
+            self.vault.append_fact(entry)
+            self.cache.upsert_entry(entry)
+
+    def test_search_natural_language_questions(self):
+        self._add_facts([
+            "Kim is the director and prefers short emails in Korean.",
+            "Ms. Jin handles all IT requests, one ask per message.",
+            "Kenneth is a co-intern engineer.",
+        ])
+        cases = {
+            "what does Kim prefer?": "Kim is the director",
+            "how do I write to Ms. Jin": "Ms. Jin handles",
+            "emails to the director": "Kim is the director",
+            "who handles IT requests?": "Ms. Jin handles",
+        }
+        for query, expected in cases.items():
+            with self.subTest(query=query):
+                results = self.cache.search(query)
+                self.assertTrue(results, f"no results for {query!r}")
+                self.assertTrue(results[0].text.startswith(expected), results[0].text)
+
+    def test_search_plural_query_finds_singular_fact(self):
+        self._add_facts(["Send one IT request per message to Ms. Jin."])
+        results = self.cache.search("requests")
+        self.assertEqual(len(results), 1)
+
+    def test_search_ranks_more_shared_words_first(self):
+        self._add_facts([
+            "Kim likes coffee.",
+            "Kim is the director and prefers short emails in Korean.",
+        ])
+        results = self.cache.search("Kim director short emails")
+        self.assertEqual(len(results), 2)
+        self.assertIn("director", results[0].text)
+
+    def test_search_or_query_keeps_tier_gating(self):
+        self._add_facts(["Kim earns a salary from the director."], tier=PrivacyTier.TIER_2_PRIVATE)
+        self._add_facts(["Kim prefers no em dashes."], tier=PrivacyTier.TIER_0_PUBLIC)
+        results = self.cache.search("what does Kim earn?", tier_limit=PrivacyTier.TIER_0_PUBLIC)
+        self.assertTrue(results)
+        self.assertTrue(all(r.tier == PrivacyTier.TIER_0_PUBLIC for r in results))
+
+    def test_search_punctuation_and_stopword_only_queries(self):
+        self._add_facts(["Kim is the director."])
+        self.assertEqual(self.cache.search("?!"), [])
+        # A query of only stopwords still searches with those words instead of returning nothing.
+        self.assertTrue(self.cache.search("who is the"))
+
 
 if __name__ == "__main__":
     unittest.main()

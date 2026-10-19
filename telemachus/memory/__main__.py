@@ -3,6 +3,7 @@ import argparse
 import json
 from pathlib import Path
 import sys
+import time
 
 from telemachus.memory.cache import MemoryCache
 from telemachus.memory.importer import MemoryImporter
@@ -47,11 +48,8 @@ def cmd_search(args):
     cache = MemoryCache(vault=vault)
     tier_limit = PrivacyTier.from_str(args.tier) if args.tier else None
 
-    results = cache.search(args.query, tier_limit=tier_limit, limit=args.limit)
-    print(f"Found {len(results)} matches for '{args.query}':")
-    for idx, r in enumerate(results, 1):
-        pin_tag = "[PINNED] " if r.pinned else ""
-        print(f"{idx}. [{r.tier.value.upper()}] [{r.category}] {pin_tag}{r.text}")
+    from telemachus.memory.recall import recall, render_recall
+    print(render_recall(recall(cache, args.query, limit=args.limit, tier_limit=tier_limit)))
 
 
 def cmd_status(args):
@@ -117,6 +115,80 @@ def cmd_tail(args):
             print("\nStopped.")
 
 
+def cmd_review(args):
+    vault = MemoryVault(args.vault_dir)
+    pending = vault.load_pending()
+    if not pending:
+        print("Review list is empty.")
+        return
+    print(f"=== {len(pending)} fact(s) waiting for review ===")
+    for e in pending:
+        meta = e.metadata or {}
+        print(f"\n[{e.id[:8]}] {e.text}")
+        print(f"   kind: {meta.get('kind', 'self')}   category: {e.category}   source: {meta.get('source_ref') or e.source}")
+        if meta.get("quote"):
+            print(f"   quote: \"{meta['quote']}\" (match: {meta.get('quote_match')})")
+        print(f"   why it needs review: {meta.get('review_reason')}")
+    print("\nApprove: python -m telemachus.memory approve <id>   Reject: python -m telemachus.memory reject <id>")
+
+
+def _resolve(args, approve: bool):
+    vault = MemoryVault(args.vault_dir)
+    cache = MemoryCache(vault=vault)
+    found, error = vault.find_pending(args.id)
+    entry = vault.resolve_pending(found.id, approve=approve) if found else None
+    if entry is None:
+        print(error or f"No pending fact with id {args.id!r}.")
+        sys.exit(1)
+    if approve:
+        cache.upsert_entry(entry)
+        print(f"Approved and saved: {entry.text}")
+    else:
+        print(f"Rejected: {entry.text}")
+
+
+def cmd_approve(args):
+    _resolve(args, approve=True)
+
+
+def cmd_reject(args):
+    _resolve(args, approve=False)
+
+
+def cmd_health(args):
+    from telemachus.memory.health import MemoryHealth
+    vault = MemoryVault(args.vault_dir)
+    summary = MemoryHealth(vault).summary()
+    print(f"Memory pipeline: {summary['status']}")
+    for name, state in sorted(summary["components"].items()):
+        flag = "OK" if state.get("ok", True) else "FAILING"
+        line = f"  {name:22} {flag:8} failures={state.get('total_failures', 0)} ok={state.get('total_successes', 0)}"
+        if state.get("total_rejections"):
+            line += f" rejected={state['total_rejections']}"
+        print(line)
+        if not state.get("ok", True):
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(state.get("last_error_at") or 0))
+            print(f"      last error ({when}): {state.get('last_error')}")
+    print(f"Pending review: {len(vault.load_pending())}   Failed turns waiting for retry: {len(vault.load_failed_turns())}")
+
+
+def cmd_retry(args):
+    from telemachus.memory.intake import MemoryIntake
+    vault = MemoryVault(args.vault_dir)
+    intake = MemoryIntake(vault=vault, cache=MemoryCache(vault=vault))
+    reports = intake.retry_failed()
+    if not reports:
+        print("No failed turns.")
+    for r in reports:
+        print(f"{r.status}: saved={r.saved} review={r.queued_for_review} reason={r.reason}")
+
+
+def cmd_source(args):
+    from telemachus.memory.recall import render_source
+    vault = MemoryVault(args.vault_dir)
+    print(render_source(vault, MemoryCache(vault=vault), args.id))
+
+
 def main():
     parser = argparse.ArgumentParser(description="Telemachus Unified Memory Manager")
     parser.add_argument("--vault-dir", default=None, help="Root directory for memory vault (default: ~/.memory)")
@@ -153,6 +225,22 @@ def main():
     # status
     p_status = subparsers.add_parser("status", help="Show vault status and statistics")
     p_status.set_defaults(func=cmd_status)
+
+    p_review = subparsers.add_parser("review", help="List facts waiting for your review")
+    p_review.set_defaults(func=cmd_review)
+    p_approve = subparsers.add_parser("approve", help="Approve a pending fact (moves it into memory)")
+    p_approve.add_argument("id", help="Pending fact id (first 8 characters are enough)")
+    p_approve.set_defaults(func=cmd_approve)
+    p_reject = subparsers.add_parser("reject", help="Reject a pending fact")
+    p_reject.add_argument("id", help="Pending fact id (first 8 characters are enough)")
+    p_reject.set_defaults(func=cmd_reject)
+    p_health = subparsers.add_parser("health", help="Show failures and rejections in the memory pipeline")
+    p_health.set_defaults(func=cmd_health)
+    p_retry = subparsers.add_parser("retry", help="Run failed turns through the intake again")
+    p_retry.set_defaults(func=cmd_retry)
+    p_source = subparsers.add_parser("source", help="Show one memory with its source and quote")
+    p_source.add_argument("id", help="Memory id (first 8 characters are enough)")
+    p_source.set_defaults(func=cmd_source)
 
     args = parser.parse_args()
     args.func(args)

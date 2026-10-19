@@ -25,6 +25,8 @@ from telemachus.fs.editor import edit_file, run_command, safe_delete, write_file
 from telemachus.fs.explorer import grep_text, list_dir, read_file, search_files, stat_path
 from telemachus.ingress.proxy import start_ingress_proxy_background
 from telemachus.memory import MemoryCache, MemoryEntry, MemoryVault, PrivacyTier
+from telemachus.memory.health import MemoryHealth
+from telemachus.memory.recall import recall, render_recall, render_source
 
 PROTOCOL_VERSION = "2024-11-05"
 
@@ -561,7 +563,12 @@ TOOLS_DEFINITIONS = [
     },
     {
         "name": "memory_search",
-        "description": "Searches the unified local memory vault (~/.memory) for personal facts, preferences, school schedule, and project states.",
+        "description": (
+            "Searches the local memory vault (~/.memory) for facts about the user and facts from documents the user worked with. "
+            "Returns STATUS (MATCH, WEAK_MATCH or NO_MATCH), an INSTRUCTION, and results tagged [M1], [M2] with their source and quote. "
+            "Follow the INSTRUCTION: cite tags for facts you use; on NO_MATCH say you have no record instead of guessing. "
+            "Use short keyword queries (names, topics), for example 'Kim email preference'."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -581,7 +588,11 @@ TOOLS_DEFINITIONS = [
     },
     {
         "name": "memory_save",
-        "description": "Saves an atomic fact, preference, or project update into the local memory vault (~/.memory).",
+        "description": (
+            "Proposes a fact for the local memory vault. The fact goes to the user's review list, not straight into memory, "
+            "because it is not checked against the user's own words. Facts the user states in chat are saved automatically; "
+            "use this only when the user asks you to remember something. Tell the user it is waiting for review."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -610,6 +621,24 @@ TOOLS_DEFINITIONS = [
         "inputSchema": {
             "type": "object",
             "properties": {},
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "memory_source",
+        "description": (
+            "Reads the full source of one memory: who said it or which document it came from, the exact quote, "
+            "and the stored source text around the quote. Use the id from memory_search results."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "Memory id (or its first 8 characters) from memory_search.",
+                },
+            },
+            "required": ["id"],
             "additionalProperties": False,
         },
     },
@@ -910,29 +939,38 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
         limit = int(arguments.get("limit", 5))
         vault = MemoryVault()
         cache = MemoryCache(vault=vault)
-        results = cache.search(query, limit=limit)
-        return json.dumps([r.to_dict() for r in results], indent=2)
+        return render_recall(recall(cache, query, limit=limit))
+
+    elif name == "memory_source":
+        vault = MemoryVault()
+        cache = MemoryCache(vault=vault)
+        return render_source(vault, cache, str(arguments.get("id", "")))
 
     elif name == "memory_save":
         text = arguments.get("text", "")
         category = arguments.get("category", "fact")
         tier_str = arguments.get("tier", "tier_2_private")
         vault = MemoryVault()
-        cache = MemoryCache(vault=vault)
         entry = MemoryEntry(
             text=text,
             category=category,
             tier=PrivacyTier.from_str(tier_str),
             source="opencode",
+            metadata={"kind": "self", "source_ref": "proposed by the agent with memory_save"},
         )
-        vault.append_fact(entry)
-        cache.upsert_entry(entry)
-        return json.dumps({"status": "saved", "id": entry.id, "tier": entry.tier.value}, indent=2)
+        vault.append_pending(entry, "proposed by the agent; not checked against the user's own words")
+        return json.dumps({
+            "status": "queued_for_review", "id": entry.id[:8],
+            "next_step": "Tell the user: run `python -m telemachus.memory review` to approve or reject it.",
+        }, indent=2)
 
     elif name == "memory_status":
         vault = MemoryVault()
         cache = MemoryCache(vault=vault)
         stats = cache.get_stats()
+        stats["health"] = MemoryHealth(vault).summary()
+        stats["pending_review"] = len(vault.load_pending())
+        stats["failed_turns"] = len(vault.load_failed_turns())
         return json.dumps(stats, indent=2)
 
     elif name == "memory_recent":

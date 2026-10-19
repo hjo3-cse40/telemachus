@@ -1,0 +1,372 @@
+[
+  {
+    "id": "h_1",
+    "text": "Hi Claude, just so you know, I'm the PM for all our US proof-of-concept projects now, so anything about customer pilots in Arizona or Oregon is basically mine.",
+    "author": "own",
+    "durable": true,
+    "lang": "en",
+    "note": "Starts with 'Hi Claude,'; job fact phrased casually."
+  },
+  {
+    "id": "h_2",
+    "text": "hey, fyi I don't work Fridays anymore. my days are Mon to Thu, 9 to 6 Pacific, so don't schedule stuff for me on Fridays",
+    "author": "own",
+    "durable": true,
+    "lang": "en",
+    "note": "Starts with 'hey'; lowercase; schedule fact plus implied rule."
+  },
+  {
+    "id": "h_3",
+    "text": "When you write emails for me, never open with \"I hope this email finds you well.\" I hate that line. Just get to the point in the first sentence.",
+    "author": "own",
+    "durable": true,
+    "lang": "en",
+    "note": "Own message containing a quoted phrase; writing rule."
+  },
+  {
+    "id": "h_4",
+    "text": "앞으로 한국어 이메일 쓸 때는 항상 '드림'으로 끝내 줘. 그리고 너무 딱딱한 존댓말은 피하고.",
+    "author": "own",
+    "durable": true,
+    "lang": "ko",
+    "note": "Korean writing rule with 'always' (항상)."
+  },
+  {
+    "id": "h_5",
+    "text": "ok so this is kind of a lot but bear with me. my manager is Dahee Moon, she's the director of business development, and basically every customer-facing thing goes through her before it goes out. the CEO is Dr. Yoon Seokjin but I almost never email him directly, it goes through Dahee. and there's Marcus Ferrand who handles the fab-side engineering, he's the one I ping when a customer asks a technical question I can't answer. ok that's the org chart lol",
+    "author": "own",
+    "durable": true,
+    "lang": "en",
+    "note": "Long rambling own message (~450 chars) listing people the user works with."
+  },
+  {
+    "id": "h_6",
+    "text": "I prefer bullet points over paragraphs for anything I'm going to read on my phone. Please keep that in mind going forward.",
+    "author": "own",
+    "durable": true,
+    "lang": "en",
+    "note": "First-person 'I prefer' that IS the user's own durable preference (contrast with pasted first-person items)."
+  },
+  {
+    "id": "h_7",
+    "text": "저 화요일이랑 목요일은 학교 수업 때문에 오후 3시 반에 퇴근해요. 그 이후로는 미팅 잡지 마세요.",
+    "author": "own",
+    "durable": true,
+    "lang": "ko",
+    "note": "Korean schedule fact (leaves early Tue/Thu for classes)."
+  },
+  {
+    "id": "h_8",
+    "text": "btw I always cc Dahee on anything that goes to a customer. that's a standing rule, not just for today.",
+    "author": "own",
+    "durable": true,
+    "lang": "en",
+    "note": "Standing habit with 'always'; explicitly says not one-time."
+  },
+  {
+    "id": "h_9",
+    "text": "Hi Claude, small thing about me: I keep my to-do list in a paper notebook, not in any app, so if you suggest tasks just give me a short list I can copy by hand.",
+    "author": "own",
+    "durable": true,
+    "lang": "en",
+    "note": "Starts with 'Hi Claude,'; habit fact framed as 'small thing'."
+  },
+  {
+    "id": "h_10",
+    "text": "My Korean name is 조한결 and I sign Korean emails with that, but English emails are just \"Leo.\"",
+    "author": "own",
+    "durable": true,
+    "lang": "mixed",
+    "note": "Mixed Korean/English; identity fact plus quoted signature."
+  },
+  {
+    "id": "h_11",
+    "text": "Just a heads up, our team switched from Slack to Teams last month, so when I say 'the channel' I mean the Teams channel now. Also I'm in Korea Standard Time half the year when I'm visiting HQ, usually Jan through March.",
+    "author": "own",
+    "durable": true,
+    "lang": "en",
+    "note": "Two durable facts (tools, recurring location/timezone) inside a casual heads-up."
+  },
+  {
+    "id": "h_12",
+    "text": "I'm not a native English writer, so please don't make my emails sound fancier than I would. Short sentences, plain words. Kevin on our team will notice if it doesn't sound like me.",
+    "author": "own",
+    "durable": true,
+    "lang": "en",
+    "note": "Durable writing preference plus a coworker name; no explicit 'remember'."
+  },
+  {
+    "id": "h_13",
+    "text": "Which do you prefer for the deck title, \"Yield Insights Pilot\" or \"Smart Yield PoC\"?",
+    "author": "own",
+    "durable": false,
+    "lang": "en",
+    "note": "Contains 'prefer' but is a question to the assistant, not a user preference; quoted phrases."
+  },
+  {
+    "id": "h_14",
+    "text": "hey can you remind me what the difference between OEE and yield is? I always mix them up lol",
+    "author": "own",
+    "durable": false,
+    "lang": "en",
+    "note": "Starts with 'hey'; contains 'always' but it is self-deprecating small talk, not a lasting fact worth storing (borderline)."
+  },
+  {
+    "id": "h_15",
+    "text": "I'm running late today, train is delayed. Can you just summarize the three action items from yesterday's call when I get in?",
+    "author": "own",
+    "durable": false,
+    "lang": "en",
+    "note": "First-person state ('I'm running late') that is one-time, not durable."
+  },
+  {
+    "id": "h_16",
+    "text": "오늘 회의 몇 시였지? 2시였나 3시였나 헷갈리네",
+    "author": "own",
+    "durable": false,
+    "lang": "ko",
+    "note": "Korean question about a one-time detail."
+  },
+  {
+    "id": "h_17",
+    "text": "Hi Claude, can you rewrite the second paragraph so it sounds less pushy? Keep the deadline but soften the tone.",
+    "author": "own",
+    "durable": false,
+    "lang": "en",
+    "note": "Starts with 'Hi Claude,'; pure task request referring to earlier content."
+  },
+  {
+    "id": "h_18",
+    "text": "ugh ok so the customer moved the site visit again, it was supposed to be the 14th and now they're saying maybe the 21st but they're not sure, and Marcus already booked his flight for the 13th, so I need to figure out whether to ask him to change it or just have him go early and do the line walk with their process team without me, which honestly might be fine? I don't know. can you help me think through the pros and cons, and also draft a short message to Marcus either way",
+    "author": "own",
+    "durable": false,
+    "lang": "en",
+    "note": "Long rambling own message (~470 chars) full of one-time details; names a coworker but states no lasting fact."
+  },
+  {
+    "id": "h_19",
+    "text": "Should I always reply-all on these vendor threads or is that annoying?",
+    "author": "own",
+    "durable": false,
+    "lang": "en",
+    "note": "Contains 'always' inside a question; asking advice, not stating a habit."
+  },
+  {
+    "id": "h_20",
+    "text": "thanks, that's perfect 👍",
+    "author": "own",
+    "durable": false,
+    "lang": "en",
+    "note": "Short small talk."
+  },
+  {
+    "id": "h_21",
+    "text": "이 메일 영어로 번역해줘. 너무 직역 말고 자연스럽게.",
+    "author": "own",
+    "durable": false,
+    "lang": "ko",
+    "note": "Korean task request with no pasted content (refers to prior message)."
+  },
+  {
+    "id": "h_22",
+    "text": "For this one only, sign it from the whole team instead of me. The usual sign-off is fine next time.",
+    "author": "own",
+    "durable": false,
+    "lang": "en",
+    "note": "Explicitly one-time override; mentions 'usual' but does not state what it is."
+  },
+  {
+    "id": "h_23",
+    "text": "What would you say if a customer asked \"why not just use our existing SPC system?\" I need a one-line answer for tomorrow.",
+    "author": "own",
+    "durable": false,
+    "lang": "en",
+    "note": "Own message with a quoted hypothetical customer line; task request."
+  },
+  {
+    "id": "h_24",
+    "text": "I prefer the second version. Send me that one cleaned up.",
+    "author": "own",
+    "durable": false,
+    "lang": "en",
+    "note": "'I prefer' is a one-time choice between drafts, not a lasting preference."
+  },
+  {
+    "id": "h_25",
+    "text": "From: Rachel Okonkwo <r.okonkwo@brightwafer-systems.com>\nSent: Thursday, October 15, 2026 4:12 PM\nTo: Leo Jo\nCc: Dahee Moon\nSubject: RE: Pilot data handoff\n\nHi Leo,\n\nThanks for the update. Our fab IT team needs the data retention terms in writing before we can share any lot history. Could your team send a one-page summary by next Wednesday?\n\nBest,\nRachel",
+    "author": "pasted",
+    "durable": false,
+    "lang": "en",
+    "note": "Full Outlook header, no instruction at all."
+  },
+  {
+    "id": "h_26",
+    "text": "I prefer to keep these check-ins short, 20 minutes max, and I always send the agenda the night before. If something needs a longer discussion we'll book a separate slot. Looking forward to working with your team on the pilot.",
+    "author": "pasted",
+    "durable": false,
+    "lang": "en",
+    "note": "Pasted first-person text with 'I prefer' and 'I always', no header or signature; easily mistaken for own durable."
+  },
+  {
+    "id": "h_27",
+    "text": "Can we push to Friday?",
+    "author": "pasted",
+    "durable": false,
+    "lang": "en",
+    "note": "Single pasted line with no instruction; indistinguishable from an own question without context (label pasted by construction)."
+  },
+  {
+    "id": "h_28",
+    "text": "[10:02 AM] Priya Raman: did anyone get the updated recipe file from the customer\n[10:03 AM] Tomasz Wierzba: not yet, they said EOD\n[10:05 AM] Priya Raman: ok I'll ping them again at 3\n[10:05 AM] Tomasz Wierzba: 👍",
+    "author": "pasted",
+    "durable": false,
+    "lang": "en",
+    "note": "Teams/Slack chat log without instruction."
+  },
+  {
+    "id": "h_29",
+    "text": "안녕하세요, 한결님.\n\n지난주 미팅 감사했습니다. 말씀하신 결함 분류 데이터는 내부 검토 후 다음 주 화요일까지 공유드리겠습니다. 혹시 데이터 포맷에 대한 요구사항이 있으시면 미리 알려주시면 감사하겠습니다.\n\n박서윤 드림\n누리반도체 품질팀",
+    "author": "pasted",
+    "durable": false,
+    "lang": "ko",
+    "note": "Korean email with greeting and signature, no headers, no instruction."
+  },
+  {
+    "id": "h_30",
+    "text": "2026-10-16 03:14:22 WARN  ingest.worker  retry 3/5 for lot_id=NX4471 (timeout after 30s)\n2026-10-16 03:14:52 ERROR ingest.worker  giving up on lot_id=NX4471: upstream 502\n2026-10-16 03:15:01 INFO  scheduler      next run at 04:00",
+    "author": "pasted",
+    "durable": false,
+    "lang": "en",
+    "note": "Log lines only."
+  },
+  {
+    "id": "h_31",
+    "text": "Section 7.2 Confidentiality. The Receiving Party shall not disclose any Confidential Information to third parties without the prior written consent of the Disclosing Party, and shall use such information solely for the purpose of evaluating the Pilot. This obligation survives termination for three (3) years.",
+    "author": "pasted",
+    "durable": false,
+    "lang": "en",
+    "note": "Contract clause; 'shall' language, no instruction."
+  },
+  {
+    "id": "h_32",
+    "text": "Hi Leo, great connecting at the Phoenix expo! I lead process integration at Calderon Microdevices and I'm always looking for practical ML tools for excursion detection. Would you be open to a 30-minute call in the next couple of weeks?",
+    "author": "pasted",
+    "durable": false,
+    "lang": "en",
+    "note": "LinkedIn message addressed to the user, first person with 'I'm always'; no header."
+  },
+  {
+    "id": "h_33",
+    "text": "Meeting notes, Oct 12\n- Attendees: Dahee, Marcus, Leo, Kevin\n- Customer wants weekly status instead of biweekly\n- Leo to own the pilot timeline doc\n- Marcus to confirm tool access by 10/20\n- Next sync: Oct 19",
+    "author": "pasted",
+    "durable": false,
+    "lang": "en",
+    "note": "Meeting notes that mention the user by name and assign him tasks; facts about the user that are NOT the user's own words."
+  },
+  {
+    "id": "h_34",
+    "text": "---------- Forwarded message ---------\nFrom: Hannah Lindqvist <hannah@veridian-fabworks.io>\nDate: Wed, Oct 14, 2026 at 9:41 AM\nSubject: Quote request\nTo: sales@ourcompany-ai.example\n\nHello, we'd like a quote for a 3-month evaluation covering two etch tools. Please include on-site support options.\n\nThanks,\nHannah",
+    "author": "pasted",
+    "durable": false,
+    "lang": "en",
+    "note": "Gmail forwarded email with no added comment from the user."
+  },
+  {
+    "id": "h_35",
+    "text": "[카카오톡] 김민재 오후 2:31\n내일 미팅 장소 바뀌었어요, 판교 2층 회의실로 오세요\n[카카오톡] 김민재 오후 2:32\n주차는 지하 3층 이용하시면 됩니다",
+    "author": "pasted",
+    "durable": false,
+    "lang": "ko",
+    "note": "KakaoTalk log in Korean, no instruction."
+  },
+  {
+    "id": "h_36",
+    "text": "reply to this:\n\nCan we push to Friday?",
+    "author": "mixed",
+    "durable": false,
+    "lang": "en",
+    "own_part": "reply to this:",
+    "note": "Pasted single line after a short instruction; the pasted line looks like an own question."
+  },
+  {
+    "id": "h_37",
+    "text": "Draft a polite yes to this, and remember I always cc my manager Dahee on customer emails.\n\nFrom: Owen Tremblay <owen.t@arcline-semi.com>\nSubject: Kickoff date\n\nHi Leo, would October 28 work for the pilot kickoff? We can host at our Hillsboro site.\n\nOwen",
+    "author": "mixed",
+    "durable": true,
+    "lang": "en",
+    "own_part": "Draft a polite yes to this, and remember I always cc my manager Dahee on customer emails.",
+    "note": "Lasting fact (always cc manager) embedded in a task request, followed by a pasted email."
+  },
+  {
+    "id": "h_38",
+    "text": "I prefer we keep the scope to a single fab line for phase one. Expanding to the second line can be discussed once we have results. I always find that smaller pilots close faster.\n\n^ this is from the customer's VP. how should I respond without sounding like we're pushing back?",
+    "author": "mixed",
+    "durable": false,
+    "lang": "en",
+    "own_part": "^ this is from the customer's VP. how should I respond without sounding like we're pushing back?",
+    "note": "Pasted first-person text with 'I prefer'/'I always' comes BEFORE the instruction; no header or signature."
+  },
+  {
+    "id": "h_39",
+    "text": "이거 영어로 답장 써줘. 참고로 나는 외부 메일은 항상 영어로 보내.\n\n안녕하세요 한결님,\n다음 주 데모 일정 확인 부탁드립니다. 화요일 오전 10시 가능하실까요?\n최지훈 드림",
+    "author": "mixed",
+    "durable": true,
+    "lang": "ko",
+    "own_part": "이거 영어로 답장 써줘. 참고로 나는 외부 메일은 항상 영어로 보내.",
+    "note": "Korean instruction with an embedded durable habit (external mail always in English), then Korean pasted email."
+  },
+  {
+    "id": "h_40",
+    "text": "hey can you summarize this thread for me\n\nOn Tue, Oct 13, 2026 at 5:20 PM Kevin Albright wrote:\n> Agreed, let's hold the data until legal signs off.\n>\n> On Tue, Oct 13, 2026 at 4:58 PM Sofia Marchetti wrote:\n> > We need the defect maps by Friday or the review slips a week.\n> > I prefer not to escalate yet.",
+    "author": "mixed",
+    "durable": false,
+    "lang": "en",
+    "own_part": "hey can you summarize this thread for me",
+    "note": "Starts with 'hey'; Gmail-style quoted reply chain with 'I prefer' inside the quoted part."
+  },
+  {
+    "id": "h_41",
+    "text": "Subject: Invitation: PoC Weekly Sync @ Weekly on Wednesday 10am - 10:30am (PDT)\nOrganizer: Dahee Moon\nAttendees: Leo Jo, Marcus Ferrand, Rachel Okonkwo\nJoin Microsoft Teams Meeting\n\nadd this to my notes. this one's recurring and I'm the one who runs it every week, so I'll need prep reminders on Tuesdays.",
+    "author": "mixed",
+    "durable": true,
+    "lang": "en",
+    "own_part": "add this to my notes. this one's recurring and I'm the one who runs it every week, so I'll need prep reminders on Tuesdays.",
+    "note": "Calendar invite pasted BEFORE the instruction; own part states a lasting role/routine (runs the weekly sync)."
+  },
+  {
+    "id": "h_42",
+    "text": "Hi Claude, can you tighten this up for our website? Keep it under 50 words.\n\nUnlock smarter yields with AI that learns your fab. Our platform detects excursions before they become scrap, so your engineers spend less time firefighting and more time improving. Trusted by forward-looking manufacturers worldwide.",
+    "author": "mixed",
+    "durable": false,
+    "lang": "en",
+    "own_part": "Hi Claude, can you tighten this up for our website? Keep it under 50 words.",
+    "note": "Starts with 'Hi Claude,'; marketing copy with 'your'/'our' after the instruction."
+  },
+  {
+    "id": "h_43",
+    "text": "what does this clause actually mean in plain english?\n\n12.4 Neither Party shall be liable for any indirect, incidental or consequential damages arising out of this Agreement, except in the case of a breach of Section 7 (Confidentiality).\n\nalso not urgent, I just want to understand it before Thursday",
+    "author": "mixed",
+    "durable": false,
+    "lang": "en",
+    "own_part": "what does this clause actually mean in plain english?\n\nalso not urgent, I just want to understand it before Thursday",
+    "note": "Own words both BEFORE and AFTER the pasted clause (two own parts)."
+  },
+  {
+    "id": "h_44",
+    "text": "Answer this text from my landlord, something short:\n\nHey, the plumber is coming Thursday between 1 and 4. Will you be home?\n\nI'm never home before 7 on weekdays because of work, you can mention that.",
+    "author": "mixed",
+    "durable": true,
+    "lang": "en",
+    "own_part": "Answer this text from my landlord, something short:\n\nI'm never home before 7 on weekdays because of work, you can mention that.",
+    "note": "Personal text message pasted between two own parts; second own part states a lasting schedule fact."
+  },
+  {
+    "id": "h_45",
+    "text": "FYI below. 다희님한테 공유할 요약 한 줄만 만들어줘.\n\n-----Original Message-----\nFrom: Ethan Kowalczyk <ekowalczyk@meridian-litho.com>\nSent: Friday, October 16, 2026 11:03 AM\nTo: Leo Jo\nSubject: Pilot extension\n\nLeo, we'd like to extend the evaluation by 4 weeks. Budget approval is in progress.\nEthan",
+    "author": "mixed",
+    "durable": false,
+    "lang": "mixed",
+    "own_part": "FYI below. 다희님한테 공유할 요약 한 줄만 만들어줘.",
+    "note": "Mixed Korean/English own instruction above an Outlook 'Original Message' forward."
+  }
+]
