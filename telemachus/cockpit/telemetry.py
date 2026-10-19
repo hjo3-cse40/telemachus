@@ -10,6 +10,7 @@ import logging
 import os
 from pathlib import Path
 import socket
+import time
 import urllib.request
 from typing import Any, Dict, Optional
 
@@ -32,9 +33,23 @@ class CockpitTelemetry:
     ):
         self.lm_studio_url = lm_studio_url
         self.proxy_url = proxy_url
+        self._cached_model: Optional[str] = None
+        self._model_cache_time: float = 0.0
+        self._cached_memory: Optional[Dict[str, float]] = None
+        self._memory_cache_time: float = 0.0
+        self._cached_thinking: Optional[Dict[str, Any]] = None
+        self._thinking_cache_time: float = 0.0
 
-    def get_active_model(self) -> str:
-        """Queries local model endpoint or returns default local Qwen model."""
+    def get_active_model(self, max_age: float = 5.0) -> str:
+        """Queries local model endpoint or returns default local Qwen model.
+        
+        Caches result for max_age seconds to prevent flooding local inference servers.
+        """
+        now = time.time()
+        if self._cached_model is not None and (now - self._model_cache_time) < max_age:
+            return self._cached_model
+
+        model_name = "qwen/qwen3.5-9b (MLX 4-bit)"
         try:
             req = urllib.request.Request(self.lm_studio_url, headers={"User-Agent": "TelemachusTelemetry"})
             with urllib.request.urlopen(req, timeout=0.6) as response:
@@ -42,22 +57,38 @@ class CockpitTelemetry:
                     data = json.loads(response.read().decode("utf-8"))
                     models = data.get("data", [])
                     # Prefer qwen model if available in active list
+                    found = False
                     for m in models:
                         mid = m.get("id", "")
                         if "qwen3.5" in mid.lower():
-                            return mid
-                    for m in models:
-                        mid = m.get("id", "")
-                        if "embed" not in mid.lower():
-                            return mid
-                    if models:
-                        return models[0].get("id", "qwen/qwen3.5-9b")
+                            model_name = mid
+                            found = True
+                            break
+                    if not found:
+                        for m in models:
+                            mid = m.get("id", "")
+                            if "embed" not in mid.lower():
+                                model_name = mid
+                                found = True
+                                break
+                    if not found and models:
+                        model_name = models[0].get("id", "qwen/qwen3.5-9b")
         except Exception:
             pass
-        return "qwen/qwen3.5-9b (MLX 4-bit)"
 
-    def get_memory_breakdown(self) -> Dict[str, float]:
-        """Calculates unified memory distribution across MLX, Laya, and OS."""
+        self._cached_model = model_name
+        self._model_cache_time = now
+        return model_name
+
+    def get_memory_breakdown(self, max_age: float = 2.0) -> Dict[str, float]:
+        """Calculates unified memory distribution across MLX, Laya, and OS.
+        
+        Caches result for max_age seconds to avoid continuous process scans.
+        """
+        now = time.time()
+        if self._cached_memory is not None and (now - self._memory_cache_time) < max_age:
+            return self._cached_memory
+
         total_gb = 18.0
         used_gb = 11.2
         mlx_gb = 5.8
@@ -92,7 +123,7 @@ class CockpitTelemetry:
                 logger.debug(f"Telemetry psutil read failed: {e}")
 
         pct = int((used_gb / total_gb) * 100) if total_gb > 0 else 62
-        return {
+        res = {
             "total_gb": total_gb,
             "used_gb": used_gb,
             "used_pct": pct,
@@ -100,6 +131,9 @@ class CockpitTelemetry:
             "laya_gb": laya_gb,
             "os_gb": os_gb,
         }
+        self._cached_memory = res
+        self._memory_cache_time = now
+        return res
 
     def get_context_budget(self) -> Dict[str, Any]:
         """Estimates active context budget usage against maximum 64k window."""
@@ -118,8 +152,15 @@ class CockpitTelemetry:
         # 41.5 t/s benchmarked on Apple Silicon M3/M4 Pro
         return 41.5
 
-    def get_thinking_tokens(self) -> Dict[str, Any]:
-        """Extracts live reasoning/thinking token metrics from OpenCode session store."""
+    def get_thinking_tokens(self, max_age: float = 2.0) -> Dict[str, Any]:
+        """Extracts live reasoning/thinking token metrics from OpenCode session store.
+        
+        Caches result for max_age seconds to avoid continuous SQLite disk I/O.
+        """
+        now = time.time()
+        if self._cached_thinking is not None and (now - self._thinking_cache_time) < max_age:
+            return self._cached_thinking
+
         db_path = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
         last_reasoning = 0
         total_reasoning = 0
@@ -140,11 +181,14 @@ class CockpitTelemetry:
             except Exception as e:
                 logger.debug(f"Failed to query reasoning tokens from opencode.db: {e}")
 
-        return {
+        res = {
             "enabled": True,
             "last_turn_tokens": last_reasoning,
             "recent_total_tokens": total_reasoning,
         }
+        self._cached_thinking = res
+        self._thinking_cache_time = now
+        return res
 
     def format_single_line_header(self, max_width: int = 120) -> str:
         """Renders the unified top header string formatted for tmux/terminal."""

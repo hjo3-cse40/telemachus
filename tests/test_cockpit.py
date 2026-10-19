@@ -18,6 +18,17 @@ class TestCockpitTelemetry(unittest.TestCase):
         self.assertIsInstance(model, str)
         self.assertGreater(len(model), 0)
 
+    def test_telemetry_caching(self):
+        # First call populates cache
+        m1 = self.telemetry.get_active_model(max_age=10.0)
+        cache_time = self.telemetry._model_cache_time
+        self.assertGreater(cache_time, 0.0)
+
+        # Immediate second call should use cache without modifying cache_time
+        m2 = self.telemetry.get_active_model(max_age=10.0)
+        self.assertEqual(m1, m2)
+        self.assertEqual(self.telemetry._model_cache_time, cache_time)
+
     def test_memory_breakdown(self):
         mem = self.telemetry.get_memory_breakdown()
         self.assertIn("total_gb", mem)
