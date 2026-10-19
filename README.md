@@ -237,9 +237,13 @@ python3 -m unittest tests/test_fs_guard.py -v
 
 Telemachus includes synthetic datasets and rigorous benchmarks to stress-test context memory limits, needle-in-the-haystack (NIAH) retrieval, and prompt token efficiency on Apple Silicon unified memory.
 
-### 1. Ingress Tool Pruning Benchmark (Before vs. After)
+### 1. Ingress Tool Pruning & Token Savings
 
-Without pruning, passing all 18 MCP tool definitions wastes ~3,000 tokens on every turn. The Ingress Proxy intercepts calls on `http://127.0.0.1:1235/v1`, using Laya and Nomic Embed to dynamically prune the active toolset:
+#### The Problem: Tool Schema Bloat
+When an MCP client registers all 18 Telemachus tools (email operations, filesystem management, guardrails), their JSON schemas consume **2,961 tokens (~10.6 KB)**. In a standard setup, this massive payload is prepended to the system prompt on **every single turn**. On local models like `qwen/qwen3.5-9b` (MLX 4-bit) running on an Apple Silicon M3 Pro (~140–500 tok/s prefill rate), this adds an unavoidable **~8.5 second prefill latency** before the model can generate its first response token, quickly eating into the context window.
+
+#### The Solution: Intelligent Ingress Tool Pruning
+Telemachus routes all client completions through an automated streaming Ingress Proxy (`http://127.0.0.1:1235/v1` $\rightarrow$ `1234`). Before the payload reaches Qwen, the proxy dynamically inspects user intent and strips away unused tool definitions:
 
 | Scenario / Prompt Turn | Unpruned (Before) | Pruned via Ingress (After) | Tokens Saved | Context Reduction | Selected Tools |
 | :--- | :---: | :---: | :---: | :---: | :--- |
@@ -247,32 +251,52 @@ Without pruning, passing all 18 MCP tool definitions wastes ~3,000 tokens on eve
 | **Filesystem Turn**<br>_`"Search for files named README or config"`_ | 3,032 tokens | **847 tokens** | **-2,185 tokens** | **-72.1%** | `fs_list`, `fs_read`, `fs_search`, `fs_grep`, `fs_stat` |
 | **General Turn**<br>_`"Explain the difference between TCP and UDP"`_ | 3,032 tokens | **22 tokens** | **-3,010 tokens** | **-99.3%** | *(All 18 tools dropped)* |
 
-* **Session Impact**: In real operational testing across 1,000+ indexed emails and deep 15-level folder traversals, a complete multi-step session consumed only **14,000 tokens total (23% of the 64k window)**, leaving 77% of context headroom free.
+* **Real-World Operational Impact**: In live multi-turn testing covering complex email index querying and traversing a 15-level deep directory structure, the entire multi-step workflow consumed only **~14,000 tokens total (23% of the 64k window)**, preserving 77% headroom for sustained reasoning.
 
-### 2. Synthetic Test Datasets
+### 2. How Tools are Called & Routed
 
-We provide two isolated synthetic sandboxes for benchmarking:
-* **Synthetic Filesystem (`data/synthetic_fs/`)**: 527 files spanning wide catalogs (500 items), deep 15-level directories (`odysseus_plan.txt`), dense 4,000-line haystacks with 5 depth canaries, and edge cases (Latin-1, binary nulls, zero-byte).
-* **Synthetic Mailbox (`data/synthetic_email_index.sqlite3`)**: 1,000 categorized emails (transactional, documents, newsletters, spam) with injected canary references (e.g., flight booking `NZ742-AUCKLAND-2026-CONFIRMED`).
+The Ingress architecture guarantees seamless, zero-maintenance tool selection:
 
-### 3. Needle-in-the-Haystack (NIAH) Retrieval
-* **Intra-File Retrieval**: In a 4,000-line document, `read_file` safely truncates at 300 lines / 64 KB to protect context; `fs_grep` retrieves needles at 0%, 25%, 50%, 75%, and 100% depth in <0.02s.
-* **Deep Hierarchy Traversal**: Locates secrets buried 15 levels down in 17ms via `fs_search` + `fs_read`.
-* **Offline Mailbox Search**: Searches across 1,000+ indexed emails in 5ms using SQLite FTS, returning single matching headers in <60 tokens instead of flooding context with 73,000 brute-force tokens.
+1. **Automated Daemon Startup**: The Ingress Proxy starts automatically in a background daemon thread whenever the Telemachus MCP server launches. No manual proxy scripts or terminal tabs are required—simply run `opencode`.
+2. **Multi-Turn Context Extraction**: Short follow-up messages (e.g., *"now read it"*, *"show me more"*, *"index them"*) preserve the active tool domain by analyzing the last 3 conversational turns.
+3. **Prefix Normalization**: OpenCode automatically prefixes MCP tool names (e.g. `telemachus_fs_read`, `telemachus_email_list`). The router transparently strips and restores prefixes so matching is seamless regardless of the client format.
+4. **Combo Guarantees**: Prevents tool looping. For example, when filesystem operations are detected, `fs_read` is always guaranteed alongside `fs_search` and `fs_grep`, ensuring the model can immediately inspect discovered files without getting stuck.
+5. **Hybrid Intent & Vector Routing**: Uses fast keyword heuristics for zero-latency domain detection, falling back to 768-dimensional cosine similarity via `nomic-embed-text-v1.5@q8_0` with pre-computed tool embeddings (`data/tool_embeddings.json`).
 
-### 4. Running the Benchmark Suite
+### 3. Synthetic Benchmark Datasets
+
+We provide two isolated synthetic sandboxes for rigorous context limit and NIAH testing:
+
+* **Synthetic Filesystem (`data/synthetic_fs/`)**:
+  - **Scale**: 527 generated files across wide catalogs (500 items in a single directory) and a 15-level deep hierarchy.
+  - **Needles**: Contains `odysseus_plan.txt` buried at level 15, plus a 4,000-line haystack file containing 5 depth-calibrated canary needles (0%, 25%, 50%, 75%, 100% file depth).
+  - **Edge Cases**: Includes Latin-1 encoding, binary null bytes, zero-byte files, and noisy ignore targets (`.git`, `node_modules`).
+* **Synthetic Mailbox (`data/synthetic_email_index.sqlite3`)**:
+  - **Scale**: 1,000 realistic categorized emails (transactional, documents, newsletters, spam).
+  - **Needles**: Injected canary references, including flight bookings (`NZ742-AUCKLAND-2026-CONFIRMED`), tax documents, and urgent invoices.
+  - **Efficiency**: Allows SQLite FTS queries across 1,000+ emails in 5ms using <60 tokens, compared to 73,000 tokens for brute-force context dumping.
+
+### 4. Running the Synthetic Benchmark Suite
+
+You can generate the synthetic datasets and execute the benchmark test suites with:
 
 ```bash
-# Run all filesystem limits and NIAH tests
+# Generate synthetic filesystem test data (data/synthetic_fs/)
+python3 tests/benchmarks/fs_generator.py
+
+# Generate synthetic mailbox index (data/synthetic_email_index.sqlite3)
+python3 tests/benchmarks/email_generator.py
+
+# Run filesystem limits and NIAH retrieval tests
 PYTHONPATH=. python3 -m unittest tests/benchmarks/test_fs_limits.py
 
 # Run email context scaling and search benchmarks
 PYTHONPATH=. python3 -m unittest tests/benchmarks/test_email_limits.py
 
-# Run Nomic embedding diagnostics
+# Run Nomic embedding diagnostics and speed benchmarks
 PYTHONPATH=. python3 -m unittest tests/benchmarks/test_nomic_embed.py
 
-# Run end-to-end Ingress Before vs. After comparison
+# Run live Ingress Before vs. After prompt token benchmark
 PYTHONPATH=. python3 -m unittest tests/benchmarks/test_ingress_benchmark.py
 ```
 
