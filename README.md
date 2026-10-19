@@ -308,6 +308,7 @@ Comprehensive specifications are maintained in the [`docs/`](./docs) directory:
 
 - [**System Architecture**](./docs/SYSTEM_ARCHITECTURE.md): Complete breakdown of component interactions, memory budgeting, and token economics on Apple Silicon.
 - [**Laya Integration Spec**](./docs/LAYA_INTEGRATION_SPEC.md): How Laya handles Ingress tool pruning, Egress safety gating, and solves the false-positive alert problem.
+- [**Memory Intake**](./docs/MEMORY_INTAKE.md): What may become a memory (own words only, quote-checked), the review list, loud failures, cited recall, and the daily `review` / `health` / `retry` commands.
 - [**Tooling Roadmap**](./docs/TOOLING_ROADMAP.md): Detailed technical blueprints for the 4 core tools, plus recommended expansions (clipboard bridge, calendar sync, context compression).
 - [**Workflow Status & Log**](./docs/WORKFLOW_STATUS.md): Living checklist of active experiments, tool implementation progress, and architectural decisions.
 

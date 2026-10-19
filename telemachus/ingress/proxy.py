@@ -10,6 +10,8 @@ import http.server
 import json
 import logging
 import os
+import queue
+import socket
 import socketserver
 import sys
 import threading
@@ -27,13 +29,45 @@ logging.basicConfig(
 logger = logging.getLogger("telemachus.ingress")
 
 
+# Helper requests that opencode sends next to the user's own: the session title. With
+# thinking on, the 9B spent 1,000-2,700 tokens on a title, and the user's answer waited
+# behind it (measured 2026-10-19: 89.9 s -> 1.4 s with thinking off for the title).
+HELPER_SYSTEM_PREFIXES = ("You are a title generator",)
+
+
+def is_helper_request(payload: Dict[str, Any]) -> bool:
+    """A request from an opencode helper agent, not from the user's own conversation."""
+    if payload.get("tools"):
+        return False
+    messages = payload.get("messages") or []
+    system = next((m.get("content") for m in messages if isinstance(m, dict) and m.get("role") == "system"), "")
+    if isinstance(system, list):
+        system = " ".join(p.get("text", "") for p in system if isinstance(p, dict))
+    return isinstance(system, str) and system.lstrip().startswith(HELPER_SYSTEM_PREFIXES)
+
+
+# A thinking model can stream for minutes, and LM Studio may queue a request behind
+# another one (with Max Concurrent Predictions = 1) after it has sent the headers.
+UPSTREAM_TIMEOUT_S = 900
+
+
 class IngressProxyHandler(http.server.BaseHTTPRequestHandler):
     """Handles incoming OpenAI-compatible API calls, prunes tools, and proxies upstream."""
 
     protocol_version = "HTTP/1.1"
+    upstream_timeout = UPSTREAM_TIMEOUT_S
     router: IngressToolRouter = IngressToolRouter()
     upstream_host = "127.0.0.1"
     upstream_port = 1234
+
+    def setup(self) -> None:
+        super().setup()
+        # Stream tokens as they come: without TCP_NODELAY the OS merges the many small
+        # writes (Nagle) and thinking tokens arrive in bursts of a few hundred ms.
+        try:
+            self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        except OSError:
+            pass
 
     def log_message(self, format: str, *args: Any) -> None:
         # Suppress noisy standard HTTP server logging
@@ -51,6 +85,7 @@ class IngressProxyHandler(http.server.BaseHTTPRequestHandler):
     def _stream_response(self, resp: http.client.HTTPResponse) -> None:
         """Streams upstream response with correct HTTP/1.1 chunked framing if needed."""
         is_chunked = resp.getheader("Transfer-Encoding", "").lower() == "chunked"
+        self._headers_sent = True
         self.send_response(resp.status, resp.reason)
 
         for k, v in resp.getheaders():
@@ -71,7 +106,9 @@ class IngressProxyHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
         while True:
-            chunk = resp.read(4096)
+            # read1 returns what has arrived; read(4096) would wait for 4 KB and hold
+            # back the streamed thinking and answer tokens.
+            chunk = resp.read1(4096)
             if not chunk:
                 break
             if is_chunked:
@@ -158,11 +195,18 @@ class IngressProxyHandler(http.server.BaseHTTPRequestHandler):
                     f"in {prune_duration_ms:.1f}ms"
                 )
 
+        helper = is_helper_request(payload)
+        if helper and "reasoning_effort" not in payload:
+            # Qwen3.5 in LM Studio: only reasoning_effort "none" turns thinking off per request.
+            payload["reasoning_effort"] = "none"
+            logger.info("Helper request (session title): thinking off")
+
         # Re-serialize modified payload
         modified_body = json.dumps(payload).encode("utf-8")
 
         # Forward upstream
-        conn = http.client.HTTPConnection(self.upstream_host, self.upstream_port, timeout=120)
+        conn = http.client.HTTPConnection(self.upstream_host, self.upstream_port, timeout=self.upstream_timeout)
+        self._headers_sent = False
         try:
             headers = {k: v for k, v in self.headers.items() if k.lower() not in ("host", "content-length", "connection")}
             headers["Host"] = f"{self.upstream_host}:{self.upstream_port}"
@@ -175,30 +219,108 @@ class IngressProxyHandler(http.server.BaseHTTPRequestHandler):
             resp = conn.getresponse()
             self._stream_response(resp)
 
-            # Trigger asynchronous continual memory extraction in the background
+            # Memory intake: only when this request starts a new user turn. Tool rounds of
+            # the agent loop end with a tool or assistant message and are not queued.
             messages = payload.get("messages", [])
-            if messages and len(messages) >= 1:
-                threading.Thread(
-                    target=self._run_continual_extraction,
-                    args=(messages,),
-                    daemon=True,
-                    name="ContinualMemoryExtractor",
-                ).start()
+            # Helper requests repeat the user's message; the intake reads the real turn.
+            if messages and messages[-1].get("role") == "user" and not helper:
+                memory_intake_queue.submit(messages)
         except Exception as e:
-            self.send_error(502, f"Upstream LM Studio communication error: {e}")
+            # Loud: the client may only see a cut stream, so the log must say why.
+            logger.warning(f"Upstream LM Studio error ({'during' if self._headers_sent else 'before'} the response): "
+                           f"{type(e).__name__}: {e}")
+            if self._headers_sent:
+                # A second status line inside a started response is what clients report as
+                # "InvalidHTTPResponse". End the connection instead.
+                self.close_connection = True
+            else:
+                self.send_error(502, f"Upstream LM Studio communication error: {e}")
         finally:
             conn.close()
 
-    def _run_continual_extraction(self, messages: List[Dict[str, Any]]) -> None:
-        """Asynchronously extracts durable facts from the conversation turn."""
+
+class MemoryIntakeQueue:
+    """One background thread runs the memory intake, one turn at a time.
+
+    One worker means at most one extra LM Studio request waits behind the user's own
+    requests. The queue is small; when it is full, the oldest turn is dropped and the
+    drop is reported as a failure, not hidden.
+    """
+
+    def __init__(self, maxsize: int = 8):
+        self._queue: "queue.Queue[List[Dict[str, Any]]]" = queue.Queue(maxsize=maxsize)
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+        self._intake = None
+
+    def submit(self, messages: List[Dict[str, Any]]) -> None:
+        """Never raises: the chat response is already sent when this runs."""
         try:
-            from telemachus.memory.extractor import MemoryExtractor
-            extractor = MemoryExtractor()
-            new_entries = extractor.extract_and_store(messages)
-            if new_entries:
-                logger.info(f"Continual extraction saved {len(new_entries)} facts: {[e.text for e in new_entries]}")
+            with self._lock:
+                if self._thread is None or not self._thread.is_alive():
+                    self._thread = threading.Thread(target=self._run, daemon=True, name="MemoryIntake")
+                    self._thread.start()
+                while True:
+                    try:
+                        self._queue.put_nowait(messages)
+                        return
+                    except queue.Full:
+                        try:
+                            dropped = self._queue.get_nowait()
+                        except queue.Empty:
+                            continue
+                        self._report_drop(dropped)
         except Exception as e:
-            logger.debug(f"Continual extraction background task failed: {e}")
+            logger.warning(f"Memory intake submit failed: {type(e).__name__}: {e}")
+
+    def _report_drop(self, dropped: List[Dict[str, Any]]) -> None:
+        """A dropped turn goes to failed_turns, so `python -m telemachus.memory retry` can run it."""
+        try:
+            from telemachus.memory.health import MemoryHealth
+            from telemachus.memory.intake import MAX_DOCS_PER_TURN, _sha, message_text, previous_turn_documents
+            from telemachus.memory.vault import MemoryVault
+            vault = self._intake.vault if self._intake is not None else MemoryVault()
+            text = message_text(dropped[-1]) if dropped else ""
+            if text:
+                vault.append_failed_turn(_sha("turn:" + text), text, "intake queue full; turn dropped")
+            # The documents of that turn are not sent again either: keep them too.
+            for label, doc in previous_turn_documents(dropped)[:MAX_DOCS_PER_TURN]:
+                vault.append_failed_turn(_sha("doc:" + doc), doc, "intake queue full; turn dropped",
+                                         kind="document", label=label)
+            MemoryHealth(vault).fail("intake_queue", "Memory intake queue full; the oldest turn was dropped and kept for retry")
+        except Exception as e:
+            logger.warning(f"Memory intake queue full and the drop could not be recorded: {e}")
+
+    def _run(self) -> None:
+        while True:
+            messages = self._queue.get()
+            try:
+                if self._intake is None:
+                    from telemachus.memory.intake import MemoryIntake
+                    self._intake = MemoryIntake()
+                report = self._intake.process_turn(messages)
+                if self._queue.empty():
+                    # The queue has room again: clear an old "queue full" failure.
+                    self._intake.health.ok("intake_queue")
+                if report.status == "failed":
+                    logger.warning(f"Memory intake FAILED: {report.reason}")
+                elif report.saved or report.queued_for_review or report.document_facts:
+                    logger.info(
+                        f"Memory intake: saved={report.saved} review={report.queued_for_review} "
+                        f"documents={len(report.document_facts)} rejected={len(report.rejected)}"
+                    )
+            except Exception as e:
+                # An unexpected bug must still be loud: WARNING log and health.json.
+                logger.warning(f"Memory intake crashed: {type(e).__name__}: {e}")
+                try:
+                    from telemachus.memory.health import MemoryHealth
+                    from telemachus.memory.vault import MemoryVault
+                    MemoryHealth(MemoryVault()).fail("intake_crash", f"{type(e).__name__}: {e}")
+                except Exception:
+                    pass
+
+
+memory_intake_queue = MemoryIntakeQueue()
 
 
 

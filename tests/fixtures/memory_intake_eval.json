@@ -1,0 +1,448 @@
+[
+ {
+  "id": "own_durable_en_1",
+  "text": "I'm the PM for our US proof-of-concept projects, so most of my email is with customer engineers.",
+  "author": "own",
+  "durable": true,
+  "lang": "en",
+  "note": ""
+ },
+ {
+  "id": "own_durable_en_2",
+  "text": "I prefer short emails with bullet points, never long paragraphs.",
+  "author": "own",
+  "durable": true,
+  "lang": "en",
+  "note": ""
+ },
+ {
+  "id": "own_durable_en_3",
+  "text": "When I write to IT, I only put one request in each message.",
+  "author": "own",
+  "durable": true,
+  "lang": "en",
+  "note": ""
+ },
+ {
+  "id": "own_durable_en_4",
+  "text": "I work Tuesdays and Thursdays from 10 to 3:30 and Mondays from 10 to 7.",
+  "author": "own",
+  "durable": true,
+  "lang": "en",
+  "note": ""
+ },
+ {
+  "id": "own_durable_en_5",
+  "text": "Never use em dashes in anything you write for me.",
+  "author": "own",
+  "durable": true,
+  "lang": "en",
+  "note": ""
+ },
+ {
+  "id": "own_durable_en_6",
+  "text": "My co-intern Riley handles the reports page, not me.",
+  "author": "own",
+  "durable": true,
+  "lang": "en",
+  "note": ""
+ },
+ {
+  "id": "own_durable_en_7",
+  "text": "I usually open casual emails to teammates with 'hey,' and keep them to three lines.",
+  "author": "own",
+  "durable": true,
+  "lang": "en",
+  "note": ""
+ },
+ {
+  "id": "own_durable_en_8",
+  "text": "I'm a CS student and I also work part time as an engineer at a semiconductor AI startup.",
+  "author": "own",
+  "durable": true,
+  "lang": "en",
+  "note": ""
+ },
+ {
+  "id": "own_durable_en_9",
+  "text": "Remember that I sign formal English emails with 'Best regards' and just my first name.",
+  "author": "own",
+  "durable": true,
+  "lang": "en",
+  "note": ""
+ },
+ {
+  "id": "own_durable_en_10",
+  "text": "I don't like it when drafts start with 'I hope this email finds you well'.",
+  "author": "own",
+  "durable": true,
+  "lang": "en",
+  "note": ""
+ },
+ {
+  "id": "own_durable_en_11",
+  "text": "My director wants a weekly status update every Friday before noon.",
+  "author": "own",
+  "durable": true,
+  "lang": "en",
+  "note": ""
+ },
+ {
+  "id": "own_durable_en_12",
+  "text": "I use a 24 GB MacBook for work and an 18 GB one for personal stuff.",
+  "author": "own",
+  "durable": true,
+  "lang": "en",
+  "note": ""
+ },
+ {
+  "id": "own_durable_ko_1",
+  "text": "저는 한국어 메일을 쓸 때 항상 '홍길동 드림'으로 끝냅니다.",
+  "author": "own",
+  "durable": true,
+  "lang": "ko",
+  "note": ""
+ },
+ {
+  "id": "own_durable_ko_2",
+  "text": "나는 팀장님께 보내는 메일은 존댓말로 짧게 쓰는 걸 선호해.",
+  "author": "own",
+  "durable": true,
+  "lang": "ko",
+  "note": ""
+ },
+ {
+  "id": "own_durable_ko_3",
+  "text": "매주 금요일 오전에 이사님께 주간 보고를 드려야 해.",
+  "author": "own",
+  "durable": true,
+  "lang": "ko",
+  "note": ""
+ },
+ {
+  "id": "own_durable_ko_4",
+  "text": "나는 월요일하고 수요일에 10시부터 7시까지 일해.",
+  "author": "own",
+  "durable": true,
+  "lang": "ko",
+  "note": ""
+ },
+ {
+  "id": "own_durable_ko_5",
+  "text": "IT팀에는 요청을 한 메일에 하나씩만 보내는 게 내 규칙이야.",
+  "author": "own",
+  "durable": true,
+  "lang": "ko",
+  "note": ""
+ },
+ {
+  "id": "own_task_en_1",
+  "text": "can you draft a reply to Dana saying Tuesday works for the demo",
+  "author": "own",
+  "durable": false,
+  "lang": "en",
+  "note": ""
+ },
+ {
+  "id": "own_task_en_2",
+  "text": "make it shorter and less formal",
+  "author": "own",
+  "durable": false,
+  "lang": "en",
+  "note": ""
+ },
+ {
+  "id": "own_task_en_3",
+  "text": "what time is it in Seoul right now?",
+  "author": "own",
+  "durable": false,
+  "lang": "en",
+  "note": ""
+ },
+ {
+  "id": "own_task_en_4",
+  "text": "summarize the thread I just opened",
+  "author": "own",
+  "durable": false,
+  "lang": "en",
+  "note": ""
+ },
+ {
+  "id": "own_task_en_5",
+  "text": "thanks, that looks good",
+  "author": "own",
+  "durable": false,
+  "lang": "en",
+  "note": ""
+ },
+ {
+  "id": "own_task_en_6",
+  "text": "I'm really tired today, keep it simple.",
+  "author": "own",
+  "durable": false,
+  "lang": "en",
+  "note": ""
+ },
+ {
+  "id": "own_task_en_7",
+  "text": "I have a dentist appointment at 3 today so I need to finish this fast.",
+  "author": "own",
+  "durable": false,
+  "lang": "en",
+  "note": ""
+ },
+ {
+  "id": "own_task_en_8",
+  "text": "fix the typo in the second paragraph",
+  "author": "own",
+  "durable": false,
+  "lang": "en",
+  "note": ""
+ },
+ {
+  "id": "own_task_en_9",
+  "text": "Which of these two subject lines sounds better?",
+  "author": "own",
+  "durable": false,
+  "lang": "en",
+  "note": ""
+ },
+ {
+  "id": "own_task_en_10",
+  "text": "read the pdf in my downloads folder and tell me the deadline",
+  "author": "own",
+  "durable": false,
+  "lang": "en",
+  "note": ""
+ },
+ {
+  "id": "own_task_en_11",
+  "text": "translate this into Korean please",
+  "author": "own",
+  "durable": false,
+  "lang": "en",
+  "note": ""
+ },
+ {
+  "id": "own_task_en_12",
+  "text": "Is it rude to follow up after only two days?",
+  "author": "own",
+  "durable": false,
+  "lang": "en",
+  "note": ""
+ },
+ {
+  "id": "own_task_ko_1",
+  "text": "다나한테 화요일 괜찮다고 답장 초안 써줘",
+  "author": "own",
+  "durable": false,
+  "lang": "ko",
+  "note": ""
+ },
+ {
+  "id": "own_task_ko_2",
+  "text": "좀 더 짧게 줄여줘",
+  "author": "own",
+  "durable": false,
+  "lang": "ko",
+  "note": ""
+ },
+ {
+  "id": "own_task_ko_3",
+  "text": "이 메일 영어로 번역해줄래?",
+  "author": "own",
+  "durable": false,
+  "lang": "ko",
+  "note": ""
+ },
+ {
+  "id": "own_task_ko_4",
+  "text": "고마워, 이대로 보낼게",
+  "author": "own",
+  "durable": false,
+  "lang": "ko",
+  "note": ""
+ },
+ {
+  "id": "own_task_ko_5",
+  "text": "오늘 회의 몇 시였지?",
+  "author": "own",
+  "durable": false,
+  "lang": "ko",
+  "note": ""
+ },
+ {
+  "id": "pasted_en_1",
+  "text": "From: Dana Park <dana.park@acmefab.example>\nSent: Monday, October 12, 2026 9:14 AM\nTo: Sam\nSubject: Re: demo schedule\n\nHi Sam,\n\nI prefer Tuesday calls if possible. Our team lead will join from Austin.\n\nBest,\nDana",
+  "author": "pasted",
+  "durable": false,
+  "lang": "en",
+  "note": "headers"
+ },
+ {
+  "id": "pasted_en_2",
+  "text": "Hi all,\n\nAs discussed, I'll own the wafer map export and Priya will handle the defect labels. I work remotely on Fridays, so please send anything urgent before Thursday.\n\nThanks,\nMarcus",
+  "author": "pasted",
+  "durable": false,
+  "lang": "en",
+  "note": "email body without headers, first person"
+ },
+ {
+  "id": "pasted_en_3",
+  "text": "On Tue, Oct 13, 2026 at 4:02 PM Jordan Lee <jordan@northwind.example> wrote:\n> Can you confirm the PoC start date?\n> We need it for our budget review.",
+  "author": "pasted",
+  "durable": false,
+  "lang": "en",
+  "note": "quoted reply"
+ },
+ {
+  "id": "pasted_en_4",
+  "text": "-----Original Message-----\nFrom: Alex Kim\nTo: Procurement\nSubject: PO 4471\n\nPlease process the purchase order by end of week.",
+  "author": "pasted",
+  "durable": false,
+  "lang": "en",
+  "note": "original message marker"
+ },
+ {
+  "id": "pasted_en_5",
+  "text": "[10:02] Priya: did the model finish training?\n[10:03] Marcus: yes, 94% on the holdout\n[10:05] Priya: great, I'll tell the customer",
+  "author": "pasted",
+  "durable": false,
+  "lang": "en",
+  "note": "chat log"
+ },
+ {
+  "id": "pasted_en_6",
+  "text": "Meeting notes, Oct 8\nAttendees: Dana, Jordan, Sam\n- Dana prefers weekly syncs on Wednesdays\n- Jordan will send the sample wafers by Oct 20\n- Next review: Nov 3",
+  "author": "pasted",
+  "durable": false,
+  "lang": "en",
+  "note": "meeting notes"
+ },
+ {
+  "id": "pasted_en_7",
+  "text": "2026-10-19 08:31:02 ERROR ingest.worker: timeout after 30s on job 8812\n2026-10-19 08:31:05 INFO ingest.worker: retrying job 8812 (attempt 2)",
+  "author": "pasted",
+  "durable": false,
+  "lang": "en",
+  "note": "log"
+ },
+ {
+  "id": "pasted_en_8",
+  "text": "Section 4.2 Data Retention. The Supplier shall retain inspection images for no less than twenty-four (24) months and shall delete them within thirty (30) days of a written request from the Customer.",
+  "author": "pasted",
+  "durable": false,
+  "lang": "en",
+  "note": "contract text"
+ },
+ {
+  "id": "pasted_en_9",
+  "text": "Dear Mr. Jo,\n\nThank you for your interest in our metrology platform. I am writing to confirm that our engineering team is available for a technical call next week. I usually take calls in the morning, Pacific time.\n\nSincerely,\nHelen Brooks\nDirector of Partnerships",
+  "author": "pasted",
+  "durable": false,
+  "lang": "en",
+  "note": "formal letter, first person"
+ },
+ {
+  "id": "pasted_en_10",
+  "text": "Our product helps fabs cut defect review time by 40%. Book a demo today and see why leading manufacturers trust us.",
+  "author": "pasted",
+  "durable": false,
+  "lang": "en",
+  "note": "web page / marketing"
+ },
+ {
+  "id": "pasted_ko_1",
+  "text": "보낸 사람: 김민준 <minjun@example.co.kr>\n받는 사람: 홍길동\n제목: 데모 일정 확인\n\n안녕하세요, 저는 화요일 오후 통화를 선호합니다. 다음 주 일정 가능하실까요?\n\n김민준 드림",
+  "author": "pasted",
+  "durable": false,
+  "lang": "ko",
+  "note": "korean email headers"
+ },
+ {
+  "id": "pasted_ko_2",
+  "text": "안녕하세요 팀장님,\n\n지난주 말씀하신 견적서 첨부드립니다. 저는 금요일마다 재택근무를 하니 급한 건은 목요일까지 부탁드립니다.\n\n감사합니다.\n이서연 드림",
+  "author": "pasted",
+  "durable": false,
+  "lang": "ko",
+  "note": "korean email body, first person"
+ },
+ {
+  "id": "pasted_ko_3",
+  "text": "[오전 10:02] 지수: 모델 학습 끝났어?\n[오전 10:03] 현우: 응, 홀드아웃 94%",
+  "author": "pasted",
+  "durable": false,
+  "lang": "ko",
+  "note": "korean chat log"
+ },
+ {
+  "id": "pasted_ko_4",
+  "text": "회의록 (10월 8일)\n참석자: 김민준, 이서연\n- 김민준 님은 수요일 주간 회의 선호\n- 샘플 웨이퍼 10월 20일까지 발송",
+  "author": "pasted",
+  "durable": false,
+  "lang": "ko",
+  "note": "korean meeting notes"
+ },
+ {
+  "id": "pasted_ko_5",
+  "text": "제4조 (자료 보관) 공급자는 검사 이미지를 24개월 이상 보관하여야 한다.",
+  "author": "pasted",
+  "durable": false,
+  "lang": "ko",
+  "note": "korean contract"
+ },
+ {
+  "id": "mixed_1",
+  "text": "help me reply to this, I want to say yes but push the call to Wednesday:\n\nFrom: Dana Park <dana.park@acmefab.example>\nSubject: call\n\nI prefer Tuesday calls. Does 2pm work?",
+  "author": "mixed",
+  "durable": false,
+  "lang": "en",
+  "note": "own instruction then pasted",
+  "own_part": "help me reply to this, I want to say yes but push the call to Wednesday:"
+ },
+ {
+  "id": "mixed_2",
+  "text": "I always keep replies to customers under five sentences. Can you trim this draft?\n\nHi Jordan,\n\nThanks so much for the update on the sample wafers. We really appreciate the quick turnaround and we are excited to begin the evaluation as soon as they arrive next week.",
+  "author": "mixed",
+  "durable": true,
+  "lang": "en",
+  "note": "own instruction then pasted",
+  "own_part": "I always keep replies to customers under five sentences. Can you trim this draft?"
+ },
+ {
+  "id": "mixed_3",
+  "text": "what is Marcus asking for here?\n\nOn Wed, Oct 14, 2026 at 9:00 AM Marcus Hill <marcus@northwind.example> wrote:\n> I prefer to get the report as a PDF.\n> Also please cc my manager.",
+  "author": "mixed",
+  "durable": false,
+  "lang": "en",
+  "note": "own instruction then pasted",
+  "own_part": "what is Marcus asking for here?"
+ },
+ {
+  "id": "mixed_4",
+  "text": "이거 답장 좀 써줘. 나는 고객한테는 항상 존댓말 써.\n\n보낸 사람: 김민준\n제목: 견적 문의\n\n견적서 다시 보내주실 수 있을까요?",
+  "author": "mixed",
+  "durable": true,
+  "lang": "ko",
+  "note": "own instruction then pasted",
+  "own_part": "이거 답장 좀 써줘. 나는 고객한테는 항상 존댓말 써."
+ },
+ {
+  "id": "mixed_5",
+  "text": "Can you summarize these notes?\n\nMeeting notes, Oct 15\n- Helen prefers email over phone\n- Budget approved for Q1",
+  "author": "mixed",
+  "durable": false,
+  "lang": "en",
+  "note": "own instruction then pasted",
+  "own_part": "Can you summarize these notes?"
+ },
+ {
+  "id": "mixed_6",
+  "text": "Rewrite this so it sounds like me. I never use exclamation marks.\n\nDear team, we are thrilled to announce the new pipeline is live! Please try it today!",
+  "author": "mixed",
+  "durable": true,
+  "lang": "en",
+  "note": "own instruction then pasted",
+  "own_part": "Rewrite this so it sounds like me. I never use exclamation marks."
+ }
+]

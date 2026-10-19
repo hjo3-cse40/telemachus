@@ -1,21 +1,24 @@
-"""Unit tests for Continual MemoryExtractor and PrivacyGate."""
-import json
+"""Unit tests for grounded memory extraction, quote checks and PrivacyGate."""
 from pathlib import Path
-import shutil
-import tempfile
+import sys
 import unittest
 
-from telemachus.memory.cache import MemoryCache
-from telemachus.memory.extractor import (
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from fake_lmstudio import FakeLMStudio, facts  # noqa: E402
+
+from telemachus.memory.extractor import (  # noqa: E402
+    ExtractionError,
     MemoryExtractor,
+    fact_supported,
     fallback_regex_candidates,
     is_jaccard_duplicate,
     parse_extraction_json,
     strip_think,
+    support_share,
+    verify_quote,
 )
-from telemachus.memory.models import MemoryEntry, PrivacyTier
-from telemachus.memory.privacy_gate import PrivacyGate
-from telemachus.memory.vault import MemoryVault
+from telemachus.memory.models import MemoryEntry, PrivacyTier  # noqa: E402
+from telemachus.memory.privacy_gate import PrivacyGate  # noqa: E402
 
 
 class TestPrivacyGate(unittest.TestCase):
@@ -99,59 +102,90 @@ class TestExtractorComponents(unittest.TestCase):
         self.assertFalse(is_jaccard_duplicate("User loves playing basketball on weekends", existing))
 
 
-class TestMemoryExtractorPipeline(unittest.TestCase):
-    """End-to-end extraction and routing pipeline."""
+class TestQuoteChecks(unittest.TestCase):
+    def test_verify_quote(self):
+        src = "Hi. I prefer short emails with bullet points, always."
+        self.assertEqual(verify_quote("I prefer short emails", src), "exact")
+        self.assertEqual(verify_quote("i PREFER   short emails", src), "exact")
+        self.assertEqual(verify_quote("I prefers short email", src), "close")
+        self.assertIsNone(verify_quote("I prefer long emails", src))
+        self.assertIsNone(verify_quote("Tuesday calls work best", src))
+        self.assertIsNone(verify_quote("short", src), "a one-word quote proves nothing")
+        self.assertIsNone(verify_quote("", src))
 
+    def test_quote_with_ellipsis_checks_each_part(self):
+        src = "our team switched from Slack to Teams last month. Also I'm in Korea Standard Time half the year."
+        self.assertEqual(verify_quote("our team switched from Slack to Teams ... I'm in Korea Standard Time", src), "exact")
+        self.assertIsNone(verify_quote("our team switched from Slack to Teams ... I live in Paris now", src))
+
+    def test_short_prefix_does_not_support(self):
+        self.assertEqual(support_share("User is an astronaut.", "I am at home as usual"), 0.0)
+
+    def test_verify_quote_korean_particles(self):
+        src = "저는 한국어 메일을 쓸 때 항상 '홍길동 드림'으로 끝냅니다."
+        self.assertIn(verify_quote("홍길동 드림으로 끝냅니다", src), ("exact", "close"))
+        self.assertIsNone(verify_quote("영어 메일은 짧게 씁니다", src))
+
+    def test_fact_supported(self):
+        self.assertTrue(fact_supported("User prefers short emails.", "I prefer short emails"))
+        self.assertFalse(fact_supported("User lives in Paris.", "I prefer short emails"))
+        self.assertTrue(fact_supported("사용자는 한국어 메일을 홍길동 드림으로 끝낸다.", "한국어 메일을 쓸 때 항상 홍길동 드림으로 끝냅니다"))
+        # The fact adds "Korean emails", which the short quote does not say: below the
+        # automatic-save level (0.8), so it goes to review.
+        self.assertLess(support_share("사용자는 한국어 메일을 홍길동 드림으로 끝낸다.", "홍길동 드림으로 끝냅니다"), 0.8)
+        # A paraphrase keeps some words: review, not rejection.
+        self.assertTrue(fact_supported(
+            "User prefers emails to start directly with the point without the standard greeting.",
+            'When you write emails for me, never open with "I hope this email finds you well." '
+            "Just get to the point in the first sentence."))
+
+
+class TestGroundedExtractor(unittest.TestCase):
     def setUp(self):
-        self.test_dir = tempfile.mkdtemp(prefix="test_extractor_")
-        self.vault = MemoryVault(root_dir=self.test_dir)
-        self.vault.initialize()
-        self.cache = MemoryCache(vault=self.vault)
-        self.extractor = MemoryExtractor(
-            vault=self.vault,
-            cache=self.cache,
-            completion_url="http://127.0.0.1:9999/v1/chat/completions",
-        )
+        self.lm = FakeLMStudio()
+        self.extractor = MemoryExtractor(completion_url=self.lm.completion_url)
 
     def tearDown(self):
-        shutil.rmtree(self.test_dir, ignore_errors=True)
+        self.lm.close()
 
-    def test_extract_and_store_fallback_private(self):
-        messages = [
-            {"role": "user", "content": "My class is CMPM 120 on Tuesdays and Thursdays."},
-            {"role": "assistant", "content": "Got it, I will remember your CMPM 120 class schedule."},
-        ]
+    def test_request_uses_loaded_model_and_turns_thinking_off(self):
+        self.lm.replies = [facts({"text": "User likes tea.", "quote": "I like tea", "category": "preference"})]
+        out = self.extractor.extract_self_facts("I like tea a lot.")
+        self.assertEqual(out[0]["quote"], "I like tea")
+        body = self.lm.requests[0]
+        self.assertEqual(body["reasoning_effort"], "none")
+        self.assertEqual(body["model"], "qwen/qwen3.5-9b")
+        self.assertIn("I like tea a lot.", body["messages"][1]["content"])
 
-        saved = self.extractor.extract_and_store(messages)
-        self.assertGreaterEqual(len(saved), 1)
+    def test_no_loaded_chat_model_fails_without_a_request(self):
+        self.lm.loaded = [m for m in self.lm.loaded if m["type"] == "embeddings"]
+        with self.assertRaises(ExtractionError) as ctx:
+            self.extractor.extract_self_facts("I like tea.")
+        self.assertIn("No chat model is loaded", str(ctx.exception))
+        self.assertEqual(self.lm.requests, [], "must not send a request that could JIT-load a model")
 
-        # Check saved tier
-        first = saved[0]
-        self.assertEqual(first.tier, PrivacyTier.TIER_2_PRIVATE)
+    def test_configured_model_not_loaded_fails(self):
+        extractor = MemoryExtractor(completion_url=self.lm.completion_url, model_name="some/other-model")
+        with self.assertRaises(ExtractionError):
+            extractor.extract_self_facts("I like tea.")
+        self.assertEqual(self.lm.requests, [])
 
-        # Verify it was written to private facts file
-        private_facts = self.vault.load_facts(tier=PrivacyTier.TIER_2_PRIVATE)
-        self.assertTrue(any("CMPM" in f.text for f in private_facts))
+    def test_unreachable_server_fails_loudly(self):
+        extractor = MemoryExtractor(completion_url="http://127.0.0.1:9/v1/chat/completions")
+        with self.assertRaises(ExtractionError):
+            extractor.extract_self_facts("I like tea.")
 
-        # Verify it is in cache
-        cached = self.cache.search("CMPM 120")
-        self.assertGreaterEqual(len(cached), 1)
+    def test_http_error_and_garbage_output_raise(self):
+        self.lm.replies = [500, "Sure! Here are the facts you asked for."]
+        with self.assertRaises(ExtractionError):
+            self.extractor.extract_self_facts("I like tea.")
+        with self.assertRaises(ExtractionError):
+            self.extractor.extract_self_facts("I like tea.")
 
-    def test_extract_and_store_fallback_public(self):
-        messages = [
-            {"role": "user", "content": "I prefer dark theme for code editors."},
-            {"role": "assistant", "content": "I will keep that in mind."},
-        ]
-
-        saved = self.extractor.extract_and_store(messages)
-        self.assertGreaterEqual(len(saved), 1)
-
-        first = saved[0]
-        self.assertEqual(first.tier, PrivacyTier.TIER_0_PUBLIC)
-
-        # Verify it was written to public facts file
-        public_facts = self.vault.load_facts(tier=PrivacyTier.TIER_0_PUBLIC)
-        self.assertTrue(any("dark theme" in f.text for f in public_facts))
+    def test_empty_array_is_a_valid_answer(self):
+        self.lm.replies = ["[]", "```json\n[]\n```"]
+        self.assertEqual(self.extractor.extract_self_facts("thanks"), [])
+        self.assertEqual(self.extractor.extract_self_facts("thanks"), [])
 
 
 if __name__ == "__main__":
