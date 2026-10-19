@@ -6,6 +6,7 @@ precise line windowing.
 """
 from __future__ import annotations
 
+import fnmatch
 import os
 from pathlib import Path
 import re
@@ -271,9 +272,7 @@ def grep_text(
         return {"error": reason, "root": str(root)}
 
     pattern = re.compile(query, re.I) if is_regex else re.compile(re.escape(query), re.I)
-    ext_filter = None
-    if file_pattern and file_pattern.startswith("*."):
-        ext_filter = file_pattern[1:].lower()
+    pat_lower = file_pattern.lower() if file_pattern else None
 
     matches = []
     for cur_dir, dirs, files in os.walk(root):
@@ -282,8 +281,11 @@ def grep_text(
         for f in files:
             if f.startswith("."):
                 continue
-            if ext_filter and not f.lower().endswith(ext_filter):
-                continue
+            if pat_lower:
+                f_low = f.lower()
+                # Support glob patterns (*.txt), exact filenames (odysseus_plan.txt), or substrings
+                if not (fnmatch.fnmatch(f_low, pat_lower) or pat_lower in f_low):
+                    continue
 
             file_path = Path(cur_dir) / f
             if is_binary_file(file_path):
