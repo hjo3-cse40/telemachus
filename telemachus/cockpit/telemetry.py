@@ -8,9 +8,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+from pathlib import Path
 import socket
 import urllib.request
 from typing import Any, Dict, Optional
+
 
 try:
     import psutil
@@ -116,21 +118,50 @@ class CockpitTelemetry:
         # 41.5 t/s benchmarked on Apple Silicon M3/M4 Pro
         return 41.5
 
+    def get_thinking_tokens(self) -> Dict[str, Any]:
+        """Extracts live reasoning/thinking token metrics from OpenCode session store."""
+        db_path = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
+        last_reasoning = 0
+        total_reasoning = 0
+        if db_path.exists():
+            try:
+                import sqlite3
+                conn = sqlite3.connect(str(db_path), timeout=1.0)
+                cur = conn.cursor()
+                cur.execute("SELECT data FROM part WHERE data LIKE '%step-finish%' ORDER BY rowid DESC LIMIT 10")
+                rows = cur.fetchall()
+                if rows:
+                    latest = json.loads(rows[0][0])
+                    last_reasoning = latest.get("tokens", {}).get("reasoning", 0)
+                    for r in rows:
+                        d = json.loads(r[0])
+                        total_reasoning += d.get("tokens", {}).get("reasoning", 0)
+                conn.close()
+            except Exception as e:
+                logger.debug(f"Failed to query reasoning tokens from opencode.db: {e}")
+
+        return {
+            "enabled": True,
+            "last_turn_tokens": last_reasoning,
+            "recent_total_tokens": total_reasoning,
+        }
+
     def format_single_line_header(self, max_width: int = 120) -> str:
         """Renders the unified top header string formatted for tmux/terminal."""
         model = self.get_active_model()
-        # Truncate model name if excessively long
         if len(model) > 22:
             model = model.split("/")[-1]
-            if len(model) > 20:
-                model = model[:18] + ".."
+            if len(model) > 18:
+                model = model[:16] + ".."
 
         ctx = self.get_context_budget()
         mem = self.get_memory_breakdown()
         speed = self.get_inference_speed()
+        think = self.get_thinking_tokens()
+        think_tok = f" · Think: {think['last_turn_tokens']}t" if think["last_turn_tokens"] > 0 else " · Think: ON"
 
         line = (
-            f"[MODEL: {model}] | "
+            f"[MODEL: {model}{think_tok}] | "
             f"CTX: {ctx['used_tokens']:,}/{ctx['max_tokens']:,} ({ctx['used_pct']}%) | "
             f"RAM: {mem['used_gb']:.1f}/{mem['total_gb']:.1f}G ({mem['used_pct']}%) "
             f"[MLX {mem['mlx_gb']}G · Laya {mem['laya_gb']}G] | "
@@ -138,9 +169,12 @@ class CockpitTelemetry:
         )
         if len(line) > max_width:
             line = (
-                f"[{model}] | "
+                f"[MODEL: {model}{think_tok}] | "
                 f"CTX: {ctx['used_pct']}% | "
-                f"RAM: {mem['used_gb']:.1f}/{mem['total_gb']:.1f}G ({mem['used_pct']}%) | "
-                f"{speed:.1f} t/s"
+                f"RAM: {mem['used_gb']:.1f}/{mem['total_gb']:.1f}G | "
+                f"SPEED: {speed:.1f} t/s"
             )
         return line
+
+
+

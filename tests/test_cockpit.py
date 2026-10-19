@@ -33,12 +33,22 @@ class TestCockpitTelemetry(unittest.TestCase):
         self.assertGreater(ctx["used_tokens"], 0)
         self.assertLessEqual(ctx["used_pct"], 100)
 
+    def test_thinking_tokens(self):
+        think = self.telemetry.get_thinking_tokens()
+        self.assertIn("enabled", think)
+        self.assertIn("last_turn_tokens", think)
+        self.assertIn("recent_total_tokens", think)
+        self.assertTrue(think["enabled"])
+        self.assertGreaterEqual(think["last_turn_tokens"], 0)
+
     def test_single_line_header_format(self):
         hdr = self.telemetry.format_single_line_header(max_width=120)
         self.assertIn("MODEL:", hdr)
         self.assertIn("RAM:", hdr)
         self.assertIn("SPEED:", hdr)
+        self.assertIn("Think:", hdr)
         self.assertLessEqual(len(hdr), 130)
+
 
 
 class TestEmailTriagePanel(unittest.TestCase):

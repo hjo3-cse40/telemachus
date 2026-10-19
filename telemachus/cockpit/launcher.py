@@ -86,10 +86,12 @@ class CockpitLauncher:
             "echo '\\033[1;35m  Telemachus Execution Harness (OpenCode CLI)   \\033[0m'; "
             "echo '\\033[1;36m================================================\\033[0m'; "
             "echo 'Connected to local Telemachus MCP & Ingress Proxy.'; "
+            "echo '\\033[1;32m● Thinking & Reasoning: ON by default (Press Ctrl+T to toggle)\\033[0m'; "
             "echo 'Type your prompt turn or press Ctrl+B then left arrow to switch panes.'; "
             "echo ''; "
             "opencode || exec /bin/zsh"
         )
+
         split_target = f"{target}:0.0" if not in_tmux else ""
         split_args = ["split-window", "-h", "-p", "52", "-c", str(self.project_root)]
         if split_target:
