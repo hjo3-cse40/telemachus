@@ -177,3 +177,35 @@ def run_proxy(
     server = IngressProxyServer((listen_host, listen_port), IngressProxyHandler)
     logger.info(f"Ingress Proxy listening on http://{listen_host}:{listen_port} -> Upstream: {upstream_host}:{upstream_port}")
     return server
+
+
+def start_ingress_proxy_background(
+    listen_host: str = "127.0.0.1",
+    listen_port: int = 1235,
+    upstream_host: str = "127.0.0.1",
+    upstream_port: int = 1234,
+) -> Optional[IngressProxyServer]:
+    """Starts the ingress proxy in a background daemon thread if not already running."""
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.2)
+        if s.connect_ex((listen_host, listen_port)) == 0:
+            logger.info(f"Ingress Proxy already active on http://{listen_host}:{listen_port}")
+            return None
+
+    try:
+        server = run_proxy(
+            listen_host=listen_host,
+            listen_port=listen_port,
+            upstream_host=upstream_host,
+            upstream_port=upstream_port,
+        )
+        t = threading.Thread(target=server.serve_forever, daemon=True, name="TelemachusIngressProxy")
+        t.start()
+        sys.stderr.write(f"[Telemachus MCP] Ingress Tool Pruning Proxy active on http://{listen_host}:{listen_port}\n")
+        sys.stderr.flush()
+        return server
+    except Exception as e:
+        sys.stderr.write(f"[Telemachus MCP] Notice: Ingress Proxy start skipped or already running: {e}\n")
+        sys.stderr.flush()
+        return None

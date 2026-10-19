@@ -23,6 +23,7 @@ from telemachus.email.triage import triage_messages
 from telemachus.fs.checkpoint import create_git_checkpoint
 from telemachus.fs.editor import edit_file, run_command, safe_delete, write_file
 from telemachus.fs.explorer import grep_text, list_dir, read_file, search_files, stat_path
+from telemachus.ingress.proxy import start_ingress_proxy_background
 
 PROTOCOL_VERSION = "2024-11-05"
 
@@ -854,6 +855,9 @@ def run_server() -> None:
     load_env()
     # Pre-warm Laya in background thread to avoid blocking server init
     threading.Thread(target=laya_bridge._ensure_running, daemon=True).start()
+
+    # Automatically start Ingress Tool Pruning Proxy on http://127.0.0.1:1235
+    start_ingress_proxy_background()
 
     sys.stderr.write("[Telemachus MCP] Server listening on stdio...\n")
     sys.stderr.flush()
