@@ -174,10 +174,32 @@ class IngressProxyHandler(http.server.BaseHTTPRequestHandler):
             conn.request("POST", self.path, body=modified_body, headers=headers)
             resp = conn.getresponse()
             self._stream_response(resp)
+
+            # Trigger asynchronous continual memory extraction in the background
+            messages = payload.get("messages", [])
+            if messages and len(messages) >= 1:
+                threading.Thread(
+                    target=self._run_continual_extraction,
+                    args=(messages,),
+                    daemon=True,
+                    name="ContinualMemoryExtractor",
+                ).start()
         except Exception as e:
             self.send_error(502, f"Upstream LM Studio communication error: {e}")
         finally:
             conn.close()
+
+    def _run_continual_extraction(self, messages: List[Dict[str, Any]]) -> None:
+        """Asynchronously extracts durable facts from the conversation turn."""
+        try:
+            from telemachus.memory.extractor import MemoryExtractor
+            extractor = MemoryExtractor()
+            new_entries = extractor.extract_and_store(messages)
+            if new_entries:
+                logger.info(f"Continual extraction saved {len(new_entries)} facts: {[e.text for e in new_entries]}")
+        except Exception as e:
+            logger.debug(f"Continual extraction background task failed: {e}")
+
 
 
 class IngressProxyServer(socketserver.ThreadingMixIn, http.server.HTTPServer):

@@ -66,6 +66,57 @@ def cmd_status(args):
     print(f"By Category: {stats['by_category']}")
 
 
+def cmd_recent(args):
+    import time
+    vault = MemoryVault(args.vault_dir)
+    cache = MemoryCache(vault=vault)
+    tier_limit = PrivacyTier.from_str(args.tier) if args.tier else None
+    memories = cache.get_recent(limit=args.limit, tier_limit=tier_limit)
+    print(f"=== Last {len(memories)} Recorded Memories ===")
+    for idx, m in enumerate(memories, 1):
+        time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(m.timestamp))
+        tier_badge = "🔒 [PRIVATE]" if m.tier == PrivacyTier.TIER_2_PRIVATE else ("📁 [PROJECT]" if m.tier == PrivacyTier.TIER_1_PROJECT else "🌐 [PUBLIC]")
+        pin_tag = "📌 " if m.pinned else ""
+        print(f"{idx}. {time_str} | {tier_badge} [{m.category}] {pin_tag}{m.text}")
+
+
+def cmd_tail(args):
+    import time
+    vault = MemoryVault(args.vault_dir)
+    if not vault.events_file.exists():
+        print(f"No events log found at {vault.events_file}")
+        return
+
+    print(f"=== Live Memory Events Stream ({vault.events_file}) ===")
+    print("Listening for new memory extractions (Press Ctrl+C to exit)...\n")
+
+    def format_event(raw_line: str) -> str:
+        try:
+            ev = json.loads(raw_line)
+            t = time.strftime("%H:%M:%S", time.localtime(ev.get("timestamp", 0)))
+            name = ev.get("event", "UNKNOWN")
+            details = ev.get("details", {})
+            return f"[{t}] {name:15} | {details}"
+        except Exception:
+            return raw_line
+
+    with open(vault.events_file, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+        for line in lines[-args.lines:]:
+            if line.strip():
+                print(format_event(line.strip()))
+        f.seek(0, 2)
+        try:
+            while True:
+                line = f.readline()
+                if line and line.strip():
+                    print(format_event(line.strip()))
+                else:
+                    time.sleep(0.5)
+        except KeyboardInterrupt:
+            print("\nStopped.")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Telemachus Unified Memory Manager")
     parser.add_argument("--vault-dir", default=None, help="Root directory for memory vault (default: ~/.memory)")
@@ -87,6 +138,17 @@ def main():
     p_search.add_argument("--tier", default=None, help="Limit to tier: tier_0_public, tier_1_project, tier_2_private")
     p_search.add_argument("--limit", type=int, default=10, help="Max results to return")
     p_search.set_defaults(func=cmd_search)
+
+    # recent
+    p_recent = subparsers.add_parser("recent", help="Show recently recorded memories")
+    p_recent.add_argument("--tier", default=None, help="Limit to tier")
+    p_recent.add_argument("--limit", type=int, default=10, help="Max memories to show (default: 10)")
+    p_recent.set_defaults(func=cmd_recent)
+
+    # tail
+    p_tail = subparsers.add_parser("tail", help="Live tail memory extraction events")
+    p_tail.add_argument("-n", "--lines", type=int, default=10, help="Number of previous events to show (default: 10)")
+    p_tail.set_defaults(func=cmd_tail)
 
     # status
     p_status = subparsers.add_parser("status", help="Show vault status and statistics")

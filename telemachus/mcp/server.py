@@ -613,6 +613,21 @@ TOOLS_DEFINITIONS = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "memory_recent",
+        "description": "Lists the most recently recorded memories and facts in chronological order.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "Max recent memories to return (default: 5).",
+                    "default": 5,
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
 ]
 
 
@@ -919,6 +934,13 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
         cache = MemoryCache(vault=vault)
         stats = cache.get_stats()
         return json.dumps(stats, indent=2)
+
+    elif name == "memory_recent":
+        limit = int(arguments.get("limit", 5))
+        vault = MemoryVault()
+        cache = MemoryCache(vault=vault)
+        results = cache.get_recent(limit=limit)
+        return json.dumps([r.to_dict() for r in results], indent=2)
 
     else:
         raise ValueError(f"Unknown tool: {name}")

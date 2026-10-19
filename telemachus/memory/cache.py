@@ -167,6 +167,22 @@ class MemoryCache:
 
         return results
 
+    def get_recent(self, limit: int = 10, tier_limit: Optional[PrivacyTier] = None) -> List[MemoryEntry]:
+        """Returns the most recently recorded memories."""
+        allowed_tiers = [
+            PrivacyTier.TIER_0_PUBLIC.value,
+            PrivacyTier.TIER_1_PROJECT.value,
+            PrivacyTier.TIER_2_PRIVATE.value,
+        ] if tier_limit is None else [tier_limit.value]
+
+        placeholders = ",".join("?" for _ in allowed_tiers)
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                f"SELECT * FROM memories WHERE tier IN ({placeholders}) ORDER BY timestamp DESC LIMIT ?",
+                (*allowed_tiers, limit),
+            )
+            return [self._row_to_entry(r) for r in cursor.fetchall()]
+
     def sync_from_vault(self, vault: MemoryVault) -> int:
         """Syncs all facts and profile markdown files from the vault into SQLite cache."""
         count = 0
