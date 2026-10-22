@@ -67,7 +67,7 @@ Before any tool or bash command is executed on the local system:
 ```
 
 ### 1. Tier 0: Blast-Radius & Boundary Constraints (Deterministic)
-- **Hard Whitelist / Sandbox**: Within project directories (`~/code/*`, `~/.gemini/antigravity/scratch/*`), destructive actions have low consequence.
+- **Hard Whitelist / Sandbox**: Within project directories (`~/code/*`, `~/scratch/*`), destructive actions have low consequence.
 - **Hard Blacklist (No Exceptions)**:
   - System roots: `/`, `/System`, `/usr`, `/Library`, `/private/etc`
   - Secrets & Credentials: `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.config/opencode/*.dat`, `.env` files outside active workspace.

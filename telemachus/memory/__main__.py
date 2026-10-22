@@ -27,7 +27,7 @@ def cmd_import(args):
     importer = MemoryImporter(vault, cache)
 
     odysseus_count = 0
-    odysseus_path = Path(args.odysseus_path) if args.odysseus_path else Path("~/.odysseus/data/memory.json")
+    odysseus_path = Path(args.odysseus_path) if args.odysseus_path else Path.home() / "odysseus" / "data" / "memory.json"
     if odysseus_path.exists():
         odysseus_count = importer.import_odysseus(odysseus_path)
         print(f"Imported {odysseus_count} memories from Odysseus ({odysseus_path})")

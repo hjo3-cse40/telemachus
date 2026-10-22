@@ -88,19 +88,19 @@ LLMs should **never** do raw accounting math. Instead:
 
 ---
 
-## 5. Core Tool 5: Job Application Tracker & Autofill Hub (Future Domain)
+## 5. Core Tool 5: Task Pipeline Tracker (Future Domain)
 
 ### Requirements
-- Connect seamlessly to `~/task-tracker.csv`.
+- Connect to a local CSV tracker (path set in local config, never committed).
 - Track items, status, and priority across pipeline stages.
-- Auto-sync recruiter / platform emails (Ashby, Greenhouse, Lever, Indeed) directly to job status.
-- Parse job descriptions, tailor answers using verified project stories (SemiAI CRM, Airlock harness, Argus), and freeze PDFs in `resumes/by-application/`.
+- Auto-sync relevant emails directly to pipeline status.
+- Parse structured postings, tailor responses using a local library of verified project notes, and freeze document snapshots in a local folder.
 
 ### Tools Exposed to OpenCode
-1. `job_list_active(status_filter=None)`
-2. `job_update_status(company, role, new_status, notes=None)`
-3. `job_tailor_application(jd_url_or_text, target_resume="Documents/Resumes/resume.tex")`
-4. `job_stage_dossier(company, role, answers_dict)`
+1. `task_list_active(status_filter=None)`
+2. `task_update_status(item, new_status, notes=None)`
+3. `task_tailor_response(source_text, template_path)`
+4. `task_stage_dossier(item, answers_dict)`
 
 ---
 
