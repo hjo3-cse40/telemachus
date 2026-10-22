@@ -384,3 +384,9 @@ python3 -m telemachus.cockpit
   - `[r]`: Refresh data from local stores.
   - `[q]`: Quit cockpit.
 
+---
+
+## 📄 License
+
+Telemachus is licensed under the [Apache License, Version 2.0](./LICENSE).
+
