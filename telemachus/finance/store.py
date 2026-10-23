@@ -37,9 +37,13 @@ from telemachus.finance.models import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_FINANCE_ROOT = Path(
-    os.environ.get("TELEMACHUS_FINANCE_DIR") or (Path.home() / ".memory" / "private" / "finances")
-).expanduser().resolve()
+def get_finance_root() -> Path:
+    """Returns canonical finance root directory, allowing dynamic env override."""
+    return Path(
+        os.environ.get("TELEMACHUS_FINANCE_DIR") or (Path.home() / ".memory" / "private" / "finances")
+    ).expanduser().resolve()
+
+DEFAULT_FINANCE_ROOT = get_finance_root()
 
 
 class UnbalancedTransactionError(ValueError):
@@ -61,7 +65,7 @@ class FinanceStore:
     """Transactional SQLite engine managing double-entry financial state."""
 
     def __init__(self, root_dir: Optional[Path | str] = None):
-        self.root_dir = Path(root_dir).expanduser().resolve() if root_dir else DEFAULT_FINANCE_ROOT
+        self.root_dir = Path(root_dir).expanduser().resolve() if root_dir else get_finance_root()
         self.db_path = self.root_dir / "finances.sqlite3"
         self.lock_path = self.root_dir / ".lock"
         self._init_storage()

@@ -738,6 +738,42 @@ TOOLS_DEFINITIONS = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "finance_query_transactions",
+        "description": (
+            "Queries transactions with deterministic filtering and statistical rollups. "
+            "Filter by category ('gas', 'groceries', 'dining', etc.), specific date (YYYY-MM-DD), "
+            "or date range. Returns transaction details plus deterministic statistics: "
+            "total spent, transaction count, average amount, and most recent expense."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "description": "Category or payee to filter by (e.g. 'gas', 'groceries', 'dining', 'pge', 'wifi', 'gym').",
+                },
+                "date": {
+                    "type": "string",
+                    "description": "Exact transaction date to inspect (YYYY-MM-DD).",
+                },
+                "start_date": {
+                    "type": "string",
+                    "description": "Start of date range (YYYY-MM-DD).",
+                },
+                "end_date": {
+                    "type": "string",
+                    "description": "End of date range (YYYY-MM-DD).",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum transactions to return (default: 20).",
+                    "default": 20,
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
 ]
 
 
@@ -1197,6 +1233,107 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
         ]
         for g in goals:
             lines.append(f"| {g.name} | {_f(g.target_cents)} | {_f(g.saved_cents)} | {_f(g.remaining_cents)} | {g.progress_bar} |")
+        return "\n".join(lines)
+
+    elif name == "finance_query_transactions":
+        store = FinanceStore()
+        category = str(arguments.get("category") or "").lower().strip()
+        date = arguments.get("date")
+        start_date = date or arguments.get("start_date")
+        end_date = date or arguments.get("end_date")
+        limit = int(arguments.get("limit", 20))
+
+        cat_account_map = {
+            "groceries": "Expenses:Food:Groceries",
+            "grocery": "Expenses:Food:Groceries",
+            "gas": "Expenses:Transport:Gas",
+            "fuel": "Expenses:Transport:Gas",
+            "dining": "Expenses:Food:Dining",
+            "restaurant": "Expenses:Food:Dining",
+            "wifi": "Expenses:Utilities:WiFi",
+            "internet": "Expenses:Utilities:WiFi",
+            "pge": "Expenses:Utilities:PGE",
+            "gym": "Expenses:Subscriptions:Gym",
+            "spotify": "Expenses:Subscriptions:Spotify",
+            "icloud": "Expenses:Subscriptions:AppleCloud",
+            "apple": "Expenses:Subscriptions:AppleCloud",
+            "kahram": "Expenses:Family:Kahram",
+        }
+        account_id = cat_account_map.get(category)
+        if not account_id and category.startswith("expenses:"):
+            account_id = category
+
+        txs = store.list_transactions(
+            start_date=start_date,
+            end_date=end_date,
+            account_id=account_id,
+            limit=200,
+        )
+
+        if category and not account_id:
+            txs = [t for t in txs if category in t.payee.lower() or category in t.memo.lower()]
+
+        total_cents = 0
+        matching_items = []
+        for t in txs:
+            amount_cents = 0
+            cat_name = ""
+            for p in t.postings:
+                if p.amount_cents > 0 and (not account_id or p.account_id == account_id):
+                    amount_cents = p.amount_cents
+                    cat_name = p.account_id
+                    break
+            if amount_cents == 0 and t.postings:
+                for p in t.postings:
+                    if p.amount_cents > 0:
+                        amount_cents = p.amount_cents
+                        cat_name = p.account_id
+                        break
+                if amount_cents == 0:
+                    amount_cents = abs(t.postings[0].amount_cents)
+
+            total_cents += amount_cents
+            matching_items.append({
+                "date": t.date,
+                "payee": t.payee,
+                "amount_cents": amount_cents,
+                "category": cat_name,
+                "memo": t.memo,
+            })
+
+        count = len(matching_items)
+        avg_cents = round(total_cents / count) if count > 0 else 0
+        most_recent = matching_items[0] if matching_items else None
+
+        def _f(c: int) -> str:
+            return f"${c / 100.0:,.2f}"
+
+        title = f"Transaction Query Results"
+        if category:
+            title += f" for '{category.title()}'"
+        if date:
+            title += f" on {date}"
+        elif start_date or end_date:
+            title += f" ({start_date or 'Start'} to {end_date or 'Now'})"
+
+        lines = [
+            f"### {title} ({count} transactions found)",
+            f"- **Total Spent**:       {_f(total_cents)}",
+            f"- **Transaction Count**: {count}",
+            f"- **Average Amount**:    {_f(avg_cents)}",
+        ]
+        if most_recent:
+            lines.append(f"- **Most Recent**:       {_f(most_recent['amount_cents'])} on {most_recent['date']} ({most_recent['payee']})")
+
+        lines.extend([
+            "",
+            "| Date | Payee | Amount | Category | Memo |",
+            "| :--- | :--- | :---: | :--- | :--- |",
+        ])
+        for it in matching_items[:limit]:
+            clean_cat = it['category'].split(':')[-1] if it['category'] else 'General'
+            lines.append(f"| {it['date']} | {it['payee']} | {_f(it['amount_cents'])} | {clean_cat} | {it['memo']} |")
+
         return "\n".join(lines)
 
     else:
