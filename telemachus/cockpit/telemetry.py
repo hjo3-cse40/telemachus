@@ -40,10 +40,10 @@ class CockpitTelemetry:
         self._cached_thinking: Optional[Dict[str, Any]] = None
         self._thinking_cache_time: float = 0.0
 
-    def get_active_model(self, max_age: float = 5.0) -> str:
+    def get_active_model(self, max_age: float = 120.0) -> str:
         """Queries local model endpoint or returns default local Qwen model.
         
-        Caches result for max_age seconds to prevent flooding local inference servers.
+        Caches result for max_age seconds (default 120s) to prevent flooding local inference servers.
         """
         now = time.time()
         if self._cached_model is not None and (now - self._model_cache_time) < max_age:

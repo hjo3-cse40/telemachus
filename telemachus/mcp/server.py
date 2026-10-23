@@ -20,6 +20,7 @@ from telemachus.email.draft import create_draft
 from telemachus.email.indexer import index_emails
 from telemachus.email.store import EmailIndexStore
 from telemachus.email.triage import triage_messages
+from telemachus.finance import FinanceMasker, FinanceStore, RecurringEngine
 from telemachus.fs.checkpoint import create_git_checkpoint
 from telemachus.fs.editor import edit_file, run_command, safe_delete, write_file
 from telemachus.fs.explorer import grep_text, list_dir, read_file, search_files, stat_path
@@ -657,6 +658,156 @@ TOOLS_DEFINITIONS = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "finance_log_entry",
+        "description": (
+            "Deterministically logs one transaction or a batch of bullet transactions into the local double-entry ledger. "
+            "Supports quick bullet items (e.g. groceries, gas, dining, payday) and auto-balances postings."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "payee": {"type": "string", "description": "Payee or merchant name (e.g. 'Safeway', 'Taqueria')."},
+                "amount": {"type": "number", "description": "Amount in dollars (e.g. 45.20 for expense, 1600.00 for income)."},
+                "category": {
+                    "type": "string",
+                    "description": "Category: 'groceries', 'gas', 'dining', 'payday', 'kahram', 'gym', 'spotify', 'icloud', 'wifi', 'pge', or 'personal'.",
+                },
+                "memo": {"type": "string", "description": "Optional notes or item description."},
+                "date": {"type": "string", "description": "Date in YYYY-MM-DD format (defaults to today)."},
+                "items": {
+                    "type": "array",
+                    "description": "Optional batch list of items from daily bullet list: [{'category': 'groceries', 'amount': 45.20}, ...]",
+                    "items": {"type": "object"},
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "finance_monthly_overview",
+        "description": (
+            "Returns the exact Notion Monthly Overview row with all deterministic formulas: "
+            "Income, Savings, Fixed Bills, PGE, All Bills, Groceries (Planned/Actual/Left), Gas (Planned/Actual/Left), "
+            "Variable Variance, Total Personal, and Remaining Cushion."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "month": {"type": "string", "description": "Month in YYYY-MM format (defaults to current month)."},
+                "income": {"type": "number", "description": "Set/update planned monthly income (dollars)."},
+                "savings_target": {"type": "number", "description": "Set/update savings target (dollars)."},
+                "groceries_planned": {"type": "number", "description": "Set/update planned groceries budget (dollars)."},
+                "gas_planned": {"type": "number", "description": "Set/update planned car gas budget (dollars)."},
+                "pge": {"type": "number", "description": "Set confirmed PG&E bill amount (dollars)."},
+                "notes": {"type": "string", "description": "Optional month notes."},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "finance_get_balance",
+        "description": "Gets deterministic real-time balances for Wells Fargo Checking, Capital One HYSA, Visa Card, and Net Worth.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "as_of_date": {"type": "string", "description": "Optional cutoff date (YYYY-MM-DD)."}
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "finance_list_recurring",
+        "description": "Lists upcoming fixed recurring obligations (Kahram, Gym, iCloud, Spotify, Wi-Fi) and rolling PG&E variable estimate.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "days_ahead": {"type": "integer", "description": "Lookahead window in days (default: 30).", "default": 30}
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "finance_goals_progress",
+        "description": "Returns progress bars and remaining targets for monthly goals (Savings and Kahram Payment).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "month": {"type": "string", "description": "Month in YYYY-MM format (defaults to current month)."}
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "finance_query_transactions",
+        "description": (
+            "Queries transactions with deterministic filtering and statistical rollups. "
+            "Filter by category ('gas', 'groceries', 'dining', etc.), specific date (YYYY-MM-DD), "
+            "or date range. Returns transaction details plus deterministic statistics: "
+            "total spent, transaction count, average amount, and most recent expense."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "description": "Category or payee to filter by (e.g. 'gas', 'groceries', 'dining', 'pge', 'wifi', 'gym').",
+                },
+                "date": {
+                    "type": "string",
+                    "description": "Exact transaction date to inspect (YYYY-MM-DD).",
+                },
+                "start_date": {
+                    "type": "string",
+                    "description": "Start of date range (YYYY-MM-DD).",
+                },
+                "end_date": {
+                    "type": "string",
+                    "description": "End of date range (YYYY-MM-DD).",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum transactions to return (default: 20).",
+                    "default": 20,
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "finance_paycheck_plan",
+        "description": (
+            "Calculates bi-weekly paycheck cash flow partitioning: take-home pay, automatic HYSA savings transfer, "
+            "bills due specifically within this paycheck window, 2-week grocery & gas buffer, and safe-to-spend remainder."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "date": {
+                    "type": "string",
+                    "description": "Optional date in YYYY-MM-DD format to inspect that specific paycheck cycle (defaults to current date).",
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "finance_plan_breakdown",
+        "description": (
+            "Returns a comprehensive financial situation breakdown: current balances, this month's budget allocations "
+            "(HYSA savings, groceries, eating out, gas, bills, discretionary allowance), plus the exact 2-week paycheck allocation."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "date": {
+                    "type": "string",
+                    "description": "Optional date in YYYY-MM-DD format (defaults to current date).",
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
 ]
 
 
@@ -979,6 +1130,314 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
         cache = MemoryCache(vault=vault)
         results = cache.get_recent(limit=limit)
         return json.dumps([r.to_dict() for r in results], indent=2)
+
+    elif name == "finance_log_entry":
+        store = FinanceStore()
+        items = arguments.get("items")
+        if items and isinstance(items, list):
+            logged = store.log_batch_transactions(items, default_date=arguments.get("date"))
+            return json.dumps({
+                "status": "success",
+                "logged_count": len(logged),
+                "transactions": [t.to_dict() for t in logged],
+            }, indent=2)
+        else:
+            cat = arguments.get("category", "personal")
+            single_item = {
+                "payee": arguments.get("payee"),
+                "amount": arguments.get("amount", 0.0),
+                "category": cat,
+                "memo": arguments.get("memo", ""),
+                "date": arguments.get("date"),
+            }
+            logged = store.log_batch_transactions([single_item])
+            tx = logged[0] if logged else None
+            return json.dumps({
+                "status": "success",
+                "transaction_id": tx.id if tx else None,
+                "payee": tx.payee if tx else "",
+                "date": tx.date if tx else "",
+                "postings": [p.to_dict() for p in tx.postings] if tx else [],
+            }, indent=2)
+
+    elif name == "finance_monthly_overview":
+        store = FinanceStore()
+        month = arguments.get("month")
+        if any(k in arguments for k in ("income", "savings_target", "groceries_planned", "gas_planned", "pge", "notes")):
+            current = store.get_monthly_overview(month)
+            inc = round(arguments.get("income", current.income_cents / 100.0) * 100)
+            sav = round(arguments.get("savings_target", current.savings_target_cents / 100.0) * 100)
+            groc_p = round(arguments.get("groceries_planned", current.groceries_planned_cents / 100.0) * 100)
+            gas_p = round(arguments.get("gas_planned", current.gas_planned_cents / 100.0) * 100)
+            pge_val = round(arguments.get("pge", current.pge_cents / 100.0) * 100)
+            notes_val = arguments.get("notes", current.notes)
+            overview = store.set_monthly_overview(
+                month=month or current.month,
+                income_cents=inc,
+                savings_target_cents=sav,
+                groceries_planned_cents=groc_p,
+                gas_planned_cents=gas_p,
+                pge_cents=pge_val,
+                notes=notes_val,
+            )
+        else:
+            overview = store.get_monthly_overview(month)
+
+        def _f(cents: int) -> str:
+            return f"${cents / 100.0:,.2f}"
+
+        lines = [
+            f"### Monthly Overview: {overview.month} [{overview.status.upper()}]",
+            f"- **Income**:              {_f(overview.income_cents)}",
+            f"- **Savings Target**:      {_f(overview.savings_target_cents)}",
+            f"- **Fixed Bills**:         {_f(overview.fixed_bills_cents)} (Kahram, Gym, iCloud, Spotify, Wi-Fi)",
+            f"- **PG&E Bill**:           {_f(overview.pge_cents)}",
+            f"- **All Bills**:           {_f(overview.all_bills_cents)} (Fixed + PG&E)",
+            f"- **Total Personal**:      {_f(overview.total_personal_cents)} (Budgeted personal allowance)",
+            f"- **Remaining Cushion**:   {_f(overview.remaining_cushion_cents)} (Flex cushion: Variable Variance)",
+            "",
+            "| Planned vs Actual | Planned Budget | Actual Spent | Remaining Budget |",
+            "| :--- | :---: | :---: | :---: |",
+            f"| **Groceries** | {_f(overview.groceries_planned_cents)} | {_f(overview.groceries_actual_cents)} | {_f(overview.groceries_left_cents)} |",
+            f"| **Car Gas**   | {_f(overview.gas_planned_cents)} | {_f(overview.gas_actual_cents)} | {_f(overview.gas_left_cents)} |",
+            f"| **Variable Variance** | | | **{_f(overview.variable_variance_cents)}** |",
+        ]
+        if overview.notes:
+            lines.append(f"\n*Notes: {overview.notes}*")
+        return "\n".join(lines)
+
+    elif name == "finance_get_balance":
+        store = FinanceStore()
+        balances = store.get_all_balances(as_of_date=arguments.get("as_of_date"))
+        def _f(cents: int) -> str:
+            return f"${cents / 100.0:,.2f}"
+
+        lines = [
+            f"### Account Balance Sheet (As of {balances['as_of_date']})",
+            "| Account | Type | Cleared Balance |",
+            "| :--- | :--- | :---: |",
+        ]
+        for acc, cents in balances["account_balances"].items():
+            acc_type = "Asset" if "Assets:" in acc else ("Liability" if "Liabilities:" in acc else "Equity")
+            lines.append(f"| {acc} | {acc_type} | {_f(cents)} |")
+
+        lines.extend([
+            "",
+            f"- **Total Liquid Assets**: {_f(balances['liquid_assets_cents'])} (Wells Fargo Checking + Capital One HYSA)",
+            f"- **Total Liabilities**:   {_f(balances['liabilities_cents'])} (Visa Credit Card balance)",
+            f"- **NET WORTH**:           {_f(balances['net_worth_cents'])}",
+        ])
+        return "\n".join(lines)
+
+    elif name == "finance_list_recurring":
+        store = FinanceStore()
+        engine = RecurringEngine(store)
+        days = int(arguments.get("days_ahead", 30))
+        obligations = engine.get_upcoming_obligations(days_ahead=days)
+        cash_flow = engine.get_committed_cash_flow(days_ahead=days)
+
+        def _f(cents: int) -> str:
+            return f"${cents / 100.0:,.2f}"
+
+        lines = [
+            f"### Upcoming Obligations Radar (Next {days} Days)",
+            f"- **Liquid Capital**:       {_f(cash_flow['liquid_capital_cents'])}",
+            f"- **Committed Bills**:      {_f(cash_flow['committed_cents'])}",
+            f"- **Safe-to-Spend Buffer**: {_f(cash_flow['safe_to_spend_cents'])}",
+            "",
+            "| Due Date | Obligation | Amount | Status | Type | Autopay |",
+            "| :--- | :--- | :---: | :---: | :---: | :---: |",
+        ]
+        for o in obligations:
+            lines.append(
+                f"| {o['due_date']} | {o['name']} | {_f(o['amount_cents'])} | [{o['status'].upper()}] | {o['rule_type'].title()} | {'Yes' if o['is_autopay'] else 'No'} |"
+            )
+        return "\n".join(lines)
+
+    elif name == "finance_goals_progress":
+        store = FinanceStore()
+        goals = store.get_goals_progress(month=arguments.get("month"))
+        def _f(cents: int) -> str:
+            return f"${cents / 100.0:,.2f}"
+
+        lines = [
+            "### Monthly Goals Tracker",
+            "| Goal | Target | Saved / Paid | Remaining | Progress |",
+            "| :--- | :---: | :---: | :---: | :---: |",
+        ]
+        for g in goals:
+            lines.append(f"| {g.name} | {_f(g.target_cents)} | {_f(g.saved_cents)} | {_f(g.remaining_cents)} | {g.progress_bar} |")
+        return "\n".join(lines)
+
+    elif name == "finance_query_transactions":
+        store = FinanceStore()
+        category = str(arguments.get("category") or "").lower().strip()
+        date = arguments.get("date")
+        start_date = date or arguments.get("start_date")
+        end_date = date or arguments.get("end_date")
+        limit = int(arguments.get("limit", 20))
+
+        cat_account_map = {
+            "groceries": "Expenses:Food:Groceries",
+            "grocery": "Expenses:Food:Groceries",
+            "gas": "Expenses:Transport:Gas",
+            "fuel": "Expenses:Transport:Gas",
+            "dining": "Expenses:Food:Dining",
+            "restaurant": "Expenses:Food:Dining",
+            "wifi": "Expenses:Utilities:WiFi",
+            "internet": "Expenses:Utilities:WiFi",
+            "pge": "Expenses:Utilities:PGE",
+            "gym": "Expenses:Subscriptions:Gym",
+            "spotify": "Expenses:Subscriptions:Spotify",
+            "icloud": "Expenses:Subscriptions:AppleCloud",
+            "apple": "Expenses:Subscriptions:AppleCloud",
+            "kahram": "Expenses:Family:Kahram",
+        }
+        account_id = cat_account_map.get(category)
+        if not account_id and category.startswith("expenses:"):
+            account_id = category
+
+        txs = store.list_transactions(
+            start_date=start_date,
+            end_date=end_date,
+            account_id=account_id,
+            limit=200,
+        )
+
+        if category and not account_id:
+            txs = [t for t in txs if category in t.payee.lower() or category in t.memo.lower()]
+
+        total_cents = 0
+        matching_items = []
+        for t in txs:
+            amount_cents = 0
+            cat_name = ""
+            for p in t.postings:
+                if p.amount_cents > 0 and (not account_id or p.account_id == account_id):
+                    amount_cents = p.amount_cents
+                    cat_name = p.account_id
+                    break
+            if amount_cents == 0 and t.postings:
+                for p in t.postings:
+                    if p.amount_cents > 0:
+                        amount_cents = p.amount_cents
+                        cat_name = p.account_id
+                        break
+                if amount_cents == 0:
+                    amount_cents = abs(t.postings[0].amount_cents)
+
+            total_cents += amount_cents
+            matching_items.append({
+                "date": t.date,
+                "payee": t.payee,
+                "amount_cents": amount_cents,
+                "category": cat_name,
+                "memo": t.memo,
+            })
+
+        count = len(matching_items)
+        avg_cents = round(total_cents / count) if count > 0 else 0
+        most_recent = matching_items[0] if matching_items else None
+
+        def _f(c: int) -> str:
+            return f"${c / 100.0:,.2f}"
+
+        title = f"Transaction Query Results"
+        if category:
+            title += f" for '{category.title()}'"
+        if date:
+            title += f" on {date}"
+        elif start_date or end_date:
+            title += f" ({start_date or 'Start'} to {end_date or 'Now'})"
+
+        lines = [
+            f"### {title} ({count} transactions found)",
+            f"- **Total Spent**:       {_f(total_cents)}",
+            f"- **Transaction Count**: {count}",
+            f"- **Average Amount**:    {_f(avg_cents)}",
+        ]
+        if most_recent:
+            lines.append(f"- **Most Recent**:       {_f(most_recent['amount_cents'])} on {most_recent['date']} ({most_recent['payee']})")
+
+        lines.extend([
+            "",
+            "| Date | Payee | Amount | Category | Memo |",
+            "| :--- | :--- | :---: | :--- | :--- |",
+        ])
+        for it in matching_items[:limit]:
+            clean_cat = it['category'].split(':')[-1] if it['category'] else 'General'
+            lines.append(f"| {it['date']} | {it['payee']} | {_f(it['amount_cents'])} | {clean_cat} | {it['memo']} |")
+
+        return "\n".join(lines)
+
+    elif name == "finance_paycheck_plan":
+        store = FinanceStore()
+        engine = RecurringEngine(store)
+        date = arguments.get("date")
+        alloc = engine.get_paycheck_allocation(as_of_date=date)
+
+        def _f(cents: int) -> str:
+            return f"${cents / 100.0:,.2f}"
+
+        lines = [
+            f"### Paycheck Cash Flow Partition ({alloc.paycheck_date} to {alloc.next_paycheck_date})",
+            f"- **Paycheck Take-Home**:        {_f(alloc.paycheck_amount_cents)}",
+            f"- **Immediate HYSA Savings**:     {_f(alloc.savings_transfer_cents)} (Moved straight to Capital One HYSA)",
+            f"- **Net Checking Inflow**:        {_f(alloc.net_checking_cents)}",
+            f"- **Bills Due in Window**:        {_f(alloc.bills_due_cents)} ({len(alloc.bills)} bills due)",
+            f"- **2-Week Variable Needs**:      {_f(alloc.variable_needs_cents)} (Groceries: {_f(alloc.groceries_allocated_cents)}, Gas: {_f(alloc.gas_allocated_cents)})",
+            f"- **SAFE-TO-SPEND CUSHION**:      {_f(alloc.safe_to_spend_cents)} (Flexible spending for this cycle)",
+            "",
+            "| Due Date | Obligation | Amount | Status | Autopay |",
+            "| :--- | :--- | :---: | :---: | :---: |",
+        ]
+        if not alloc.bills:
+            lines.append("| — | No recurring bills scheduled in this cycle | $0.00 | — | — |")
+        else:
+            for b in alloc.bills:
+                lines.append(f"| {b['due_date']} | {b['name']} | {_f(b['amount_cents'])} | [{b['status'].upper()}] | {'Yes' if b['is_autopay'] else 'No'} |")
+
+        return "\n".join(lines)
+
+    elif name == "finance_plan_breakdown":
+        store = FinanceStore()
+        engine = RecurringEngine(store)
+        now_str = arguments.get("date") or time.strftime("%Y-%m-%d")
+        month_str = now_str[:7]
+        overview = store.get_monthly_overview(month_str)
+        alloc = engine.get_paycheck_allocation(as_of_date=now_str)
+        balances = store.get_all_balances(as_of_date=now_str)
+
+        def _f(cents: int) -> str:
+            return f"${cents / 100.0:,.2f}"
+
+        lines = [
+            f"### Comprehensive Financial Situation & Bi-Weekly Allocation Breakdown",
+            f"- **As of Date**:            {now_str} (Month: {month_str})",
+            f"- **Liquid Capital**:         {_f(balances['liquid_assets_cents'])} (Wells Fargo Checking + Capital One HYSA)",
+            f"- **Net Worth**:              {_f(balances['net_worth_cents'])}",
+            "",
+            f"#### 🗓️ Monthly Plan Breakdown ({month_str})",
+            f"- **Monthly Take-Home**:      {_f(overview.income_cents)}",
+            f"- **HYSA Savings Target**:    {_f(overview.savings_target_cents)} (Target transfer to Capital One HYSA)",
+            f"- **Fixed Bills & Utilities**: {_f(overview.all_bills_cents)} (Fixed Bills: {_f(overview.fixed_bills_cents)}, PG&E: {_f(overview.pge_cents)})",
+            f"- **Groceries Budget**:       {_f(overview.groceries_planned_cents)} (Spent: {_f(overview.groceries_actual_cents)} | Left: {_f(overview.groceries_left_cents)})",
+            f"- **Dining / Eating Out**:    {_f(overview.dining_planned_cents)} (Spent: {_f(overview.dining_actual_cents)} | Left: {_f(overview.dining_left_cents)})",
+            f"- **Car Gas Budget**:         {_f(overview.gas_planned_cents)} (Spent: {_f(overview.gas_actual_cents)} | Left: {_f(overview.gas_left_cents)})",
+            f"- **Personal Allowance**:     {_f(overview.total_personal_cents)} (Budgeted discretionary envelope)",
+            f"- **Remaining Flex Cushion**: {_f(overview.remaining_cushion_cents)} (Unspent variable funds)",
+            "",
+            f"#### 💵 Next Two Weeks Allocation ({alloc.paycheck_date} to {alloc.next_paycheck_date})",
+            f"- **Bi-Weekly Paycheck**:     {_f(alloc.paycheck_amount_cents)}",
+            f"- **Immediate HYSA Savings**: -{_f(alloc.savings_transfer_cents)} (Moved straight to Capital One HYSA)",
+            f"- **Net Checking Inflow**:    {_f(alloc.net_checking_cents)}",
+            f"- **Bills Due in Window**:    -{_f(alloc.bills_due_cents)} ({len(alloc.bills)} bills scheduled)",
+            f"- **2-Week Groceries**:       -{_f(alloc.groceries_allocated_cents)}",
+            f"- **2-Week Eating Out**:      -{_f(alloc.dining_allocated_cents)}",
+            f"- **2-Week Car Gas**:         -{_f(alloc.gas_allocated_cents)}",
+            f"- **SAFE-TO-SPEND CUSHION**:  **{_f(alloc.safe_to_spend_cents)}** (Discretionary cash for next 14 days)",
+        ]
+        return "\n".join(lines)
 
     else:
         raise ValueError(f"Unknown tool: {name}")

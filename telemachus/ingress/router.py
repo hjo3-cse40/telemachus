@@ -77,9 +77,13 @@ class IngressToolRouter:
             cache_path = cache_dir / "tool_embeddings.json"
         self.cache_path = Path(cache_path)
         self.tool_vectors: Dict[str, List[float]] = {}
+        self._last_embed_fail_time: float = 0.0
         self._load_cached_embeddings()
 
     def _query_embedding(self, text: str) -> Optional[List[float]]:
+        # If embedding endpoint failed recently, avoid hammering LM Studio
+        if time.time() - self._last_embed_fail_time < 60.0:
+            return None
         try:
             payload = json.dumps({"model": MODEL_ID, "input": text}).encode("utf-8")
             req = urllib.request.Request(
@@ -87,10 +91,11 @@ class IngressToolRouter:
                 data=payload,
                 headers={"Content-Type": "application/json"},
             )
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            with urllib.request.urlopen(req, timeout=1.5) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 return data["data"][0]["embedding"]
         except Exception:
+            self._last_embed_fail_time = time.time()
             return None
 
     def _load_cached_embeddings(self) -> None:
@@ -155,7 +160,18 @@ class IngressToolRouter:
             re.search(r"\b(memory|remember|recall|fact|facts|preference|preferences|schedule|class|classes|profile|identity)\b", p_lower)
         )
 
-        if is_general_pattern and not (has_explicit_fs or has_email or has_memory):
+        has_finance = bool(
+            re.search(
+                r"\b(finance|finances|budget|expense|expenses|spent|spending|income|salary|"
+                r"balance|balances|ledger|cost|costs|transaction|transactions|recurring|"
+                r"subscription|subscriptions|bill|bills|forecast|runway|savings|cushion|"
+                r"pge|pg&e|groceries|dining|gas|kahram|wells\s*fargo|capital\s*one|visa|"
+                r"net\s*worth|afford|cash\s*flow|checking|payday|\$[\d,]+(\.\d{2})?)\b",
+                p_lower,
+            )
+        )
+
+        if is_general_pattern and not (has_explicit_fs or has_email or has_memory or has_finance):
             return "GENERAL"
 
         domains_detected = []
@@ -165,6 +181,8 @@ class IngressToolRouter:
             domains_detected.append("FILESYSTEM")
         if has_memory:
             domains_detected.append("MEMORY")
+        if has_finance:
+            domains_detected.append("FINANCE")
 
         if len(domains_detected) == 1:
             return domains_detected[0]
@@ -204,6 +222,13 @@ class IngressToolRouter:
                 return filtered, {"domain": domain, "strategy": "heuristic_fallback"}
             elif domain == "MEMORY":
                 filtered = [t for t in tools if "memory_" in (t.get("name") or t.get("function", {}).get("name", "")).lower()]
+                return filtered, {"domain": domain, "strategy": "heuristic_fallback"}
+            elif domain == "FINANCE":
+                names = ensure_memory_tools(user_prompt, tools, {
+                    (t.get("name") or t.get("function", {}).get("name", "")) for t in tools
+                    if "finance_" in (t.get("name") or t.get("function", {}).get("name", "")).lower()
+                })
+                filtered = [t for t in tools if (t.get("name") or t.get("function", {}).get("name", "")) in names]
                 return filtered, {"domain": domain, "strategy": "heuristic_fallback"}
             return tools, {"domain": domain, "strategy": "unpruned_fallback"}
 
@@ -261,6 +286,14 @@ class IngressToolRouter:
             # Add top matching memory tools up to max_tools
             for name, score in sorted_tools:
                 if "memory_" in name.lower() and len(selected_names) < max_tools:
+                    selected_names.add(name)
+        elif domain == "FINANCE":
+            # Always ensure overview and balance are included
+            for name, _ in sorted_tools:
+                if "finance_monthly_overview" in name.lower() or "finance_get_balance" in name.lower():
+                    selected_names.add(name)
+            for name, score in sorted_tools:
+                if "finance_" in name.lower() and len(selected_names) < max_tools:
                     selected_names.add(name)
         else:
             # HYBRID or GENERAL with high similarity
