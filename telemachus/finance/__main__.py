@@ -220,6 +220,27 @@ def cmd_setup(store: FinanceStore, args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_import_text(store: FinanceStore, args: argparse.Namespace) -> int:
+    from telemachus.finance.import_text import import_text_document
+
+    if args.file:
+        p = Path(args.file).expanduser().resolve()
+        if not p.exists():
+            print(f"❌ File not found: {p}")
+            return 1
+        text = p.read_text(encoding="utf-8")
+    else:
+        print("📥 Reading text from stdin (paste text and press Ctrl+D when done)...")
+        text = sys.stdin.read()
+
+    res = import_text_document(text, store=store)
+    print("\n✅ Successfully imported text document:")
+    print(f"   • Transactions logged: {res['transactions_logged']}")
+    print(f"   • Days covered:        {res['days_count']} (From {res['dates'][0] if res['dates'] else 'N/A'} to {res['dates'][-1] if res['dates'] else 'N/A'})")
+    print("\n💡 Run 'python3 -m telemachus.finance plan' or open Cockpit Tab [4: Finances] to inspect.")
+    return 0
+
+
 def cmd_breakdown(store: FinanceStore, recurring: RecurringEngine, args: argparse.Namespace) -> int:
     now_str = getattr(args, "date", None) or datetime.now().strftime("%Y-%m-%d")
     month_str = now_str[:7]
@@ -347,6 +368,10 @@ def main() -> int:
     p_break = subparsers.add_parser("breakdown", parents=[common_parser], help="Alias for 'plan'")
     p_break.add_argument("--date", help="Date or cycle to inspect (defaults to today)")
 
+    # import-text
+    p_imp = subparsers.add_parser("import-text", parents=[common_parser], help="Batch import historical daily bullet notes from a text file")
+    p_imp.add_argument("--file", help="Path to text document (or read from stdin)")
+
     # export
     p_exp = subparsers.add_parser("export", parents=[common_parser], help="Export to Beancount and CSV formats")
     p_exp.add_argument("--beancount", action="store_true", help="Export to journal.beancount")
@@ -361,6 +386,8 @@ def main() -> int:
         return cmd_setup(store, args)
     elif args.command in ("plan", "breakdown"):
         return cmd_breakdown(store, recurring, args)
+    elif args.command == "import-text":
+        return cmd_import_text(store, args)
     elif args.command == "paycheck":
         return cmd_paycheck(recurring, args)
     elif args.command == "status":

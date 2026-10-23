@@ -1,0 +1,195 @@
+"""Cockpit Finance Panel & Daily Inspector Data Provider.
+
+Provides:
+- Daily grouped ledger navigation (Day Navigator + Day Line Items).
+- Month-to-date and 2-week paycheck allocation metrics for Cockpit TUI.
+- Fast bullet-list parsing and ingestion directly from curses input.
+- Database mtime caching to prevent redundant queries on 25 FPS render loops.
+"""
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+import logging
+import os
+from pathlib import Path
+import time
+from typing import Any, Dict, List, Optional, Tuple
+
+from telemachus.finance.import_text import parse_bullet_line
+from telemachus.finance.models import (
+    CashFlowSummary,
+    MonthlyOverview,
+    PaycheckWindowAllocation,
+    Transaction,
+)
+from telemachus.finance.recurring import RecurringEngine
+from telemachus.finance.store import FinanceStore, get_finance_root
+
+logger = logging.getLogger(__name__)
+
+
+class FinanceTuiPanel:
+    """Manages finance data feeds, caching, and mutations for the Cockpit TUI."""
+
+    def __init__(self, store: Optional[FinanceStore] = None):
+        self.store = store or FinanceStore()
+        self.recurring = RecurringEngine(self.store)
+
+        self._last_mtime: float = 0.0
+        self._cached_days: List[Dict[str, Any]] = []
+        self._cached_overview: Optional[MonthlyOverview] = None
+        self._cached_cashflow: Optional[CashFlowSummary] = None
+        self._cached_paycheck: Optional[PaycheckWindowAllocation] = None
+        self._cached_balances: Dict[str, Any] = {}
+        self._cache_time: float = 0.0
+
+    def _is_cache_stale(self) -> bool:
+        """Checks if SQLite database file modified or cache TTL expired (10s)."""
+        now = time.time()
+        if now - self._cache_time > 10.0:
+            return True
+        db_path = self.store.db_path
+        if db_path.exists():
+            try:
+                mtime = db_path.stat().st_mtime
+                if mtime != self._last_mtime:
+                    self._last_mtime = mtime
+                    return True
+            except OSError:
+                pass
+        return False
+
+    def refresh(self, force: bool = False) -> None:
+        """Reloads all financial rollups from SQLite."""
+        if not force and not self._is_cache_stale():
+            return
+
+        now_str = datetime.now().strftime("%Y-%m-%d")
+        month_str = now_str[:7]
+        start_date = f"{month_str}-01"
+        end_date = f"{month_str}-31"
+
+        # 1. Monthly Overview & Paycheck Plan & Cash Flow
+        try:
+            self._cached_overview = self.store.get_monthly_overview(month_str)
+            self._cached_cashflow = self.store.get_cash_flow_summary(start_date, end_date)
+            self._cached_paycheck = self.recurring.get_paycheck_allocation(as_of_date=now_str)
+            self._cached_balances = self.store.get_all_balances(as_of_date=now_str)
+        except Exception as e:
+            logger.debug(f"Error refreshing overview/paycheck: {e}")
+
+        # 2. Daily Ledger (last 60 days of transactions grouped by date)
+        try:
+            all_txs = self.store.list_transactions(limit=300)
+            grouped: Dict[str, List[Transaction]] = {}
+            for t in all_txs:
+                if t.source == "setup" and t.payee == "Opening Balance":
+                    # Skip synthetic opening balance in daily spending browser
+                    continue
+                grouped.setdefault(t.date, []).append(t)
+
+            days_list: List[Dict[str, Any]] = []
+            for date_key in sorted(grouped.keys(), reverse=True):
+                txs = grouped[date_key]
+                inflow_cents = 0
+                outflow_cents = 0
+                items: List[Dict[str, Any]] = []
+
+                for t in txs:
+                    amount_cents = 0
+                    cat_name = "Personal"
+                    account_short = "Visa"
+                    is_income = False
+
+                    for p in t.postings:
+                        if p.account_id.startswith("Income:"):
+                            is_income = True
+                            amount_cents = abs(p.amount_cents)
+                            cat_name = "Income"
+                            break
+                        elif p.account_id.startswith("Expenses:"):
+                            amount_cents = p.amount_cents
+                            cat_name = p.account_id.split(":")[-1]
+                        elif p.account_id.startswith("Assets:"):
+                            account_short = p.account_id.split(":")[-1]
+                        elif p.account_id.startswith("Liabilities:"):
+                            account_short = "Visa"
+
+                    if is_income:
+                        inflow_cents += amount_cents
+                    else:
+                        outflow_cents += amount_cents
+
+                    items.append({
+                        "id": t.id,
+                        "payee": t.payee,
+                        "category": cat_name,
+                        "account": account_short,
+                        "amount_cents": amount_cents,
+                        "is_income": is_income,
+                        "memo": t.memo,
+                    })
+
+                try:
+                    dt = datetime.strptime(date_key, "%Y-%m-%d")
+                    day_title = dt.strftime("%a, %b %d")
+                except Exception:
+                    day_title = date_key
+
+                days_list.append({
+                    "date": date_key,
+                    "day_title": day_title,
+                    "inflow_cents": inflow_cents,
+                    "outflow_cents": outflow_cents,
+                    "net_cents": inflow_cents - outflow_cents,
+                    "items": items,
+                })
+
+            self._cached_days = days_list
+            self._cache_time = time.time()
+        except Exception as e:
+            logger.debug(f"Error refreshing daily ledger: {e}")
+
+    def get_daily_ledger(self) -> List[Dict[str, Any]]:
+        self.refresh()
+        return self._cached_days
+
+    def get_monthly_overview(self) -> Optional[MonthlyOverview]:
+        self.refresh()
+        return self._cached_overview
+
+    def get_cash_flow_summary(self) -> Optional[CashFlowSummary]:
+        self.refresh()
+        return self._cached_cashflow
+
+    def get_paycheck_allocation(self) -> Optional[PaycheckWindowAllocation]:
+        self.refresh()
+        return self._cached_paycheck
+
+    def get_balances(self) -> Dict[str, Any]:
+        self.refresh()
+        return self._cached_balances
+
+    def log_day_bullets(self, date_str: str, bullet_text: str) -> List[Transaction]:
+        """Parses lines of bullet text and logs all items for date_str."""
+        lines = bullet_text.splitlines()
+        batch_items = []
+        for line in lines:
+            item = parse_bullet_line(line)
+            if item:
+                item["date"] = date_str
+                batch_items.append(item)
+
+        if not batch_items:
+            return []
+
+        logged = self.store.log_batch_transactions(batch_items, default_date=date_str)
+        self.refresh(force=True)
+        return logged
+
+    def delete_transaction(self, tx_id: str) -> bool:
+        """Deletes a transaction and invalidates caches."""
+        success = self.store.delete_transaction(tx_id)
+        if success:
+            self.refresh(force=True)
+        return success
