@@ -34,36 +34,34 @@ class RecurringEngine:
         self._seed_default_rules()
 
     def _seed_default_rules(self) -> None:
-        """Seeds default user recurring rules if table is empty."""
-        with self.store._get_connection() as conn:
-            count = conn.execute("SELECT COUNT(*) as count FROM recurring_rules;").fetchone()["count"]
-            if count == 0:
-                with self.store._write_lock():
-                    for rule in DEFAULT_USER_RECURRING_RULES:
-                        conn.execute(
-                            """
-                            INSERT OR IGNORE INTO recurring_rules (
-                                id, name, rule_type, frequency, due_day_of_month,
-                                base_amount_cents, from_account, to_account, is_autopay,
-                                lead_time_days, is_active, notes
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-                            """,
-                            (
-                                rule.id,
-                                rule.name,
-                                rule.rule_type.value,
-                                rule.frequency.value,
-                                rule.due_day_of_month,
-                                rule.base_amount_cents,
-                                rule.from_account,
-                                rule.to_account,
-                                1 if rule.is_autopay else 0,
-                                rule.lead_time_days,
-                                1 if rule.is_active else 0,
-                                rule.notes,
-                            ),
-                        )
-                    conn.commit()
+        """Seeds default user recurring rules using INSERT OR IGNORE."""
+        with self.store._write_lock():
+            with self.store._get_connection() as conn:
+                for rule in DEFAULT_USER_RECURRING_RULES:
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO recurring_rules (
+                            id, name, rule_type, frequency, due_day_of_month,
+                            base_amount_cents, from_account, to_account, is_autopay,
+                            lead_time_days, is_active, notes
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        """,
+                        (
+                            rule.id,
+                            rule.name,
+                            rule.rule_type.value,
+                            rule.frequency.value,
+                            rule.due_day_of_month,
+                            rule.base_amount_cents,
+                            rule.from_account,
+                            rule.to_account,
+                            1 if rule.is_autopay else 0,
+                            rule.lead_time_days,
+                            1 if rule.is_active else 0,
+                            rule.notes,
+                        ),
+                    )
+                conn.commit()
 
     def add_rule(self, rule: RecurringRule) -> None:
         """Adds or updates a recurring rule."""

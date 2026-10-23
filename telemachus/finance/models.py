@@ -270,6 +270,133 @@ class CashFlowSummary:
         }
 
 
+@dataclass
+class MonthlyOverview:
+    """One row per month matching user's exact Notion Monthly Overview model and formulas.
+    
+    Formula Invariants:
+    - all_bills = fixed_bills + pge
+    - groceries_left = groceries_planned - groceries_actual
+    - gas_left = gas_planned - gas_actual
+    - variable_variance = (groceries_planned - groceries_actual) + (gas_planned - gas_actual)
+    - total_personal = income - savings - fixed_bills - pge - groceries_planned - gas_planned
+    - remaining_cushion = income - savings - total_personal - fixed_bills - pge - groceries_actual - gas_actual
+    """
+    month: str  # YYYY-MM e.g. "2026-10"
+    status: str = "open"  # 'open' while month is active, 'closed' when PGE & actuals final
+    income_cents: int = 0
+    savings_target_cents: int = 0
+    fixed_bills_cents: int = 26071  # Default $260.71 matching user's Notion sum
+    pge_cents: int = 0
+    groceries_planned_cents: int = 0
+    groceries_actual_cents: int = 0
+    gas_planned_cents: int = 0
+    gas_actual_cents: int = 0
+    notes: str = ""
+    updated_at: int = 0
+
+    @property
+    def all_bills_cents(self) -> int:
+        return self.fixed_bills_cents + self.pge_cents
+
+    @property
+    def groceries_left_cents(self) -> int:
+        return self.groceries_planned_cents - self.groceries_actual_cents
+
+    @property
+    def gas_left_cents(self) -> int:
+        return self.gas_planned_cents - self.gas_actual_cents
+
+    @property
+    def variable_variance_cents(self) -> int:
+        return self.groceries_left_cents + self.gas_left_cents
+
+    @property
+    def total_personal_cents(self) -> int:
+        """Planned personal spending envelope."""
+        val = (
+            self.income_cents
+            - self.savings_target_cents
+            - self.fixed_bills_cents
+            - self.pge_cents
+            - self.groceries_planned_cents
+            - self.gas_planned_cents
+        )
+        return max(0, val)
+
+    @property
+    def remaining_cushion_cents(self) -> int:
+        """Dynamic remaining cushion.
+        
+        Equals Variable Variance: starts at $0 if actuals == planned,
+        and rises as groceries or gas are spent under budget!
+        """
+        # If actual is 0/blank, it falls back to planned (so cushion stays ~$0 until real spend)
+        effective_groc = self.groceries_actual_cents if self.groceries_actual_cents > 0 else self.groceries_planned_cents
+        effective_gas = self.gas_actual_cents if self.gas_actual_cents > 0 else self.gas_planned_cents
+
+        return (self.groceries_planned_cents - effective_groc) + (self.gas_planned_cents - effective_gas)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "month": self.month,
+            "status": self.status,
+            "income_cents": self.income_cents,
+            "savings_target_cents": self.savings_target_cents,
+            "fixed_bills_cents": self.fixed_bills_cents,
+            "pge_cents": self.pge_cents,
+            "all_bills_cents": self.all_bills_cents,
+            "groceries_planned_cents": self.groceries_planned_cents,
+            "groceries_actual_cents": self.groceries_actual_cents,
+            "groceries_left_cents": self.groceries_left_cents,
+            "gas_planned_cents": self.gas_planned_cents,
+            "gas_actual_cents": self.gas_actual_cents,
+            "gas_left_cents": self.gas_left_cents,
+            "variable_variance_cents": self.variable_variance_cents,
+            "total_personal_cents": self.total_personal_cents,
+            "remaining_cushion_cents": self.remaining_cushion_cents,
+            "notes": self.notes,
+            "updated_at": self.updated_at,
+        }
+
+
+@dataclass
+class GoalProgress:
+    """Monthly goal tracker matching user's Notion mini progress tracker (Screenshot 4)."""
+    name: str  # e.g. "💰 Savings" or "🏠 Kahram Payment"
+    target_cents: int
+    saved_cents: int
+    status: str = "open"
+
+    @property
+    def remaining_cents(self) -> int:
+        return max(0, self.target_cents - self.saved_cents)
+
+    @property
+    def progress_pct(self) -> float:
+        if self.target_cents <= 0:
+            return 100.0 if self.saved_cents > 0 else 0.0
+        return min(100.0, round((self.saved_cents / self.target_cents) * 100.0, 1))
+
+    @property
+    def progress_bar(self) -> str:
+        pct = self.progress_pct
+        filled = int(round(pct / 10.0))
+        empty = 10 - filled
+        return f"[{'█' * filled}{'░' * empty}] {pct:.1f}%"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "target_cents": self.target_cents,
+            "saved_cents": self.saved_cents,
+            "remaining_cents": self.remaining_cents,
+            "progress_pct": self.progress_pct,
+            "progress_bar": self.progress_bar,
+            "status": self.status,
+        }
+
+
 # ==============================================================================
 # Default Chart of Accounts Tailored to User Setup
 # ==============================================================================
@@ -287,13 +414,16 @@ DEFAULT_USER_ACCOUNTS: List[Account] = [
     # Expenses
     Account("Expenses:Housing:Rent", AccountType.EXPENSE, description="Apartment rent (placeholder $0; dad pays until year ends)"),
     Account("Expenses:Utilities:PGE", AccountType.EXPENSE, description="PG&E electric and gas (variable monthly)"),
-    Account("Expenses:Utilities:Internet", AccountType.EXPENSE, description="Home internet (fixed monthly)"),
-    Account("Expenses:Food:Groceries", AccountType.EXPENSE, description="Groceries and pantry (variable consistent band)"),
+    Account("Expenses:Utilities:WiFi", AccountType.EXPENSE, description="Home Wi-Fi internet (fixed monthly)"),
+    Account("Expenses:Utilities:Internet", AccountType.EXPENSE, description="Home internet (alias for Wi-Fi)"),
+    Account("Expenses:Food:Groceries", AccountType.EXPENSE, description="Groceries and pantry (planned vs actual)"),
     Account("Expenses:Food:Dining", AccountType.EXPENSE, description="Eating out, restaurants, takeout (discretionary)"),
-    Account("Expenses:Personal:Discretionary", AccountType.EXPENSE, description="Leftover personal spending"),
-    Account("Expenses:Family:Brother", AccountType.EXPENSE, description="Recurring monthly payment to brother"),
+    Account("Expenses:Transport:Gas", AccountType.EXPENSE, description="Car fuel / gasoline (planned vs actual)"),
+    Account("Expenses:Personal:Discretionary", AccountType.EXPENSE, description="Total personal spending buffer"),
+    Account("Expenses:Family:Kahram", AccountType.EXPENSE, description="Recurring monthly payment to Kahram"),
+    Account("Expenses:Family:Brother", AccountType.EXPENSE, description="Recurring monthly payment to brother (alias for Kahram)"),
     Account("Expenses:Subscriptions:Gym", AccountType.EXPENSE, description="Gym membership subscription"),
-    Account("Expenses:Subscriptions:AppleCloud", AccountType.EXPENSE, description="Apple Cloud storage subscription"),
+    Account("Expenses:Subscriptions:AppleCloud", AccountType.EXPENSE, description="Apple iCloud subscription"),
     Account("Expenses:Subscriptions:Spotify", AccountType.EXPENSE, description="Spotify music subscription"),
 
     # Equity
@@ -305,25 +435,90 @@ DEFAULT_USER_ACCOUNTS: List[Account] = [
 # ==============================================================================
 DEFAULT_USER_RECURRING_RULES: List[RecurringRule] = [
     RecurringRule(
-        id="rule_rent",
-        name="Apartment Rent",
+        id="rule_kahram",
+        name="Kahram payment",
         rule_type=RuleType.FIXED,
         frequency=Frequency.MONTHLY,
         due_day_of_month=1,
-        base_amount_cents=0,  # $0 placeholder right now; dad pays until year end
+        base_amount_cents=10000,  # Baseline fixed bill
         from_account="Assets:Checking:WellsFargo",
-        to_account="Expenses:Housing:Rent",
+        to_account="Expenses:Family:Kahram",
         is_autopay=False,
-        is_active=False,  # Inactive for now
-        notes="Currently paid by dad; user starts paying after this year ends.",
+        is_active=True,
+        notes="Recurring fixed payment to Kahram due on the 1st.",
+    ),
+    RecurringRule(
+        id="rule_gym",
+        name="Gym",
+        rule_type=RuleType.FIXED,
+        frequency=Frequency.MONTHLY,
+        due_day_of_month=1,
+        base_amount_cents=4500,
+        from_account="Liabilities:CreditCard:Visa",
+        to_account="Expenses:Subscriptions:Gym",
+        is_autopay=True,
+        is_active=True,
+        notes="Monthly gym membership due on the 1st.",
+    ),
+    RecurringRule(
+        id="rule_apple_cloud",
+        name="Apple iCloud",
+        rule_type=RuleType.FIXED,
+        frequency=Frequency.MONTHLY,
+        due_day_of_month=11,
+        base_amount_cents=299,
+        from_account="Liabilities:CreditCard:Visa",
+        to_account="Expenses:Subscriptions:AppleCloud",
+        is_autopay=True,
+        is_active=True,
+        notes="Apple iCloud storage subscription due on the 11th.",
+    ),
+    RecurringRule(
+        id="rule_spotify",
+        name="Spotify",
+        rule_type=RuleType.FIXED,
+        frequency=Frequency.MONTHLY,
+        due_day_of_month=25,
+        base_amount_cents=1199,
+        from_account="Liabilities:CreditCard:Visa",
+        to_account="Expenses:Subscriptions:Spotify",
+        is_autopay=True,
+        is_active=True,
+        notes="Spotify music subscription due on the 25th.",
+    ),
+    RecurringRule(
+        id="rule_wifi",
+        name="Wi-Fi",
+        rule_type=RuleType.FIXED,
+        frequency=Frequency.MONTHLY,
+        due_day_of_month=15,
+        base_amount_cents=5000,
+        from_account="Assets:Checking:WellsFargo",
+        to_account="Expenses:Utilities:WiFi",
+        is_autopay=True,
+        is_active=True,
+        notes="Fixed monthly Wi-Fi bill.",
+    ),
+    RecurringRule(
+        id="rule_internet",
+        name="Internet",
+        rule_type=RuleType.FIXED,
+        frequency=Frequency.MONTHLY,
+        due_day_of_month=5,
+        base_amount_cents=5000,
+        from_account="Assets:Checking:WellsFargo",
+        to_account="Expenses:Utilities:Internet",
+        is_autopay=True,
+        is_active=True,
+        notes="Fixed monthly internet bill.",
     ),
     RecurringRule(
         id="rule_pge",
         name="PG&E Electric & Gas",
         rule_type=RuleType.VARIABLE,
         frequency=Frequency.MONTHLY,
-        due_day_of_month=15,  # Typical mid-month utility due date
-        base_amount_cents=9000,  # $90.00 baseline estimate before history
+        due_day_of_month=15,
+        base_amount_cents=9000,
         from_account="Assets:Checking:WellsFargo",
         to_account="Expenses:Utilities:PGE",
         is_autopay=True,
@@ -332,68 +527,16 @@ DEFAULT_USER_RECURRING_RULES: List[RecurringRule] = [
         notes="Variable utility bill; engine computes rolling moving average + seasonal buffer.",
     ),
     RecurringRule(
-        id="rule_internet",
-        name="Internet",
-        rule_type=RuleType.FIXED,
-        frequency=Frequency.MONTHLY,
-        due_day_of_month=5,
-        base_amount_cents=5000,  # $50.00 baseline fixed
-        from_account="Assets:Checking:WellsFargo",
-        to_account="Expenses:Utilities:Internet",
-        is_autopay=True,
-        is_active=True,
-        notes="Fixed monthly internet bill.",
-    ),
-    RecurringRule(
-        id="rule_brother",
-        name="Payment to Brother",
+        id="rule_rent",
+        name="Apartment Rent",
         rule_type=RuleType.FIXED,
         frequency=Frequency.MONTHLY,
         due_day_of_month=1,
-        base_amount_cents=0,  # User will set exact amount or update
+        base_amount_cents=0,
         from_account="Assets:Checking:WellsFargo",
-        to_account="Expenses:Family:Brother",
+        to_account="Expenses:Housing:Rent",
         is_autopay=False,
-        is_active=True,
-        notes="Fixed recurring payment to brother.",
-    ),
-    RecurringRule(
-        id="rule_gym",
-        name="Gym Membership",
-        rule_type=RuleType.FIXED,
-        frequency=Frequency.MONTHLY,
-        due_day_of_month=10,
-        base_amount_cents=4500,  # $45.00 baseline
-        from_account="Liabilities:CreditCard:Visa",
-        to_account="Expenses:Subscriptions:Gym",
-        is_autopay=True,
-        is_active=True,
-        notes="Fixed monthly gym subscription.",
-    ),
-    RecurringRule(
-        id="rule_apple_cloud",
-        name="Apple Cloud",
-        rule_type=RuleType.FIXED,
-        frequency=Frequency.MONTHLY,
-        due_day_of_month=25,
-        base_amount_cents=299,  # $2.99 baseline (very low price)
-        from_account="Liabilities:CreditCard:Visa",
-        to_account="Expenses:Subscriptions:AppleCloud",
-        is_autopay=True,
-        is_active=True,
-        notes="Fixed low price Apple Cloud subscription.",
-    ),
-    RecurringRule(
-        id="rule_spotify",
-        name="Spotify",
-        rule_type=RuleType.FIXED,
-        frequency=Frequency.MONTHLY,
-        due_day_of_month=18,
-        base_amount_cents=1199,  # $11.99 baseline
-        from_account="Liabilities:CreditCard:Visa",
-        to_account="Expenses:Subscriptions:Spotify",
-        is_autopay=True,
-        is_active=True,
-        notes="Fixed monthly Spotify subscription.",
+        is_active=False,  # Inactive placeholder
+        notes="Currently paid by dad; user starts paying after this year ends.",
     ),
 ]

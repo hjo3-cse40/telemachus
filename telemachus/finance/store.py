@@ -27,6 +27,8 @@ from telemachus.finance.models import (
     BillStatus,
     CashFlowSummary,
     Frequency,
+    GoalProgress,
+    MonthlyOverview,
     Posting,
     RecurringRule,
     RuleType,
@@ -143,6 +145,19 @@ class FinanceStore:
 
                     CREATE UNIQUE INDEX IF NOT EXISTS idx_bill_instance_cycle 
                         ON bill_instances(rule_id, billing_cycle);
+
+                    CREATE TABLE IF NOT EXISTS monthly_overview (
+                        month TEXT PRIMARY KEY,
+                        status TEXT NOT NULL DEFAULT 'open',
+                        income_cents INTEGER NOT NULL DEFAULT 0,
+                        savings_target_cents INTEGER NOT NULL DEFAULT 0,
+                        fixed_bills_cents INTEGER NOT NULL DEFAULT 26071,
+                        pge_cents INTEGER NOT NULL DEFAULT 0,
+                        groceries_planned_cents INTEGER NOT NULL DEFAULT 0,
+                        gas_planned_cents INTEGER NOT NULL DEFAULT 0,
+                        notes TEXT,
+                        updated_at INTEGER NOT NULL
+                    );
                 """)
 
         if self.db_path.exists():
@@ -180,21 +195,18 @@ class FinanceStore:
             lock_file.close()
 
     def _seed_default_accounts(self) -> None:
-        """Seeds default user accounts if chart of accounts is empty."""
+        """Seeds default user accounts using INSERT OR IGNORE."""
         with self._get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) as count FROM accounts;")
-            count = cursor.fetchone()["count"]
-            if count == 0:
-                for acc in DEFAULT_USER_ACCOUNTS:
-                    cursor.execute(
-                        """
-                        INSERT OR IGNORE INTO accounts (id, account_type, currency, description, is_active)
-                        VALUES (?, ?, ?, ?, ?);
-                        """,
-                        (acc.id, acc.account_type.value, acc.currency, acc.description, 1 if acc.is_active else 0),
-                    )
-                conn.commit()
+            for acc in DEFAULT_USER_ACCOUNTS:
+                cursor.execute(
+                    """
+                    INSERT OR IGNORE INTO accounts (id, account_type, currency, description, is_active)
+                    VALUES (?, ?, ?, ?, ?);
+                    """,
+                    (acc.id, acc.account_type.value, acc.currency, acc.description, 1 if acc.is_active else 0),
+                )
+            conn.commit()
 
     # ==========================================================================
     # Account Management
@@ -562,3 +574,293 @@ class FinanceStore:
                 daily_burn_rate_cents=daily_burn_rate_cents,
                 evaluated_days=evaluated_days,
             )
+
+    # ==========================================================================
+    # Monthly Overview (Matching Notion Formulas Exactly)
+    # ==========================================================================
+    def set_monthly_overview(
+        self,
+        month: str,
+        income_cents: int,
+        savings_target_cents: int,
+        groceries_planned_cents: int,
+        gas_planned_cents: int,
+        fixed_bills_cents: int = 26071,
+        pge_cents: int = 0,
+        status: str = "open",
+        notes: str = "",
+    ) -> MonthlyOverview:
+        """Sets or updates baseline budget targets for a specific month."""
+        now = int(time.time())
+        with self._write_lock():
+            with self._get_connection() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO monthly_overview (
+                        month, status, income_cents, savings_target_cents,
+                        fixed_bills_cents, pge_cents, groceries_planned_cents,
+                        gas_planned_cents, notes, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(month) DO UPDATE SET
+                        status = excluded.status,
+                        income_cents = excluded.income_cents,
+                        savings_target_cents = excluded.savings_target_cents,
+                        fixed_bills_cents = excluded.fixed_bills_cents,
+                        pge_cents = excluded.pge_cents,
+                        groceries_planned_cents = excluded.groceries_planned_cents,
+                        gas_planned_cents = excluded.gas_planned_cents,
+                        notes = excluded.notes,
+                        updated_at = excluded.updated_at;
+                    """,
+                    (
+                        month,
+                        status,
+                        income_cents,
+                        savings_target_cents,
+                        fixed_bills_cents,
+                        pge_cents,
+                        groceries_planned_cents,
+                        gas_planned_cents,
+                        notes,
+                        now,
+                    ),
+                )
+                conn.commit()
+        return self.get_monthly_overview(month)
+
+    def get_monthly_overview(self, month: Optional[str] = None) -> MonthlyOverview:
+        """Fetches monthly overview with actuals dynamically calculated from postings."""
+        if not month:
+            from datetime import datetime
+            month = datetime.now().strftime("%Y-%m")
+
+        start_date = f"{month}-01"
+        import calendar
+        y, m = map(int, month.split("-"))
+        _, last_day = calendar.monthrange(y, m)
+        end_date = f"{month}-{last_day:02d}"
+
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT * FROM monthly_overview WHERE month = ?;", (month,)).fetchone()
+
+            # Dynamic actuals from postings
+            groc_row = conn.execute(
+                """
+                SELECT COALESCE(SUM(p.amount_cents), 0) as total
+                FROM postings p
+                JOIN transactions t ON p.transaction_id = t.id
+                WHERE p.account_id IN ('Expenses:Food:Groceries', 'Expenses:Groceries')
+                  AND t.date >= ? AND t.date <= ?;
+                """,
+                (start_date, end_date),
+            ).fetchone()
+            groceries_actual = int(groc_row["total"])
+
+            gas_row = conn.execute(
+                """
+                SELECT COALESCE(SUM(p.amount_cents), 0) as total
+                FROM postings p
+                JOIN transactions t ON p.transaction_id = t.id
+                WHERE p.account_id IN ('Expenses:Transport:Gas', 'Expenses:Gas')
+                  AND t.date >= ? AND t.date <= ?;
+                """,
+                (start_date, end_date),
+            ).fetchone()
+            gas_actual = int(gas_row["total"])
+
+            inc_row = conn.execute(
+                """
+                SELECT -COALESCE(SUM(p.amount_cents), 0) as total
+                FROM postings p
+                JOIN transactions t ON p.transaction_id = t.id
+                WHERE p.account_id LIKE 'Income:%'
+                  AND t.date >= ? AND t.date <= ?;
+                """,
+                (start_date, end_date),
+            ).fetchone()
+            actual_income = max(0, int(inc_row["total"]))
+
+            pge_row = conn.execute(
+                """
+                SELECT COALESCE(SUM(p.amount_cents), 0) as total
+                FROM postings p
+                JOIN transactions t ON p.transaction_id = t.id
+                WHERE p.account_id = 'Expenses:Utilities:PGE'
+                  AND t.date >= ? AND t.date <= ?;
+                """,
+                (start_date, end_date),
+            ).fetchone()
+            pge_actual = int(pge_row["total"])
+
+            if row:
+                income = row["income_cents"] or actual_income
+                pge = row["pge_cents"] or pge_actual
+                return MonthlyOverview(
+                    month=row["month"],
+                    status=row["status"],
+                    income_cents=income,
+                    savings_target_cents=row["savings_target_cents"],
+                    fixed_bills_cents=row["fixed_bills_cents"],
+                    pge_cents=pge,
+                    groceries_planned_cents=row["groceries_planned_cents"],
+                    groceries_actual_cents=groceries_actual,
+                    gas_planned_cents=row["gas_planned_cents"],
+                    gas_actual_cents=gas_actual,
+                    notes=row["notes"] or "",
+                    updated_at=row["updated_at"],
+                )
+            else:
+                return MonthlyOverview(
+                    month=month,
+                    status="open",
+                    income_cents=actual_income,
+                    savings_target_cents=0,
+                    fixed_bills_cents=26071,
+                    pge_cents=pge_actual,
+                    groceries_planned_cents=0,
+                    groceries_actual_cents=groceries_actual,
+                    gas_planned_cents=0,
+                    gas_actual_cents=gas_actual,
+                    notes="",
+                    updated_at=int(time.time()),
+                )
+
+    # ==========================================================================
+    # Goals Progress Tracker (Screenshot 4)
+    # ==========================================================================
+    def get_goals_progress(self, month: Optional[str] = None) -> List[GoalProgress]:
+        """Calculates progress toward monthly Savings and Kahram payment targets."""
+        if not month:
+            from datetime import datetime
+            month = datetime.now().strftime("%Y-%m")
+
+        overview = self.get_monthly_overview(month)
+        start_date = f"{month}-01"
+        import calendar
+        y, m = map(int, month.split("-"))
+        _, last_day = calendar.monthrange(y, m)
+        end_date = f"{month}-{last_day:02d}"
+
+        goals: List[GoalProgress] = []
+
+        with self._get_connection() as conn:
+            # Savings Goal: Net transfers into Capital One Savings
+            sav_row = conn.execute(
+                """
+                SELECT COALESCE(SUM(p.amount_cents), 0) as total
+                FROM postings p
+                JOIN transactions t ON p.transaction_id = t.id
+                WHERE p.account_id = 'Assets:Savings:CapitalOne'
+                  AND t.date >= ? AND t.date <= ?;
+                """,
+                (start_date, end_date),
+            ).fetchone()
+            saved_cents = max(0, int(sav_row["total"]))
+            goals.append(
+                GoalProgress(
+                    name="💰 Savings",
+                    target_cents=overview.savings_target_cents,
+                    saved_cents=saved_cents,
+                    status="open" if saved_cents < overview.savings_target_cents else "completed",
+                )
+            )
+
+            # Kahram Payment
+            kahram_row = conn.execute(
+                """
+                SELECT COALESCE(SUM(p.amount_cents), 0) as total
+                FROM postings p
+                JOIN transactions t ON p.transaction_id = t.id
+                WHERE p.account_id IN ('Expenses:Family:Kahram', 'Expenses:Family:Brother')
+                  AND t.date >= ? AND t.date <= ?;
+                """,
+                (start_date, end_date),
+            ).fetchone()
+            kahram_paid = max(0, int(kahram_row["total"]))
+            rule_row = conn.execute("SELECT base_amount_cents FROM recurring_rules WHERE id = 'rule_kahram';").fetchone()
+            kahram_target = int(rule_row["base_amount_cents"]) if rule_row else 10000
+
+            goals.append(
+                GoalProgress(
+                    name="🏠 Kahram Payment",
+                    target_cents=kahram_target,
+                    saved_cents=kahram_paid,
+                    status="open" if kahram_paid < kahram_target else "completed",
+                )
+            )
+
+        return goals
+
+    # ==========================================================================
+    # Quick Batch Ingestion (Matching Daily List Bullet Points)
+    # ==========================================================================
+    def log_batch_transactions(
+        self,
+        items: List[Dict[str, Any]],
+        default_date: Optional[str] = None,
+    ) -> List[Transaction]:
+        """Atomically ingests a batch of daily spending and income bullet items."""
+        from datetime import datetime
+        today_str = default_date or datetime.now().strftime("%Y-%m-%d")
+
+        CATEGORY_MAP = {
+            "groceries": ("Expenses:Food:Groceries", "Liabilities:CreditCard:Visa"),
+            "grocery": ("Expenses:Food:Groceries", "Liabilities:CreditCard:Visa"),
+            "dining": ("Expenses:Food:Dining", "Liabilities:CreditCard:Visa"),
+            "dining out": ("Expenses:Food:Dining", "Liabilities:CreditCard:Visa"),
+            "eating out": ("Expenses:Food:Dining", "Liabilities:CreditCard:Visa"),
+            "lunch": ("Expenses:Food:Dining", "Liabilities:CreditCard:Visa"),
+            "dinner": ("Expenses:Food:Dining", "Liabilities:CreditCard:Visa"),
+            "coffee": ("Expenses:Food:Dining", "Liabilities:CreditCard:Visa"),
+            "gas": ("Expenses:Transport:Gas", "Liabilities:CreditCard:Visa"),
+            "fuel": ("Expenses:Transport:Gas", "Liabilities:CreditCard:Visa"),
+            "payday": ("Assets:Checking:WellsFargo", "Income:Salary"),
+            "salary": ("Assets:Checking:WellsFargo", "Income:Salary"),
+            "income": ("Assets:Checking:WellsFargo", "Income:Salary"),
+            "kahram": ("Expenses:Family:Kahram", "Assets:Checking:WellsFargo"),
+            "brother": ("Expenses:Family:Kahram", "Assets:Checking:WellsFargo"),
+            "gym": ("Expenses:Subscriptions:Gym", "Liabilities:CreditCard:Visa"),
+            "spotify": ("Expenses:Subscriptions:Spotify", "Liabilities:CreditCard:Visa"),
+            "icloud": ("Expenses:Subscriptions:AppleCloud", "Liabilities:CreditCard:Visa"),
+            "wifi": ("Expenses:Utilities:WiFi", "Assets:Checking:WellsFargo"),
+            "pge": ("Expenses:Utilities:PGE", "Assets:Checking:WellsFargo"),
+            "personal": ("Expenses:Personal:Discretionary", "Liabilities:CreditCard:Visa"),
+        }
+
+        logged_txs = []
+        for item in items:
+            raw_cat = str(item.get("category", "")).strip().lower()
+            payee = item.get("payee") or raw_cat.title()
+            amount_val = float(item["amount"])
+            amount_cents = round(abs(amount_val) * 100)
+            date = item.get("date") or today_str
+            memo = item.get("memo", "")
+
+            if raw_cat in CATEGORY_MAP:
+                target_acc, source_acc = CATEGORY_MAP[raw_cat]
+            else:
+                target_acc = item.get("to_account") or "Expenses:Personal:Discretionary"
+                source_acc = item.get("from_account") or "Liabilities:CreditCard:Visa"
+
+            if raw_cat in ("payday", "salary", "income") or (amount_val > 0 and target_acc == "Assets:Checking:WellsFargo"):
+                postings = [
+                    Posting(account_id=source_acc, amount_cents=-amount_cents, memo=memo),
+                    Posting(account_id=target_acc, amount_cents=amount_cents, memo=memo),
+                ]
+            else:
+                postings = [
+                    Posting(account_id=source_acc, amount_cents=-amount_cents, memo=memo),
+                    Posting(account_id=target_acc, amount_cents=amount_cents, memo=memo),
+                ]
+
+            tx = Transaction.create(
+                date=date,
+                payee=payee,
+                postings=postings,
+                memo=memo,
+                source="batch_bullet_ingestion",
+            )
+            logged = self.log_transaction(tx)
+            logged_txs.append(logged)
+
+        return logged_txs

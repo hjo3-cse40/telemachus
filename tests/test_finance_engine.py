@@ -315,6 +315,174 @@ class TestFinanceEngine(unittest.TestCase):
         self.assertIn("Trader Joe's", csv_content)
         self.assertIn("45.20", csv_content)
 
+    def test_10_monthly_overview_notion_formulas(self):
+        """Verifies exact Notion formulas: Groceries Left, Gas Left, Total Personal, Remaining Cushion."""
+        # 1. Set baseline targets for 2026-10
+        # Income: $3,200.00 (320000)
+        # Savings Target: $1,000.00 (100000)
+        # Fixed Bills: $260.71 (26071)
+        # PGE: $90.00 (9000)
+        # Groceries Planned: $400.00 (40000)
+        # Gas Planned: $100.00 (10000)
+        overview = self.store.set_monthly_overview(
+            month="2026-10",
+            income_cents=320000,
+            savings_target_cents=100000,
+            groceries_planned_cents=40000,
+            gas_planned_cents=10000,
+            fixed_bills_cents=26071,
+            pge_cents=9000,
+            notes="October budget test",
+        )
+
+        self.assertEqual(overview.all_bills_cents, 35071) # 26071 + 9000
+        # Total Personal = 320000 - 100000 - 26071 - 9000 - 40000 - 10000 = 134929 ($1,349.29)
+        self.assertEqual(overview.total_personal_cents, 134929)
+        # Remaining Cushion starts at 0 when no actual spend yet
+        self.assertEqual(overview.remaining_cushion_cents, 0)
+
+        # 2. Log Groceries: $150.00 (under budget)
+        self.store.log_transaction(
+            Transaction.create(
+                date="2026-10-10",
+                payee="Safeway",
+                postings=[
+                    Posting("Liabilities:CreditCard:Visa", -15000),
+                    Posting("Expenses:Food:Groceries", 15000),
+                ],
+            )
+        )
+        # Log Gas: $40.00 (under budget)
+        self.store.log_transaction(
+            Transaction.create(
+                date="2026-10-12",
+                payee="Chevron",
+                postings=[
+                    Posting("Liabilities:CreditCard:Visa", -4000),
+                    Posting("Expenses:Transport:Gas", 4000),
+                ],
+            )
+        )
+
+        updated = self.store.get_monthly_overview("2026-10")
+        self.assertEqual(updated.groceries_actual_cents, 15000)
+        self.assertEqual(updated.groceries_left_cents, 25000) # $400 - $150 = $250 left
+        self.assertEqual(updated.gas_actual_cents, 4000)
+        self.assertEqual(updated.gas_left_cents, 6000)       # $100 - $40 = $60 left
+        self.assertEqual(updated.variable_variance_cents, 31000) # $250 + $60 = $310.00
+        # Remaining Cushion rises to $310.00!
+        self.assertEqual(updated.remaining_cushion_cents, 31000)
+
+    def test_11_goals_progress_tracker(self):
+        """Tests progress calculation for Savings and Kahram payment."""
+        self.store.set_monthly_overview(
+            month="2026-10",
+            income_cents=300000,
+            savings_target_cents=100000, # $1,000 target
+            groceries_planned_cents=30000,
+            gas_planned_cents=10000,
+        )
+
+        # Transfer $500 to Capital One HYSA
+        self.store.log_transaction(
+            Transaction.create(
+                date="2026-10-15",
+                payee="HYSA Deposit",
+                postings=[
+                    Posting("Assets:Checking:WellsFargo", -50000),
+                    Posting("Assets:Savings:CapitalOne", 50000),
+                ],
+            )
+        )
+
+        # Pay $100 to Kahram
+        self.store.log_transaction(
+            Transaction.create(
+                date="2026-10-01",
+                payee="Kahram payment",
+                postings=[
+                    Posting("Assets:Checking:WellsFargo", -10000),
+                    Posting("Expenses:Family:Kahram", 10000),
+                ],
+            )
+        )
+
+        goals = self.store.get_goals_progress("2026-10")
+        savings_goal = [g for g in goals if "Savings" in g.name][0]
+        kahram_goal = [g for g in goals if "Kahram" in g.name][0]
+
+        self.assertEqual(savings_goal.target_cents, 100000)
+        self.assertEqual(savings_goal.saved_cents, 50000)
+        self.assertEqual(savings_goal.progress_pct, 50.0)
+        self.assertIn("50.0%", savings_goal.progress_bar)
+
+        self.assertEqual(kahram_goal.saved_cents, 10000)
+        self.assertEqual(kahram_goal.progress_pct, 100.0)
+        self.assertIn("100.0%", kahram_goal.progress_bar)
+
+    def test_12_batch_bullet_ingestion(self):
+        """Tests quick batch bullet-point logging matching user's daily habits."""
+        items = [
+            {"category": "groceries", "amount": 45.20, "payee": "Trader Joe's"},
+            {"category": "lunch", "amount": 18.50, "payee": "Taqueria"},
+            {"category": "gas", "amount": 35.00, "payee": "Shell"},
+            {"category": "payday", "amount": 1600.00, "payee": "Workplace Payroll"},
+        ]
+        txs = self.store.log_batch_transactions(items, default_date="2026-10-23")
+        self.assertEqual(len(txs), 4)
+
+        # Verify balances reflect batch
+        wf_bal = self.store.get_account_balance("Assets:Checking:WellsFargo")
+        self.assertEqual(wf_bal, 160000) # $1,600 from payday
+
+        groc_bal = self.store.get_account_balance("Expenses:Food:Groceries")
+        self.assertEqual(groc_bal, 4520)
+
+        gas_bal = self.store.get_account_balance("Expenses:Transport:Gas")
+        self.assertEqual(gas_bal, 3500)
+
+        dining_bal = self.store.get_account_balance("Expenses:Food:Dining")
+        self.assertEqual(dining_bal, 1850)
+
+    def test_13_mcp_tool_execution(self):
+        """Tests that handle_tool_call executes all 5 finance tools successfully."""
+        from telemachus.mcp.server import handle_tool_call
+        os.environ["TELEMACHUS_FINANCE_DIR"] = str(self.vault_path)
+
+        # 1. finance_log_entry
+        res = handle_tool_call("finance_log_entry", {
+            "items": [
+                {"category": "groceries", "amount": 25.00},
+                {"category": "gas", "amount": 30.00},
+            ]
+        })
+        self.assertIn('"logged_count": 2', res)
+
+        # 2. finance_monthly_overview
+        overview_res = handle_tool_call("finance_monthly_overview", {
+            "income": 3000.0,
+            "savings_target": 800.0,
+            "groceries_planned": 350.0,
+            "gas_planned": 100.0,
+        })
+        self.assertIn("Monthly Overview", overview_res)
+        self.assertIn("Remaining Cushion", overview_res)
+        self.assertIn("Groceries", overview_res)
+
+        # 3. finance_get_balance
+        bal_res = handle_tool_call("finance_get_balance", {})
+        self.assertIn("Balance Sheet", bal_res)
+        self.assertIn("Wells Fargo", bal_res)
+
+        # 4. finance_list_recurring
+        rec_res = handle_tool_call("finance_list_recurring", {"days_ahead": 30})
+        self.assertIn("Upcoming Obligations", rec_res)
+
+        # 5. finance_goals_progress
+        goals_res = handle_tool_call("finance_goals_progress", {})
+        self.assertIn("Monthly Goals Tracker", goals_res)
+
+
 
 if __name__ == "__main__":
     unittest.main()
