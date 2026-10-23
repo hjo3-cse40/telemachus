@@ -328,9 +328,18 @@ class CockpitTUI:
         try:
             # 1. Top Balances Banner (Checking, HYSA Savings, Outstanding Visa, Net Worth)
             acc_bals = self.finance_balances.get("account_balances", {})
-            chk_cents = acc_bals.get("Assets:Checking:WellsFargo", 0)
-            sav_cents = acc_bals.get("Assets:Savings:CapitalOne", 0)
-            visa_cents = acc_bals.get("Liabilities:CreditCard:Visa", 0)
+            chk_cents = acc_bals.get("Assets:Checking:WellsFargo")
+            if chk_cents is None:
+                chk_cents = next((v for k, v in acc_bals.items() if "check" in k.lower() or "wells" in k.lower()), 0)
+
+            sav_cents = acc_bals.get("Assets:Savings:CapitalOne")
+            if sav_cents is None:
+                sav_cents = next((v for k, v in acc_bals.items() if "sav" in k.lower() or "capital" in k.lower() or "hysa" in k.lower()), 0)
+
+            visa_cents = acc_bals.get("Liabilities:CreditCard:Visa")
+            if visa_cents is None:
+                visa_cents = next((v for k, v in acc_bals.items() if "visa" in k.lower() or "credit" in k.lower() or "card" in k.lower()), 0)
+
             nw_cents = self.finance_balances.get("net_worth_cents", 0)
 
             chk_str = self._fmt_money(chk_cents, self.mask_amounts)

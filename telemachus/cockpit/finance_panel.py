@@ -74,7 +74,7 @@ class FinanceTuiPanel:
             self._cached_overview = self.store.get_monthly_overview(month_str)
             self._cached_cashflow = self.store.get_cash_flow_summary(start_date, end_date)
             self._cached_paycheck = self.recurring.get_paycheck_allocation(as_of_date=now_str)
-            self._cached_balances = self.store.get_all_balances(as_of_date=now_str)
+            self._cached_balances = self.store.get_all_balances()
         except Exception as e:
             logger.debug(f"Error refreshing overview/paycheck: {e}")
 

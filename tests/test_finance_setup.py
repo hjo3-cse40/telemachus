@@ -136,6 +136,35 @@ starting_balances:
         bal_2 = self.store.get_account_balance("Assets:Checking:WellsFargo")
         self.assertEqual(bal_2, 120000)
 
+    def test_flexible_keys_and_string_amounts(self):
+        """Setup should handle arbitrary aliases (checking, savings, hysa) and formatted currency strings."""
+        yaml_path = Path(self.test_dir) / "test_flexible.yaml"
+        sample_yaml = """
+starting_balances:
+  checking: "$2,450.75"
+  hysa: "$12,300.00"
+  credit_card: "$350.25"
+"""
+        yaml_path.write_text(sample_yaml, encoding="utf-8")
+        summary = apply_setup_yaml(yaml_path=yaml_path, store=self.store)
+        self.assertEqual(summary["balances_set"], 3)
+
+        # Checking
+        wf_bal = self.store.get_account_balance("Assets:Checking:WellsFargo")
+        self.assertEqual(wf_bal, 245075)
+
+        # Savings / HYSA
+        hysa_bal = self.store.get_account_balance("Assets:Savings:CapitalOne")
+        self.assertEqual(hysa_bal, 1230000)
+
+        # Credit Card
+        visa_bal = self.store.get_account_balance("Liabilities:CreditCard:Visa")
+        self.assertEqual(visa_bal, 35025)
+
+        # Net worth = (2450.75 + 12300.00) - 350.25 = 14400.50 -> 1440050
+        all_bal = self.store.get_all_balances()
+        self.assertEqual(all_bal["net_worth_cents"], 1440050)
+
 
 if __name__ == "__main__":
     unittest.main()

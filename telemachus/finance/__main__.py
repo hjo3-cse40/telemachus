@@ -207,6 +207,9 @@ def cmd_setup(store: FinanceStore, args: argparse.Namespace) -> int:
         summary = apply_setup_yaml(yaml_path=path, store=store)
         print("\n✅ Successfully applied financial configuration:")
         print(f"   • Starting balances initialized: {summary['balances_set']}")
+        if summary.get("balances_details"):
+            configured_accs = ", ".join(b["account"].split(":")[-1] for b in summary["balances_details"])
+            print(f"     Accounts configured:           {configured_accs}")
         print(f"   • Recurring rules updated:       {summary['rules_updated']}")
         if summary.get("monthly_overview_updated"):
             fixed_dollars = summary['fixed_bills_total_cents'] / 100.0
