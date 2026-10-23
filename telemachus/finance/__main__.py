@@ -210,11 +210,85 @@ def cmd_setup(store: FinanceStore, args: argparse.Namespace) -> int:
         if summary.get("monthly_overview_updated"):
             fixed_dollars = summary['fixed_bills_total_cents'] / 100.0
             print(f"   • Monthly overview configured:   {summary['month']} (Fixed bills total: ${fixed_dollars:,.2f})")
-        print("\n💡 Run 'python3 -m telemachus.finance status' or 'python3 -m telemachus.finance balance' to inspect.")
+        if summary.get("paycheck_plan_configured"):
+            print("   • Paycheck plan configured:      Bi-weekly allocation & HYSA rules active")
+        print("\n💡 Run 'python3 -m telemachus.finance status' or 'python3 -m telemachus.finance paycheck' to inspect.")
         return 0
     except Exception as e:
         print(f"❌ Error applying setup configuration: {e}")
         return 1
+
+
+def cmd_breakdown(store: FinanceStore, recurring: RecurringEngine, args: argparse.Namespace) -> int:
+    now_str = getattr(args, "date", None) or datetime.now().strftime("%Y-%m-%d")
+    month_str = now_str[:7]
+    overview = store.get_monthly_overview(month_str)
+    alloc = recurring.get_paycheck_allocation(as_of_date=now_str)
+    balances = store.get_all_balances(as_of_date=now_str)
+    masked = args.mask
+
+    def _f(cents: int, label: str = "VAL") -> str:
+        return _format_currency(cents, masked, label)
+
+    print("\n" + "=" * 70)
+    print("📊 COMPREHENSIVE FINANCIAL BREAKDOWN & BI-WEEKLY ALLOCATION")
+    print("=" * 70)
+    print(f"As of: {now_str} | Month: {month_str} [{overview.status.upper()}]")
+    print(f"Liquid Capital: {_f(balances['liquid_assets_cents'], 'LIQUID_ASSETS')} | Net Worth: {_f(balances['net_worth_cents'], 'NET_WORTH')}")
+    print("-" * 70)
+
+    print(f"\n🗓️  MONTHLY BREAKDOWN ({month_str}):")
+    print(f"  • Monthly Take-Home Income:    {_f(overview.income_cents, 'INCOME'):>12}")
+    print(f"  • Monthly HYSA Savings Target: {_f(overview.savings_target_cents, 'SAVINGS'):>12} (Target transfer to Capital One)")
+    print(f"  • Fixed Bills & PG&E:          {_f(overview.all_bills_cents, 'ALL_BILLS'):>12} (Fixed: {_f(overview.fixed_bills_cents)}, PG&E: {_f(overview.pge_cents)})")
+    print(f"  • Groceries Allocation:        {_f(overview.groceries_planned_cents, 'GROCERIES'):>12} (Spent: {_f(overview.groceries_actual_cents)}, Left: {_f(overview.groceries_left_cents)})")
+    if overview.dining_planned_cents > 0:
+        print(f"  • Dining / Eating Out:         {_f(overview.dining_planned_cents, 'DINING'):>12} (Spent: {_f(overview.dining_actual_cents)}, Left: {_f(overview.dining_left_cents)})")
+    print(f"  • Car Gas Allocation:          {_f(overview.gas_planned_cents, 'GAS'):>12} (Spent: {_f(overview.gas_actual_cents)}, Left: {_f(overview.gas_left_cents)})")
+    print("  " + "-" * 50)
+    print(f"  • Total Personal Allowance:    {_f(overview.total_personal_cents, 'TOTAL_PERSONAL'):>12} (Budgeted discretionary)")
+    print(f"  • Remaining Flex Cushion:      {_f(overview.remaining_cushion_cents, 'REMAINING_CUSHION'):>12} (Unspent variable funds)")
+
+    print(f"\n💵 NEXT TWO WEEKS ALLOCATION ({alloc.paycheck_date} to {alloc.next_paycheck_date}):")
+    print(f"  • Bi-Weekly Paycheck:          {_f(alloc.paycheck_amount_cents, 'PAYCHECK'):>12}")
+    print(f"  • Immediate HYSA Savings:     -{_f(alloc.savings_transfer_cents, 'HYSA_SAVINGS'):>12} (Moved straight to Capital One)")
+    print(f"  • Net Checking Inflow:         {_f(alloc.net_checking_cents, 'NET_CHECKING'):>12}")
+    print("  " + "-" * 50)
+    print(f"  • Upcoming Bills in Window:   -{_f(alloc.bills_due_cents, 'BILLS_DUE'):>12} ({len(alloc.bills)} bills scheduled)")
+    for b in alloc.bills:
+        print(f"      - {b['due_date']}  {b['name']:<24} {_f(b['amount_cents']):>10}")
+    print(f"  • 2-Week Groceries Allocation:-{_f(alloc.groceries_allocated_cents, 'GROCERIES_2W'):>12}")
+    if alloc.dining_allocated_cents > 0:
+        print(f"  • 2-Week Dining Out Buffer:   -{_f(alloc.dining_allocated_cents, 'DINING_2W'):>12}")
+    print(f"  • 2-Week Car Gas Allocation:  -{_f(alloc.gas_allocated_cents, 'GAS_2W'):>12}")
+    print("=" * 70)
+    print(f"🎯 SAFE-TO-SPEND CUSHION FOR NEXT 2 WEEKS: {_f(alloc.safe_to_spend_cents, 'SAFE_TO_SPEND'):>10}")
+    print("=" * 70 + "\n")
+    return 0
+
+
+def cmd_paycheck(recurring: RecurringEngine, args: argparse.Namespace) -> int:
+    alloc = recurring.get_paycheck_allocation(as_of_date=args.date)
+    masked = args.mask
+
+    def _f(cents: int, label: str = "VAL") -> str:
+        return _format_currency(cents, masked, label)
+
+    print("\n💵 BI-WEEKLY PAYCHECK ALLOCATION & CASH FLOW")
+    print("=" * 65)
+    print(f"Cycle Window:          {alloc.paycheck_date} to {alloc.next_paycheck_date} ({alloc.days_in_cycle} days)")
+    print(f"Paycheck Take-Home:    {_f(alloc.paycheck_amount_cents, 'PAYCHECK'):>14}")
+    print(f"HYSA Savings Transfer: {_f(alloc.savings_transfer_cents, 'HYSA_SAVINGS'):>14} (Moved straight to Capital One)")
+    print(f"Net Checking Inflow:   {_f(alloc.net_checking_cents, 'NET_CHECKING'):>14}")
+    print("-" * 65)
+    print(f"Bills Due in Window:   {_f(alloc.bills_due_cents, 'BILLS_DUE'):>14} ({len(alloc.bills)} bills scheduled)")
+    for b in alloc.bills:
+        print(f"   • {b['due_date']}  {b['name']:<24} {_f(b['amount_cents']):>14}")
+    print(f"2-Week Variable Buffer:{_f(alloc.variable_needs_cents, 'VARIABLE_BUFFER'):>14} (Groceries: {_f(alloc.groceries_allocated_cents)}, Gas: {_f(alloc.gas_allocated_cents)})")
+    print("=" * 65)
+    print(f"SAFE-TO-SPEND CUSHION: {_f(alloc.safe_to_spend_cents, 'SAFE_TO_SPEND'):>14}")
+    print("=" * 65 + "\n")
+    return 0
 
 
 def main() -> int:
@@ -261,6 +335,17 @@ def main() -> int:
     p_setup.add_argument("--file", help="Path to custom setup.yaml (defaults to ~/.memory/private/finances/setup.yaml)")
     p_setup.add_argument("--create", dest="create_template", action="store_true", help="Generate template if not present")
 
+    # paycheck
+    p_pay = subparsers.add_parser("paycheck", parents=[common_parser], help="Inspect bi-weekly paycheck cash flow allocation and safe-to-spend")
+    p_pay.add_argument("--date", help="Paycheck cycle date to inspect (defaults to today)")
+
+    # breakdown / plan
+    p_plan = subparsers.add_parser("plan", parents=[common_parser], help="Comprehensive financial situation, monthly breakdown, and 2-week allocation")
+    p_plan.add_argument("--date", help="Date or cycle to inspect (defaults to today)")
+
+    p_break = subparsers.add_parser("breakdown", parents=[common_parser], help="Alias for 'plan'")
+    p_break.add_argument("--date", help="Date or cycle to inspect (defaults to today)")
+
     # export
     p_exp = subparsers.add_parser("export", parents=[common_parser], help="Export to Beancount and CSV formats")
     p_exp.add_argument("--beancount", action="store_true", help="Export to journal.beancount")
@@ -273,6 +358,10 @@ def main() -> int:
 
     if args.command == "setup":
         return cmd_setup(store, args)
+    elif args.command in ("plan", "breakdown"):
+        return cmd_breakdown(store, recurring, args)
+    elif args.command == "paycheck":
+        return cmd_paycheck(recurring, args)
     elif args.command == "status":
         return cmd_status(store, recurring, args)
     elif args.command == "balance":

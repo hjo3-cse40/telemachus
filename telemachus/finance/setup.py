@@ -16,6 +16,7 @@ from telemachus.finance.models import (
     DEFAULT_USER_RECURRING_RULES,
     AccountType,
     Frequency,
+    PaycheckPlan,
     Posting,
     RecurringRule,
     RuleType,
@@ -111,6 +112,9 @@ monthly_targets:
   # Planned budget for groceries for the month
   groceries_planned: 300.00
 
+  # Planned budget for dining out / restaurants (optional, default 0.00)
+  dining_planned: 100.00
+
   # Planned budget for gas/fuel for the month
   gas_planned: 150.00
 
@@ -119,6 +123,22 @@ monthly_targets:
 
   # Optional notes for this month
   notes: "Initial budget configured via setup.yaml"
+
+# ------------------------------------------------------------------------------
+# 4. Paycheck Allocation & Timing (Bi-Weekly Cash Flow)
+# ------------------------------------------------------------------------------
+paycheck_plan:
+  # Net take-home amount received every two weeks (e.g. 1350.00)
+  paycheck_amount: 1350.00
+
+  # Consistent amount moved straight to Capital One HYSA upon paycheck deposit
+  savings_per_paycheck: 500.00
+
+  # Pay schedule frequency: "biweekly" (every 14 days) or "semimonthly" (1st & 15th)
+  frequency: "biweekly"
+
+  # Reference date of your most recent or upcoming paycheck (YYYY-MM-DD)
+  anchor_date: "2026-10-15"
 """
 
 
@@ -284,6 +304,7 @@ def apply_setup_yaml(yaml_path: Optional[Path | str] = None, store: Optional[Fin
         income_cents = int(round(float(monthly_targets.get("income", 0.0)) * 100))
         savings_target_cents = int(round(float(monthly_targets.get("savings_target", 0.0)) * 100))
         groceries_planned_cents = int(round(float(monthly_targets.get("groceries_planned", 0.0)) * 100))
+        dining_planned_cents = int(round(float(monthly_targets.get("dining_planned", 0.0)) * 100))
         gas_planned_cents = int(round(float(monthly_targets.get("gas_planned", 0.0)) * 100))
         pge_cents = int(round(float(monthly_targets.get("pge_estimate", 0.0)) * 100))
         notes = str(monthly_targets.get("notes") or "Configured via setup.yaml")
@@ -293,6 +314,7 @@ def apply_setup_yaml(yaml_path: Optional[Path | str] = None, store: Optional[Fin
             income_cents=income_cents,
             savings_target_cents=savings_target_cents,
             groceries_planned_cents=groceries_planned_cents,
+            dining_planned_cents=dining_planned_cents,
             gas_planned_cents=gas_planned_cents,
             fixed_bills_cents=total_fixed_cents,
             pge_cents=pge_cents,
@@ -302,7 +324,24 @@ def apply_setup_yaml(yaml_path: Optional[Path | str] = None, store: Optional[Fin
         summary["monthly_overview_updated"] = True
         summary["month"] = month
 
-    # 4. Auto-update Beancount ledger
+    # 4. Process Paycheck Plan (if provided)
+    paycheck_cfg = data.get("paycheck_plan")
+    if paycheck_cfg and isinstance(paycheck_cfg, dict):
+        p_amount = int(round(float(paycheck_cfg.get("paycheck_amount", 0.0)) * 100))
+        p_savings = int(round(float(paycheck_cfg.get("savings_per_paycheck", 0.0)) * 100))
+        p_freq = str(paycheck_cfg.get("frequency", "biweekly")).lower().strip()
+        p_anchor = str(paycheck_cfg.get("anchor_date") or time.strftime("%Y-%m-%d"))
+
+        plan = PaycheckPlan(
+            paycheck_amount_cents=p_amount,
+            savings_per_paycheck_cents=p_savings,
+            frequency=p_freq,
+            anchor_date=p_anchor,
+        )
+        store.set_paycheck_plan(plan)
+        summary["paycheck_plan_configured"] = True
+
+    # 5. Auto-update Beancount ledger
     try:
         exporter = FinanceExporter(store)
         exporter.export_to_beancount()

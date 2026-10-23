@@ -19,6 +19,8 @@ from telemachus.finance.models import (
     BillInstance,
     BillStatus,
     Frequency,
+    PaycheckPlan,
+    PaycheckWindowAllocation,
     RecurringRule,
     RuleType,
     Transaction,
@@ -465,3 +467,97 @@ class RecurringEngine:
             "pending_bills_count": sum(1 for b in upcoming if b["status"] != "paid"),
             "obligations": upcoming,
         }
+
+    # ==========================================================================
+    # Paycheck Cash Flow Partitioning
+    # ==========================================================================
+    def get_paycheck_allocation(self, as_of_date: Optional[str] = None) -> PaycheckWindowAllocation:
+        """Calculates deterministic cash flow partition for the current or upcoming paycheck.
+        
+        Slices cash flow into:
+        1. Net Take-Home Paycheck Inflow
+        2. Immediate HYSA Savings Transfer (off the top)
+        3. Bills due specifically within this paycheck window
+        4. 2-Week Variable Allowance (50% of monthly groceries & gas)
+        5. Safe-to-Spend Discretionary Remainder
+        """
+        now_str = as_of_date or datetime.now().strftime("%Y-%m-%d")
+        now_dt = datetime.strptime(now_str, "%Y-%m-%d")
+
+        # 1. Retrieve or derive PaycheckPlan
+        plan = self.store.get_paycheck_plan()
+        if not plan:
+            # Fall back to deriving from active monthly overview
+            current_month = now_dt.strftime("%Y-%m")
+            overview = self.store.get_monthly_overview(current_month)
+            derived_income = round(overview.income_cents / 2) if overview.income_cents > 0 else 135000
+            derived_savings = round(overview.savings_target_cents / 2) if overview.savings_target_cents > 0 else 50000
+            plan = PaycheckPlan(
+                paycheck_amount_cents=derived_income,
+                savings_per_paycheck_cents=derived_savings,
+                frequency="biweekly",
+                anchor_date=f"{current_month}-15",
+            )
+
+        # 2. Calculate Paycheck Window boundaries
+        if plan.frequency == "semimonthly":
+            if now_dt.day < 15:
+                paycheck_dt = now_dt.replace(day=1)
+                next_paycheck_dt = now_dt.replace(day=15)
+            else:
+                paycheck_dt = now_dt.replace(day=15)
+                # Next is 1st of next month
+                next_paycheck_dt = (now_dt.replace(day=28) + timedelta(days=4)).replace(day=1)
+        else:
+            # Bi-weekly (every 14 days)
+            try:
+                anchor_dt = datetime.strptime(plan.anchor_date, "%Y-%m-%d")
+            except Exception:
+                anchor_dt = now_dt
+            diff_days = (now_dt - anchor_dt).days
+            cycle_idx = diff_days // 14
+            paycheck_dt = anchor_dt + timedelta(days=cycle_idx * 14)
+            next_paycheck_dt = paycheck_dt + timedelta(days=14)
+
+        paycheck_date_str = paycheck_dt.strftime("%Y-%m-%d")
+        next_paycheck_str = next_paycheck_dt.strftime("%Y-%m-%d")
+        end_window_str = (next_paycheck_dt - timedelta(days=1)).strftime("%Y-%m-%d")
+        days_in_cycle = (next_paycheck_dt - paycheck_dt).days
+
+        # 3. Find obligations due in this exact paycheck window [paycheck_date, next_paycheck_date - 1]
+        upcoming_all = self.get_upcoming_obligations(days_ahead=45)
+        window_bills = [
+            b for b in upcoming_all
+            if paycheck_date_str <= b["due_date"] <= end_window_str
+        ]
+        bills_due_cents = sum(b["amount_cents"] for b in window_bills)
+
+        # 4. Allocate 2-week variable budget (Groceries, Dining, Gas from monthly overview)
+        month_str = paycheck_dt.strftime("%Y-%m")
+        overview = self.store.get_monthly_overview(month_str)
+        groceries_alloc = round(overview.groceries_planned_cents / 2)
+        dining_alloc = round(overview.dining_planned_cents / 2)
+        gas_alloc = round(overview.gas_planned_cents / 2)
+        variable_needs_cents = groceries_alloc + dining_alloc + gas_alloc
+
+        # 5. Compute Net Checking and Safe-to-Spend
+        net_checking_cents = max(0, plan.paycheck_amount_cents - plan.savings_per_paycheck_cents)
+        safe_to_spend_cents = max(0, net_checking_cents - bills_due_cents - variable_needs_cents)
+
+        return PaycheckWindowAllocation(
+            paycheck_date=paycheck_date_str,
+            next_paycheck_date=next_paycheck_str,
+            days_in_cycle=days_in_cycle,
+            paycheck_amount_cents=plan.paycheck_amount_cents,
+            savings_transfer_cents=plan.savings_per_paycheck_cents,
+            net_checking_cents=net_checking_cents,
+            bills_due_cents=bills_due_cents,
+            bills=window_bills,
+            groceries_allocated_cents=groceries_alloc,
+            dining_allocated_cents=dining_alloc,
+            gas_allocated_cents=gas_alloc,
+            variable_needs_cents=variable_needs_cents,
+            safe_to_spend_cents=safe_to_spend_cents,
+            notes=f"Paycheck cycle from {paycheck_date_str} to {end_window_str}",
+        )
+

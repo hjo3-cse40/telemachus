@@ -290,6 +290,8 @@ class MonthlyOverview:
     pge_cents: int = 0
     groceries_planned_cents: int = 0
     groceries_actual_cents: int = 0
+    dining_planned_cents: int = 0
+    dining_actual_cents: int = 0
     gas_planned_cents: int = 0
     gas_actual_cents: int = 0
     notes: str = ""
@@ -304,12 +306,19 @@ class MonthlyOverview:
         return self.groceries_planned_cents - self.groceries_actual_cents
 
     @property
+    def dining_left_cents(self) -> int:
+        return self.dining_planned_cents - self.dining_actual_cents
+
+    @property
     def gas_left_cents(self) -> int:
         return self.gas_planned_cents - self.gas_actual_cents
 
     @property
     def variable_variance_cents(self) -> int:
-        return self.groceries_left_cents + self.gas_left_cents
+        var = self.groceries_left_cents + self.gas_left_cents
+        if self.dining_planned_cents > 0:
+            var += self.dining_left_cents
+        return var
 
     @property
     def total_personal_cents(self) -> int:
@@ -320,22 +329,22 @@ class MonthlyOverview:
             - self.fixed_bills_cents
             - self.pge_cents
             - self.groceries_planned_cents
+            - self.dining_planned_cents
             - self.gas_planned_cents
         )
         return max(0, val)
 
     @property
     def remaining_cushion_cents(self) -> int:
-        """Dynamic remaining cushion.
-        
-        Equals Variable Variance: starts at $0 if actuals == planned,
-        and rises as groceries or gas are spent under budget!
-        """
-        # If actual is 0/blank, it falls back to planned (so cushion stays ~$0 until real spend)
+        """Dynamic remaining cushion."""
         effective_groc = self.groceries_actual_cents if self.groceries_actual_cents > 0 else self.groceries_planned_cents
         effective_gas = self.gas_actual_cents if self.gas_actual_cents > 0 else self.gas_planned_cents
 
-        return (self.groceries_planned_cents - effective_groc) + (self.gas_planned_cents - effective_gas)
+        cushion = (self.groceries_planned_cents - effective_groc) + (self.gas_planned_cents - effective_gas)
+        if self.dining_planned_cents > 0:
+            effective_dining = self.dining_actual_cents if self.dining_actual_cents > 0 else self.dining_planned_cents
+            cushion += (self.dining_planned_cents - effective_dining)
+        return cushion
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -349,6 +358,9 @@ class MonthlyOverview:
             "groceries_planned_cents": self.groceries_planned_cents,
             "groceries_actual_cents": self.groceries_actual_cents,
             "groceries_left_cents": self.groceries_left_cents,
+            "dining_planned_cents": self.dining_planned_cents,
+            "dining_actual_cents": self.dining_actual_cents,
+            "dining_left_cents": self.dining_left_cents,
             "gas_planned_cents": self.gas_planned_cents,
             "gas_actual_cents": self.gas_actual_cents,
             "gas_left_cents": self.gas_left_cents,
@@ -395,6 +407,79 @@ class GoalProgress:
             "progress_bar": self.progress_bar,
             "status": self.status,
         }
+
+
+@dataclass
+class PaycheckPlan:
+    """Bi-weekly or semi-monthly paycheck allocation rule."""
+    paycheck_amount_cents: int
+    savings_per_paycheck_cents: int
+    frequency: str = "biweekly"  # 'biweekly' (every 14 days) or 'semimonthly' (1st & 15th)
+    anchor_date: str = "2026-10-15"  # Known paycheck date YYYY-MM-DD
+    updated_at: int = 0
+
+    @property
+    def net_checking_cents(self) -> int:
+        """Net take-home remaining after immediate HYSA savings transfer."""
+        return max(0, self.paycheck_amount_cents - self.savings_per_paycheck_cents)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "paycheck_amount_cents": self.paycheck_amount_cents,
+            "savings_per_paycheck_cents": self.savings_per_paycheck_cents,
+            "net_checking_cents": self.net_checking_cents,
+            "frequency": self.frequency,
+            "anchor_date": self.anchor_date,
+            "updated_at": self.updated_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> PaycheckPlan:
+        return cls(
+            paycheck_amount_cents=int(data["paycheck_amount_cents"]),
+            savings_per_paycheck_cents=int(data["savings_per_paycheck_cents"]),
+            frequency=str(data.get("frequency", "biweekly")),
+            anchor_date=str(data.get("anchor_date", "2026-10-15")),
+            updated_at=int(data.get("updated_at", 0)),
+        )
+
+
+@dataclass
+class PaycheckWindowAllocation:
+    """Calculated cash flow breakdown for a specific paycheck period."""
+    paycheck_date: str          # YYYY-MM-DD
+    next_paycheck_date: str     # YYYY-MM-DD
+    days_in_cycle: int
+    paycheck_amount_cents: int
+    savings_transfer_cents: int
+    net_checking_cents: int
+    bills_due_cents: int
+    bills: List[Dict[str, Any]]
+    groceries_allocated_cents: int
+    dining_allocated_cents: int
+    gas_allocated_cents: int
+    variable_needs_cents: int
+    safe_to_spend_cents: int
+    notes: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "paycheck_date": self.paycheck_date,
+            "next_paycheck_date": self.next_paycheck_date,
+            "days_in_cycle": self.days_in_cycle,
+            "paycheck_amount_cents": self.paycheck_amount_cents,
+            "savings_transfer_cents": self.savings_transfer_cents,
+            "net_checking_cents": self.net_checking_cents,
+            "bills_due_cents": self.bills_due_cents,
+            "bills": self.bills,
+            "groceries_allocated_cents": self.groceries_allocated_cents,
+            "dining_allocated_cents": self.dining_allocated_cents,
+            "gas_allocated_cents": self.gas_allocated_cents,
+            "variable_needs_cents": self.variable_needs_cents,
+            "safe_to_spend_cents": self.safe_to_spend_cents,
+            "notes": self.notes,
+        }
+
 
 
 # ==============================================================================

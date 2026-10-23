@@ -29,6 +29,7 @@ from telemachus.finance.models import (
     Frequency,
     GoalProgress,
     MonthlyOverview,
+    PaycheckPlan,
     Posting,
     RecurringRule,
     RuleType,
@@ -158,11 +159,26 @@ class FinanceStore:
                         fixed_bills_cents INTEGER NOT NULL DEFAULT 26071,
                         pge_cents INTEGER NOT NULL DEFAULT 0,
                         groceries_planned_cents INTEGER NOT NULL DEFAULT 0,
+                        dining_planned_cents INTEGER NOT NULL DEFAULT 0,
                         gas_planned_cents INTEGER NOT NULL DEFAULT 0,
                         notes TEXT,
                         updated_at INTEGER NOT NULL
                     );
+
+                    CREATE TABLE IF NOT EXISTS paycheck_plan (
+                        id TEXT PRIMARY KEY DEFAULT 'default',
+                        paycheck_amount_cents INTEGER NOT NULL,
+                        savings_per_paycheck_cents INTEGER NOT NULL,
+                        frequency TEXT NOT NULL DEFAULT 'biweekly',
+                        anchor_date TEXT NOT NULL,
+                        updated_at INTEGER NOT NULL
+                    );
                 """)
+                # Migrations for existing databases
+                try:
+                    conn.execute("ALTER TABLE monthly_overview ADD COLUMN dining_planned_cents INTEGER NOT NULL DEFAULT 0;")
+                except sqlite3.OperationalError:
+                    pass
 
         if self.db_path.exists():
             try:
@@ -589,6 +605,7 @@ class FinanceStore:
         savings_target_cents: int,
         groceries_planned_cents: int,
         gas_planned_cents: int,
+        dining_planned_cents: int = 0,
         fixed_bills_cents: int = 26071,
         pge_cents: int = 0,
         status: str = "open",
@@ -603,8 +620,8 @@ class FinanceStore:
                     INSERT INTO monthly_overview (
                         month, status, income_cents, savings_target_cents,
                         fixed_bills_cents, pge_cents, groceries_planned_cents,
-                        gas_planned_cents, notes, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        dining_planned_cents, gas_planned_cents, notes, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(month) DO UPDATE SET
                         status = excluded.status,
                         income_cents = excluded.income_cents,
@@ -612,6 +629,7 @@ class FinanceStore:
                         fixed_bills_cents = excluded.fixed_bills_cents,
                         pge_cents = excluded.pge_cents,
                         groceries_planned_cents = excluded.groceries_planned_cents,
+                        dining_planned_cents = excluded.dining_planned_cents,
                         gas_planned_cents = excluded.gas_planned_cents,
                         notes = excluded.notes,
                         updated_at = excluded.updated_at;
@@ -624,6 +642,7 @@ class FinanceStore:
                         fixed_bills_cents,
                         pge_cents,
                         groceries_planned_cents,
+                        dining_planned_cents,
                         gas_planned_cents,
                         notes,
                         now,
@@ -659,6 +678,18 @@ class FinanceStore:
                 (start_date, end_date),
             ).fetchone()
             groceries_actual = int(groc_row["total"])
+
+            dining_row = conn.execute(
+                """
+                SELECT COALESCE(SUM(p.amount_cents), 0) as total
+                FROM postings p
+                JOIN transactions t ON p.transaction_id = t.id
+                WHERE p.account_id IN ('Expenses:Food:Dining', 'Expenses:Dining')
+                  AND t.date >= ? AND t.date <= ?;
+                """,
+                (start_date, end_date),
+            ).fetchone()
+            dining_actual = int(dining_row["total"])
 
             gas_row = conn.execute(
                 """
@@ -699,6 +730,7 @@ class FinanceStore:
             if row:
                 income = row["income_cents"] or actual_income
                 pge = row["pge_cents"] or pge_actual
+                dining_planned = row["dining_planned_cents"] if "dining_planned_cents" in row.keys() else 0
                 return MonthlyOverview(
                     month=row["month"],
                     status=row["status"],
@@ -708,6 +740,8 @@ class FinanceStore:
                     pge_cents=pge,
                     groceries_planned_cents=row["groceries_planned_cents"],
                     groceries_actual_cents=groceries_actual,
+                    dining_planned_cents=dining_planned,
+                    dining_actual_cents=dining_actual,
                     gas_planned_cents=row["gas_planned_cents"],
                     gas_actual_cents=gas_actual,
                     notes=row["notes"] or "",
@@ -723,6 +757,8 @@ class FinanceStore:
                     pge_cents=pge_actual,
                     groceries_planned_cents=0,
                     groceries_actual_cents=groceries_actual,
+                    dining_planned_cents=0,
+                    dining_actual_cents=dining_actual,
                     gas_planned_cents=0,
                     gas_actual_cents=gas_actual,
                     notes="",
@@ -868,3 +904,51 @@ class FinanceStore:
             logged_txs.append(logged)
 
         return logged_txs
+
+    # ==========================================================================
+    # Paycheck Planning
+    # ==========================================================================
+    def set_paycheck_plan(self, plan: PaycheckPlan) -> PaycheckPlan:
+        """Saves or updates the active bi-weekly/semi-monthly paycheck plan."""
+        now = int(time.time())
+        with self._write_lock():
+            with self._get_connection() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO paycheck_plan (
+                        id, paycheck_amount_cents, savings_per_paycheck_cents,
+                        frequency, anchor_date, updated_at
+                    ) VALUES ('default', ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        paycheck_amount_cents = excluded.paycheck_amount_cents,
+                        savings_per_paycheck_cents = excluded.savings_per_paycheck_cents,
+                        frequency = excluded.frequency,
+                        anchor_date = excluded.anchor_date,
+                        updated_at = excluded.updated_at;
+                    """,
+                    (
+                        plan.paycheck_amount_cents,
+                        plan.savings_per_paycheck_cents,
+                        plan.frequency,
+                        plan.anchor_date,
+                        now,
+                    ),
+                )
+                conn.commit()
+        plan.updated_at = now
+        return plan
+
+    def get_paycheck_plan(self) -> Optional[PaycheckPlan]:
+        """Returns the active paycheck plan if configured."""
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT * FROM paycheck_plan WHERE id = 'default';").fetchone()
+            if not row:
+                return None
+            return PaycheckPlan(
+                paycheck_amount_cents=row["paycheck_amount_cents"],
+                savings_per_paycheck_cents=row["savings_per_paycheck_cents"],
+                frequency=row["frequency"],
+                anchor_date=row["anchor_date"],
+                updated_at=row["updated_at"],
+            )
+

@@ -774,6 +774,40 @@ TOOLS_DEFINITIONS = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "finance_paycheck_plan",
+        "description": (
+            "Calculates bi-weekly paycheck cash flow partitioning: take-home pay, automatic HYSA savings transfer, "
+            "bills due specifically within this paycheck window, 2-week grocery & gas buffer, and safe-to-spend remainder."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "date": {
+                    "type": "string",
+                    "description": "Optional date in YYYY-MM-DD format to inspect that specific paycheck cycle (defaults to current date).",
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "finance_plan_breakdown",
+        "description": (
+            "Returns a comprehensive financial situation breakdown: current balances, this month's budget allocations "
+            "(HYSA savings, groceries, eating out, gas, bills, discretionary allowance), plus the exact 2-week paycheck allocation."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "date": {
+                    "type": "string",
+                    "description": "Optional date in YYYY-MM-DD format (defaults to current date).",
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
 ]
 
 
@@ -1334,6 +1368,75 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
             clean_cat = it['category'].split(':')[-1] if it['category'] else 'General'
             lines.append(f"| {it['date']} | {it['payee']} | {_f(it['amount_cents'])} | {clean_cat} | {it['memo']} |")
 
+        return "\n".join(lines)
+
+    elif name == "finance_paycheck_plan":
+        store = FinanceStore()
+        engine = RecurringEngine(store)
+        date = arguments.get("date")
+        alloc = engine.get_paycheck_allocation(as_of_date=date)
+
+        def _f(cents: int) -> str:
+            return f"${cents / 100.0:,.2f}"
+
+        lines = [
+            f"### Paycheck Cash Flow Partition ({alloc.paycheck_date} to {alloc.next_paycheck_date})",
+            f"- **Paycheck Take-Home**:        {_f(alloc.paycheck_amount_cents)}",
+            f"- **Immediate HYSA Savings**:     {_f(alloc.savings_transfer_cents)} (Moved straight to Capital One HYSA)",
+            f"- **Net Checking Inflow**:        {_f(alloc.net_checking_cents)}",
+            f"- **Bills Due in Window**:        {_f(alloc.bills_due_cents)} ({len(alloc.bills)} bills due)",
+            f"- **2-Week Variable Needs**:      {_f(alloc.variable_needs_cents)} (Groceries: {_f(alloc.groceries_allocated_cents)}, Gas: {_f(alloc.gas_allocated_cents)})",
+            f"- **SAFE-TO-SPEND CUSHION**:      {_f(alloc.safe_to_spend_cents)} (Flexible spending for this cycle)",
+            "",
+            "| Due Date | Obligation | Amount | Status | Autopay |",
+            "| :--- | :--- | :---: | :---: | :---: |",
+        ]
+        if not alloc.bills:
+            lines.append("| — | No recurring bills scheduled in this cycle | $0.00 | — | — |")
+        else:
+            for b in alloc.bills:
+                lines.append(f"| {b['due_date']} | {b['name']} | {_f(b['amount_cents'])} | [{b['status'].upper()}] | {'Yes' if b['is_autopay'] else 'No'} |")
+
+        return "\n".join(lines)
+
+    elif name == "finance_plan_breakdown":
+        store = FinanceStore()
+        engine = RecurringEngine(store)
+        now_str = arguments.get("date") or time.strftime("%Y-%m-%d")
+        month_str = now_str[:7]
+        overview = store.get_monthly_overview(month_str)
+        alloc = engine.get_paycheck_allocation(as_of_date=now_str)
+        balances = store.get_all_balances(as_of_date=now_str)
+
+        def _f(cents: int) -> str:
+            return f"${cents / 100.0:,.2f}"
+
+        lines = [
+            f"### Comprehensive Financial Situation & Bi-Weekly Allocation Breakdown",
+            f"- **As of Date**:            {now_str} (Month: {month_str})",
+            f"- **Liquid Capital**:         {_f(balances['liquid_assets_cents'])} (Wells Fargo Checking + Capital One HYSA)",
+            f"- **Net Worth**:              {_f(balances['net_worth_cents'])}",
+            "",
+            f"#### 🗓️ Monthly Plan Breakdown ({month_str})",
+            f"- **Monthly Take-Home**:      {_f(overview.income_cents)}",
+            f"- **HYSA Savings Target**:    {_f(overview.savings_target_cents)} (Target transfer to Capital One HYSA)",
+            f"- **Fixed Bills & Utilities**: {_f(overview.all_bills_cents)} (Fixed Bills: {_f(overview.fixed_bills_cents)}, PG&E: {_f(overview.pge_cents)})",
+            f"- **Groceries Budget**:       {_f(overview.groceries_planned_cents)} (Spent: {_f(overview.groceries_actual_cents)} | Left: {_f(overview.groceries_left_cents)})",
+            f"- **Dining / Eating Out**:    {_f(overview.dining_planned_cents)} (Spent: {_f(overview.dining_actual_cents)} | Left: {_f(overview.dining_left_cents)})",
+            f"- **Car Gas Budget**:         {_f(overview.gas_planned_cents)} (Spent: {_f(overview.gas_actual_cents)} | Left: {_f(overview.gas_left_cents)})",
+            f"- **Personal Allowance**:     {_f(overview.total_personal_cents)} (Budgeted discretionary envelope)",
+            f"- **Remaining Flex Cushion**: {_f(overview.remaining_cushion_cents)} (Unspent variable funds)",
+            "",
+            f"#### 💵 Next Two Weeks Allocation ({alloc.paycheck_date} to {alloc.next_paycheck_date})",
+            f"- **Bi-Weekly Paycheck**:     {_f(alloc.paycheck_amount_cents)}",
+            f"- **Immediate HYSA Savings**: -{_f(alloc.savings_transfer_cents)} (Moved straight to Capital One HYSA)",
+            f"- **Net Checking Inflow**:    {_f(alloc.net_checking_cents)}",
+            f"- **Bills Due in Window**:    -{_f(alloc.bills_due_cents)} ({len(alloc.bills)} bills scheduled)",
+            f"- **2-Week Groceries**:       -{_f(alloc.groceries_allocated_cents)}",
+            f"- **2-Week Eating Out**:      -{_f(alloc.dining_allocated_cents)}",
+            f"- **2-Week Car Gas**:         -{_f(alloc.gas_allocated_cents)}",
+            f"- **SAFE-TO-SPEND CUSHION**:  **{_f(alloc.safe_to_spend_cents)}** (Discretionary cash for next 14 days)",
+        ]
         return "\n".join(lines)
 
     else:
