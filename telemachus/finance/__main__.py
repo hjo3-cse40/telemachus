@@ -241,6 +241,23 @@ def cmd_import_text(store: FinanceStore, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_clear_day(store: FinanceStore, args: argparse.Namespace) -> int:
+    target_date = args.date or datetime.now().strftime("%Y-%m-%d")
+    count = store.delete_day_transactions(target_date)
+    print(f"\n🗑️ Successfully deleted {count} transaction(s) for {target_date}.")
+    return 0
+
+
+def cmd_delete_tx(store: FinanceStore, args: argparse.Namespace) -> int:
+    success = store.delete_transaction(args.id)
+    if success:
+        print(f"\n🗑️ Successfully deleted transaction {args.id}.")
+        return 0
+    else:
+        print(f"\n❌ Transaction {args.id} not found.")
+        return 1
+
+
 def cmd_breakdown(store: FinanceStore, recurring: RecurringEngine, args: argparse.Namespace) -> int:
     now_str = getattr(args, "date", None) or datetime.now().strftime("%Y-%m-%d")
     month_str = now_str[:7]
@@ -372,6 +389,14 @@ def main() -> int:
     p_imp = subparsers.add_parser("import-text", parents=[common_parser], help="Batch import historical daily bullet notes from a text file")
     p_imp.add_argument("--file", help="Path to text document (or read from stdin)")
 
+    # clear-day
+    p_clear = subparsers.add_parser("clear-day", parents=[common_parser], help="Clear all transactions for a specific date")
+    p_clear.add_argument("--date", help="Date to clear (defaults to today YYYY-MM-DD)")
+
+    # delete-tx
+    p_deltx = subparsers.add_parser("delete-tx", parents=[common_parser], help="Delete a specific transaction by ID")
+    p_deltx.add_argument("--id", required=True, help="Transaction ID")
+
     # export
     p_exp = subparsers.add_parser("export", parents=[common_parser], help="Export to Beancount and CSV formats")
     p_exp.add_argument("--beancount", action="store_true", help="Export to journal.beancount")
@@ -388,6 +413,10 @@ def main() -> int:
         return cmd_breakdown(store, recurring, args)
     elif args.command == "import-text":
         return cmd_import_text(store, args)
+    elif args.command == "clear-day":
+        return cmd_clear_day(store, args)
+    elif args.command == "delete-tx":
+        return cmd_delete_tx(store, args)
     elif args.command == "paycheck":
         return cmd_paycheck(recurring, args)
     elif args.command == "status":

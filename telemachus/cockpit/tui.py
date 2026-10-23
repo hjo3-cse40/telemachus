@@ -48,8 +48,10 @@ class CockpitTUI:
         self.finance_cashflow: Any = None
         self.finance_paycheck: Any = None
         self.finance_balances: Dict[str, Any] = {}
+        self.finances_focus: str = "days"  # "days" or "items"
         self.selected_day_idx = 0
         self.day_scroll_offset = 0
+        self.selected_item_idx = 0
         self.mask_amounts = False
 
         # In-Cockpit Modal State for Logging Daily Finances
@@ -58,6 +60,14 @@ class CockpitTUI:
         self.modal_date_buffer = ""
         self.modal_line_buffer = ""
         self.modal_batch_lines: List[str] = []
+
+        # In-Cockpit Modal State for Editing Daily Finances
+        self.is_editing_finances = False
+        self.editing_stage = "item"  # "item" or "day_menu"
+        self.editing_tx_id: Optional[str] = None
+        self.editing_date = ""
+        self.editing_orig_text = ""
+        self.editing_buffer = ""
 
         self._init_curses()
         self.refresh_data()
@@ -151,7 +161,7 @@ class CockpitTUI:
             self.stdscr.addstr(1, 55, "[4: Finances]", tab4_attr)
 
             if self.current_tab == 4:
-                actions = "[a] Add Day  [m] Mask  [r] Refresh  [q] Quit"
+                actions = "[a] Add  [e] Edit  [d] Delete  [Tab] Switch  [m] Mask  [q] Quit"
             else:
                 actions = "[t] Triage  [r] Refresh  [q] Quit"
 
@@ -355,7 +365,9 @@ class CockpitTUI:
             split_x = min(36, max(26, max_x // 3))
 
             # Left Column Header
-            self.stdscr.addstr(5, 2, f"{'DAY NAVIGATOR':<18} {'NET':>8}"[:split_x - 2], curses.color_pair(4) | curses.A_BOLD)
+            left_focus_prefix = "▶ " if self.finances_focus == "days" else "  "
+            left_hdr_attr = (curses.color_pair(7) | curses.A_BOLD) if self.finances_focus == "days" else (curses.color_pair(4) | curses.A_BOLD)
+            self.stdscr.addstr(5, 2, f"{left_focus_prefix + 'DAY NAVIGATOR':<18} {'NET':>8}"[:split_x - 2], left_hdr_attr)
             self.stdscr.addstr(6, 1, "─" * (split_x - 1), curses.color_pair(8))
 
             # Right Column Header & Divider
@@ -402,8 +414,10 @@ class CockpitTUI:
                 curr = self.finance_days[self.selected_day_idx]
                 day_out = self._fmt_money(curr["outflow_cents"], self.mask_amounts)
                 day_in = self._fmt_money(curr["inflow_cents"], self.mask_amounts)
-                header_right = f"📅 {curr['day_title']} ({curr['date']}) · Spent: {day_out} · Inflow: {day_in}"
-                self.stdscr.addstr(5, right_x, header_right[:right_w], curses.color_pair(1) | curses.A_BOLD)
+                right_focus_prefix = "▶ " if self.finances_focus == "items" else "  "
+                right_hdr_attr = (curses.color_pair(7) | curses.A_BOLD) if self.finances_focus == "items" else (curses.color_pair(1) | curses.A_BOLD)
+                header_right = f"{right_focus_prefix}📅 {curr['day_title']} ({curr['date']}) · Spent: {day_out} · Inflow: {day_in}"
+                self.stdscr.addstr(5, right_x, header_right[:right_w], right_hdr_attr)
 
                 if right_w >= 50:
                     tbl_hdr = f"  {'ACCOUNT':<10} {'CATEGORY':<14} {'DESCRIPTION / PAYEE':<24} {'AMOUNT':>10}"
@@ -421,20 +435,26 @@ class CockpitTUI:
                     amt_str = self._fmt_money(amt, self.mask_amounts, signed=item["is_income"])
                     amt_pair = curses.color_pair(5) if item["is_income"] else curses.color_pair(3)
 
+                    is_item_sel = (self.finances_focus == "items" and i_idx == self.selected_item_idx)
+                    row_attr = (curses.color_pair(7) | curses.A_BOLD) if is_item_sel else curses.color_pair(8)
+
+                    if is_item_sel:
+                        self.stdscr.addstr(item_y, right_x, " " * (right_w), row_attr)
+
                     if right_w >= 50:
                         acc_str = f"[{item['account'][:8]}]"
                         cat_str = item["category"][:13]
                         desc_str = (item["payee"] or item["memo"] or "")[:22]
-                        self.stdscr.addstr(item_y, right_x + 2, f"{acc_str:<10}", curses.color_pair(6))
-                        self.stdscr.addstr(item_y, right_x + 13, f"{cat_str:<14}", curses.color_pair(8))
-                        self.stdscr.addstr(item_y, right_x + 28, f"{desc_str:<22}", curses.color_pair(8))
-                        self.stdscr.addstr(item_y, right_x + right_w - len(amt_str) - 2, amt_str, amt_pair | curses.A_BOLD)
+                        self.stdscr.addstr(item_y, right_x + 2, f"{acc_str:<10}", curses.color_pair(7) if is_item_sel else curses.color_pair(6))
+                        self.stdscr.addstr(item_y, right_x + 13, f"{cat_str:<14}", row_attr)
+                        self.stdscr.addstr(item_y, right_x + 28, f"{desc_str:<22}", row_attr)
+                        self.stdscr.addstr(item_y, right_x + right_w - len(amt_str) - 2, amt_str, curses.color_pair(7) | curses.A_BOLD if is_item_sel else (amt_pair | curses.A_BOLD))
                     else:
                         cat_str = item["category"][:11]
                         desc_str = (item["payee"] or item["memo"] or "")[:15]
-                        self.stdscr.addstr(item_y, right_x + 2, f"{cat_str:<12}", curses.color_pair(8))
-                        self.stdscr.addstr(item_y, right_x + 15, f"{desc_str:<15}", curses.color_pair(8))
-                        self.stdscr.addstr(item_y, right_x + right_w - len(amt_str) - 2, amt_str, amt_pair | curses.A_BOLD)
+                        self.stdscr.addstr(item_y, right_x + 2, f"{cat_str:<12}", row_attr)
+                        self.stdscr.addstr(item_y, right_x + 15, f"{desc_str:<15}", row_attr)
+                        self.stdscr.addstr(item_y, right_x + right_w - len(amt_str) - 2, amt_str, curses.color_pair(7) | curses.A_BOLD if is_item_sel else (amt_pair | curses.A_BOLD))
         except curses.error:
             pass
 
@@ -485,6 +505,64 @@ class CockpitTUI:
         except curses.error:
             pass
 
+    def draw_edit_modal(self, max_y: int, max_x: int) -> None:
+        box_w = min(68, max(44, max_x - 6))
+        box_h = min(18, max(12, max_y - 6))
+        start_x = max(2, (max_x - box_w) // 2)
+        start_y = max(2, (max_y - box_h) // 2)
+
+        try:
+            # Clear background
+            for y in range(start_y, start_y + box_h):
+                self.stdscr.addstr(y, start_x, " " * box_w, curses.color_pair(8))
+
+            # Outer border
+            self.stdscr.addstr(start_y, start_x, "┌" + "─" * (box_w - 2) + "┐", curses.color_pair(4) | curses.A_BOLD)
+            for y in range(start_y + 1, start_y + box_h - 1):
+                self.stdscr.addstr(y, start_x, "│", curses.color_pair(4) | curses.A_BOLD)
+                self.stdscr.addstr(y, start_x + box_w - 1, "│", curses.color_pair(4) | curses.A_BOLD)
+            self.stdscr.addstr(start_y + box_h - 1, start_x, "└" + "─" * (box_w - 2) + "┘", curses.color_pair(4) | curses.A_BOLD)
+
+            # Title
+            title = " ✏️ EDIT FINANCES "
+            self.stdscr.addstr(start_y, start_x + 3, title, curses.color_pair(7) | curses.A_BOLD)
+
+            if self.editing_stage == "day_menu":
+                self.stdscr.addstr(start_y + 1, start_x + 3, f"Date: {self.editing_date}", curses.color_pair(1) | curses.A_BOLD)
+                self.stdscr.addstr(start_y + 2, start_x + 3, "Select item to edit, or type 'c' to clear entire day:", curses.color_pair(8))
+
+                curr_day = self.finance_days[self.selected_day_idx]
+                items = curr_day.get("items", [])
+                lines_avail = max(1, box_h - 7)
+                for idx, itm in enumerate(items[:lines_avail]):
+                    b_str = self.finance_panel.item_to_bullet(itm)
+                    line_disp = f"  [{idx + 1}] {b_str}"
+                    self.stdscr.addstr(start_y + 3 + idx, start_x + 3, line_disp[:box_w - 6], curses.color_pair(6))
+
+                prompt_y = start_y + box_h - 3
+                prompt = f"Enter # (1-{len(items)}) or 'c' to clear: {self.editing_buffer}█"
+                self.stdscr.addstr(prompt_y, start_x + 3, prompt[:box_w - 6], curses.color_pair(4) | curses.A_BOLD)
+
+                hints = "[Enter] Select   [c] Clear Day   [Esc] Cancel"
+                self.stdscr.addstr(start_y + box_h - 2, start_x + 3, hints[:box_w - 6], curses.color_pair(2))
+
+            elif self.editing_stage == "item":
+                self.stdscr.addstr(start_y + 1, start_x + 3, f"Date: {self.editing_date}", curses.color_pair(1) | curses.A_BOLD)
+                orig_disp = f"Original: {self.editing_orig_text}"
+                self.stdscr.addstr(start_y + 2, start_x + 3, orig_disp[:box_w - 6], curses.color_pair(8))
+                self.stdscr.addstr(start_y + 4, start_x + 3, "Edit Notion-style bullet line:", curses.color_pair(2) | curses.A_BOLD)
+
+                input_y = start_y + 5
+                prompt = f"> {self.editing_buffer}█"
+                self.stdscr.addstr(input_y, start_x + 3, prompt[:box_w - 6], curses.color_pair(4) | curses.A_BOLD)
+
+                self.stdscr.addstr(start_y + 7, start_x + 3, "Examples: - groceries - 25.50   gas - 40   payday + 1350", curses.color_pair(8))
+
+                hints = "[Enter] Save Changes   [d] Delete Item   [Esc] Cancel"
+                self.stdscr.addstr(start_y + box_h - 2, start_x + 3, hints[:box_w - 6], curses.color_pair(2))
+        except curses.error:
+            pass
+
     def open_add_modal(self) -> None:
         today_str = datetime.now().strftime("%Y-%m-%d")
         self.is_adding_finances = True
@@ -492,6 +570,32 @@ class CockpitTUI:
         self.modal_date_buffer = today_str
         self.modal_line_buffer = ""
         self.modal_batch_lines = []
+
+    def open_edit_modal(self) -> None:
+        if not self.finance_days or not (0 <= self.selected_day_idx < len(self.finance_days)):
+            self.set_notification("No day selected to edit.")
+            return
+
+        curr_day = self.finance_days[self.selected_day_idx]
+        items = curr_day.get("items", [])
+        if not items:
+            self.set_notification(f"No transactions to edit for {curr_day['date']}.")
+            return
+
+        self.is_editing_finances = True
+        self.editing_date = curr_day["date"]
+
+        if self.finances_focus == "items" or len(items) == 1:
+            idx = min(self.selected_item_idx, len(items) - 1)
+            target = items[idx]
+            self.editing_stage = "item"
+            self.editing_tx_id = target["id"]
+            bullet_text = self.finance_panel.item_to_bullet(target)
+            self.editing_orig_text = bullet_text
+            self.editing_buffer = bullet_text
+        else:
+            self.editing_stage = "day_menu"
+            self.editing_buffer = ""
 
     def handle_modal_key(self, ch: int) -> None:
         if ch in (27,):  # ESC
@@ -531,6 +635,94 @@ class CockpitTUI:
             elif 32 <= ch <= 126:
                 self.modal_line_buffer += chr(ch)
 
+    def handle_edit_modal_key(self, ch: int) -> None:
+        if ch in (27,):  # ESC
+            self.is_editing_finances = False
+            self.set_notification("Edit cancelled.")
+            return
+
+        curr_day = self.finance_days[self.selected_day_idx]
+        items = curr_day.get("items", [])
+
+        if self.editing_stage == "day_menu":
+            if ch in (10, 13, curses.KEY_ENTER):
+                cmd = self.editing_buffer.strip().lower()
+                if cmd in ("c", "clear", "del", "delete"):
+                    count = self.finance_panel.delete_day(self.editing_date)
+                    self.is_editing_finances = False
+                    self.refresh_data()
+                    self.set_notification(f"🗑️ Cleared all {count} transactions for {self.editing_date}.")
+                    return
+                elif cmd.isdigit():
+                    num = int(cmd)
+                    if 1 <= num <= len(items):
+                        target = items[num - 1]
+                        self.selected_item_idx = num - 1
+                        self.editing_stage = "item"
+                        self.editing_tx_id = target["id"]
+                        bullet_text = self.finance_panel.item_to_bullet(target)
+                        self.editing_orig_text = bullet_text
+                        self.editing_buffer = bullet_text
+                        return
+                    else:
+                        self.set_notification(f"Enter a number between 1 and {len(items)}")
+                        self.editing_buffer = ""
+                        return
+                else:
+                    self.set_notification("Type item number (e.g. 1) or 'c' to clear day.")
+                    self.editing_buffer = ""
+            elif ch in (curses.KEY_BACKSPACE, 127, 8):
+                if self.editing_buffer:
+                    self.editing_buffer = self.editing_buffer[:-1]
+            elif 32 <= ch <= 126:
+                self.editing_buffer += chr(ch)
+
+        elif self.editing_stage == "item":
+            if ch in (10, 13, curses.KEY_ENTER):
+                new_text = self.editing_buffer.strip()
+                if not new_text:
+                    self.is_editing_finances = False
+                    return
+                res = self.finance_panel.edit_transaction(self.editing_tx_id, self.editing_date, new_text)
+                self.is_editing_finances = False
+                self.refresh_data()
+                if res:
+                    self.set_notification(f"✅ Updated transaction: {new_text}")
+                else:
+                    self.set_notification("❌ Could not parse bullet. Example: - groceries - 25.50")
+            elif ch in (ord("d"), ord("D")) and not self.editing_buffer:
+                # Pressing 'd' in item edit modal deletes it
+                self.finance_panel.delete_transaction(self.editing_tx_id)
+                self.is_editing_finances = False
+                self.refresh_data()
+                self.set_notification("🗑️ Deleted transaction.")
+            elif ch in (curses.KEY_BACKSPACE, 127, 8):
+                if self.editing_buffer:
+                    self.editing_buffer = self.editing_buffer[:-1]
+            elif 32 <= ch <= 126:
+                self.editing_buffer += chr(ch)
+
+    def delete_selected_finance(self) -> None:
+        if not self.finance_days or not (0 <= self.selected_day_idx < len(self.finance_days)):
+            return
+        curr_day = self.finance_days[self.selected_day_idx]
+        items = curr_day.get("items", [])
+        if not items:
+            return
+
+        if self.finances_focus == "items":
+            idx = min(self.selected_item_idx, len(items) - 1)
+            target = items[idx]
+            self.finance_panel.delete_transaction(target["id"])
+            self.refresh_data()
+            if self.selected_item_idx >= len(items) - 1:
+                self.selected_item_idx = max(0, len(items) - 2)
+            self.set_notification(f"🗑️ Deleted {target['payee']} (${abs(target['amount_cents'])/100:.2f})")
+        else:
+            count = self.finance_panel.delete_day(curr_day["date"])
+            self.refresh_data()
+            self.set_notification(f"🗑️ Cleared all {count} transactions for {curr_day['date']}.")
+
     def _commit_modal_bullets(self) -> None:
         if self.modal_line_buffer.strip():
             self.modal_batch_lines.append(self.modal_line_buffer.strip())
@@ -553,7 +745,7 @@ class CockpitTUI:
                 self.stdscr.addstr(max_y - 1, 1, f"🔔 {self.notification}"[: max_x - 2], curses.color_pair(4) | curses.A_BOLD)
             else:
                 if self.current_tab == 4:
-                    hint = " [↑/↓/j/k]: Days  [1-4]: Tabs  [a]: Add Day  [m]: Mask Numbers  [r]: Refresh  [q]: Exit"
+                    hint = " [j/k]: Move  [Tab]: Switch Day/Items  [a]: Add  [e]: Edit  [d]: Delete  [m]: Mask  [q]: Exit"
                 else:
                     hint = " [↑/↓/j/k]: Navigate  [1-4]: Views  [t]: Triage in OpenCode  [r]: Refresh  [q]: Exit"
                 self.stdscr.addstr(max_y - 1, 1, hint[: max_x - 2], curses.color_pair(1))
@@ -581,27 +773,44 @@ class CockpitTUI:
                 if clicked_idx < len(self.emails):
                     self.selected_email_idx = clicked_idx
 
-            # Click in finance day list
+            # Click in finance view (Left Column: Days, Right Column: Items)
             split_x = min(36, max(26, curses.COLS // 3)) if hasattr(curses, "COLS") else 32
-            if self.current_tab == 4 and 7 <= my <= 30 and mx <= split_x:
-                clicked_day = self.day_scroll_offset + (my - 7)
-                if 0 <= clicked_day < len(self.finance_days):
-                    self.selected_day_idx = clicked_day
+            if self.current_tab == 4 and 7 <= my <= 30:
+                if mx <= split_x:
+                    clicked_day = self.day_scroll_offset + (my - 7)
+                    if 0 <= clicked_day < len(self.finance_days):
+                        self.selected_day_idx = clicked_day
+                        self.finances_focus = "days"
+                        self.selected_item_idx = 0
+                else:
+                    clicked_item = my - 7
+                    curr_items = self.finance_days[self.selected_day_idx]["items"] if self.finance_days else []
+                    if 0 <= clicked_item < len(curr_items):
+                        self.selected_item_idx = clicked_item
+                        self.finances_focus = "items"
 
             # Trackpad scroll up / down
             if bstate & curses.BUTTON4_PRESSED:  # Scroll Up
                 if self.current_tab == 1:
                     self.selected_email_idx = max(0, self.selected_email_idx - 1)
                 elif self.current_tab == 4:
-                    self.selected_day_idx = max(0, self.selected_day_idx - 1)
-                    if self.selected_day_idx < self.day_scroll_offset:
-                        self.day_scroll_offset = self.selected_day_idx
+                    if self.finances_focus == "days":
+                        self.selected_day_idx = max(0, self.selected_day_idx - 1)
+                        if self.selected_day_idx < self.day_scroll_offset:
+                            self.day_scroll_offset = self.selected_day_idx
+                    else:
+                        self.selected_item_idx = max(0, self.selected_item_idx - 1)
             elif bstate & curses.BUTTON2_PRESSED or bstate & (1 << 21):  # Scroll Down
                 if self.current_tab == 1:
                     self.selected_email_idx = min(len(self.emails) - 1, self.selected_email_idx + 1)
                 elif self.current_tab == 4:
-                    if self.selected_day_idx < len(self.finance_days) - 1:
-                        self.selected_day_idx += 1
+                    if self.finances_focus == "days":
+                        if self.selected_day_idx < len(self.finance_days) - 1:
+                            self.selected_day_idx += 1
+                    else:
+                        curr_items = self.finance_days[self.selected_day_idx]["items"] if self.finance_days else []
+                        if self.selected_item_idx < len(curr_items) - 1:
+                            self.selected_item_idx += 1
         except Exception:
             pass
 
@@ -636,6 +845,8 @@ class CockpitTUI:
 
             if self.is_adding_finances:
                 self.draw_add_day_modal(max_y, max_x)
+            elif self.is_editing_finances:
+                self.draw_edit_modal(max_y, max_x)
 
             self.draw_bottom_bar(max_y, max_x)
             self.stdscr.refresh()
@@ -656,6 +867,9 @@ class CockpitTUI:
 
             if self.is_adding_finances:
                 self.handle_modal_key(ch)
+                continue
+            elif self.is_editing_finances:
+                self.handle_edit_modal_key(ch)
                 continue
 
             if ch == curses.KEY_MOUSE:
@@ -689,25 +903,45 @@ class CockpitTUI:
                 elif ch in (ord("t"), ord("T")):
                     self.trigger_opencode_action("Triage my unread emails and summarize urgent items using telemachus-email")
             elif self.current_tab == 4:
-                if ch in (curses.KEY_UP, ord("k")):
-                    if self.selected_day_idx > 0:
-                        self.selected_day_idx -= 1
-                        if self.selected_day_idx < self.day_scroll_offset:
-                            self.day_scroll_offset = self.selected_day_idx
+                if ch in (9, ord("\t")):  # Tab key toggles focus between Days and Items
+                    self.finances_focus = "items" if self.finances_focus == "days" else "days"
+                    self.set_notification(f"Focus: {self.finances_focus.upper()}")
+                elif ch in (curses.KEY_RIGHT, ord("l")):
+                    self.finances_focus = "items"
+                elif ch in (curses.KEY_LEFT, ord("h")):
+                    self.finances_focus = "days"
+                elif ch in (curses.KEY_UP, ord("k")):
+                    if self.finances_focus == "days":
+                        if self.selected_day_idx > 0:
+                            self.selected_day_idx -= 1
+                            self.selected_item_idx = 0
+                            if self.selected_day_idx < self.day_scroll_offset:
+                                self.day_scroll_offset = self.selected_day_idx
+                    else:
+                        if self.selected_item_idx > 0:
+                            self.selected_item_idx -= 1
                 elif ch in (curses.KEY_DOWN, ord("j")):
-                    if self.selected_day_idx < len(self.finance_days) - 1:
-                        self.selected_day_idx += 1
-                        avail_day_rows = max(1, max_y - 9)
-                        if self.selected_day_idx >= self.day_scroll_offset + avail_day_rows:
-                            self.day_scroll_offset += 1
+                    if self.finances_focus == "days":
+                        if self.selected_day_idx < len(self.finance_days) - 1:
+                            self.selected_day_idx += 1
+                            self.selected_item_idx = 0
+                            avail_day_rows = max(1, max_y - 9)
+                            if self.selected_day_idx >= self.day_scroll_offset + avail_day_rows:
+                                self.day_scroll_offset += 1
+                    else:
+                        curr_items = self.finance_days[self.selected_day_idx]["items"] if self.finance_days else []
+                        if self.selected_item_idx < len(curr_items) - 1:
+                            self.selected_item_idx += 1
                 elif ch in (ord("a"), ord("A")):
                     self.open_add_modal()
+                elif ch in (ord("e"), ord("E")):
+                    self.open_edit_modal()
+                elif ch in (ord("d"), ord("D")):
+                    self.delete_selected_finance()
                 elif ch in (ord("m"), ord("M")):
                     self.mask_amounts = not self.mask_amounts
                     status = "masked" if self.mask_amounts else "unmasked"
                     self.set_notification(f"Finance amounts {status}.")
-
-            time.sleep(0.04)
 
 
 def main():

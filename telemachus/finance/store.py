@@ -470,6 +470,20 @@ class FinanceStore:
                 conn.commit()
                 return res.rowcount > 0
 
+    def delete_day_transactions(self, date_str: str, include_setup: bool = True) -> int:
+        """Deletes all transactions for a specific date."""
+        with self._write_lock():
+            with self._get_connection() as conn:
+                if include_setup:
+                    res = conn.execute("DELETE FROM transactions WHERE date = ?;", (date_str,))
+                else:
+                    res = conn.execute(
+                        "DELETE FROM transactions WHERE date = ? AND (source != 'setup' OR source IS NULL);",
+                        (date_str,),
+                    )
+                conn.commit()
+                return res.rowcount
+
     # ==========================================================================
     # Balances & Aggregations (Deterministic Calculations)
     # ==========================================================================

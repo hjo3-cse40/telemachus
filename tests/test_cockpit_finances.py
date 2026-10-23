@@ -132,6 +132,28 @@ class TestFinanceTuiPanel(unittest.TestCase):
         self.assertEqual(days[1]["date"], "2026-10-20")
         self.assertEqual(days[2]["date"], "2026-10-18")
 
+    def test_edit_and_delete_day(self):
+        logged = self.panel.log_day_bullets("2026-10-23", "- groceries - 30.00\npayday + 1200.00")
+        self.assertEqual(len(logged), 2)
+
+        days = self.panel.get_daily_ledger()
+        item = days[0]["items"][0]
+        b_str = self.panel.item_to_bullet(item)
+        self.assertIn("30", b_str)
+
+        # Edit item
+        updated = self.panel.edit_transaction(item["id"], "2026-10-23", "- groceries - 45.00")
+        self.assertIsNotNone(updated)
+
+        days_after = self.panel.get_daily_ledger()
+        self.assertEqual(days_after[0]["outflow_cents"], 4500)
+
+        # Delete entire day
+        count = self.panel.delete_day("2026-10-23")
+        self.assertEqual(count, 2)
+        days_empty = self.panel.get_daily_ledger()
+        self.assertEqual(len(days_empty), 0)
+
 
 class TestCockpitTUIFinances(unittest.TestCase):
     """Verifies TUI layout methods, masking, and modal state management."""
@@ -167,10 +189,18 @@ class TestCockpitTUIFinances(unittest.TestCase):
         self.tui.finance_overview = None
         self.tui.finance_paycheck = None
         self.tui.finance_balances = {}
+        self.tui.finances_focus = "days"
         self.tui.selected_day_idx = 0
         self.tui.day_scroll_offset = 0
+        self.tui.selected_item_idx = 0
         self.tui.mask_amounts = False
         self.tui.is_adding_finances = False
+        self.tui.is_editing_finances = False
+        self.tui.editing_stage = "item"
+        self.tui.editing_tx_id = None
+        self.tui.editing_date = ""
+        self.tui.editing_orig_text = ""
+        self.tui.editing_buffer = ""
         self.tui.modal_stage = "date"
         self.tui.modal_date_buffer = ""
         self.tui.modal_line_buffer = ""
@@ -243,6 +273,40 @@ class TestCockpitTUIFinances(unittest.TestCase):
         self.mock_stdscr.reset_mock()
         self.tui.draw_add_day_modal(35, 90)
         self.assertTrue(self.mock_stdscr.addstr.called)
+
+    @unittest.mock.patch("curses.color_pair", return_value=0)
+    def test_edit_modal_and_delete_in_tui(self, mock_cp):
+        self.panel.log_day_bullets("2026-10-23", "- groceries - 50.00\npayday + 1200.00")
+        self.tui.refresh_data()
+        self.tui.finances_focus = "items"
+        self.tui.selected_item_idx = 0
+
+        # Open edit modal on item 0
+        self.tui.open_edit_modal()
+        self.assertTrue(self.tui.is_editing_finances)
+        self.assertEqual(self.tui.editing_stage, "item")
+
+        # Edit buffer and commit
+        self.tui.editing_buffer = "- groceries - 22.50"
+        self.tui.handle_edit_modal_key(10)
+        self.assertFalse(self.tui.is_editing_finances)
+
+        # Verify update
+        days = self.panel.get_daily_ledger()
+        self.assertEqual(days[0]["outflow_cents"], 2250)
+
+        # Test draw edit modal stages
+        self.tui.is_editing_finances = True
+        self.tui.editing_stage = "day_menu"
+        self.tui.draw_edit_modal(35, 90)
+        self.tui.editing_stage = "item"
+        self.tui.draw_edit_modal(35, 90)
+        self.assertTrue(self.mock_stdscr.addstr.called)
+
+        # Test delete selected finance
+        self.tui.delete_selected_finance()
+        days_after = self.panel.get_daily_ledger()
+        self.assertEqual(len(days_after[0]["items"]), 1)
 
 
 if __name__ == "__main__":

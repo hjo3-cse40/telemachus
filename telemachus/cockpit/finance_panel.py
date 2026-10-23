@@ -193,3 +193,33 @@ class FinanceTuiPanel:
         if success:
             self.refresh(force=True)
         return success
+
+    def delete_day(self, date_str: str) -> int:
+        """Deletes all transactions for date_str and refreshes caches."""
+        count = self.store.delete_day_transactions(date_str)
+        self.refresh(force=True)
+        return count
+
+    def edit_transaction(self, tx_id: str, date_str: str, new_bullet_line: str) -> Optional[Transaction]:
+        """Edits an existing transaction by replacing it with a newly parsed bullet."""
+        parsed = parse_bullet_line(new_bullet_line)
+        if not parsed:
+            return None
+        parsed["date"] = date_str
+        self.store.delete_transaction(tx_id)
+        logged = self.store.log_batch_transactions([parsed], default_date=date_str)
+        self.refresh(force=True)
+        return logged[0] if logged else None
+
+    def item_to_bullet(self, item: Dict[str, Any]) -> str:
+        """Converts an item dict back into a clean bullet representation."""
+        amt = abs(item["amount_cents"]) / 100.0
+        amt_str = f"{amt:.2f}".rstrip("0").rstrip(".") if amt == int(amt) else f"{amt:.2f}"
+        if item.get("is_income"):
+            payee = item.get("payee") or "payday"
+            return f"{payee} + {amt_str}"
+        cat = item.get("category") or "personal"
+        payee = item.get("payee") or ""
+        if payee and payee.lower() != cat.lower():
+            return f"- {payee} - {amt_str}"
+        return f"- {cat.lower()} - {amt_str}"
