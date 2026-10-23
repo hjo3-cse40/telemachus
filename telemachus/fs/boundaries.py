@@ -43,6 +43,8 @@ SENSITIVE_SECRET_PATTERNS: List[re.Pattern] = [
     re.compile(r"/Library/Keychains(/.*)?$"),
     re.compile(r"/\.(bash|zsh)_history$"),
     re.compile(r"/\.config/opencode/.*(\.dat|session|secret)"),
+    # Hard Privacy Shield for Private Financial Records and Setup YAML
+    re.compile(r"/\.memory/private/finances/(setup\.ya?ml|.*\.sqlite3.*)$"),
 ]
 
 # Destructive system commands that should never be run under any circumstances

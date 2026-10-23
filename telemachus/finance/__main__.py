@@ -182,6 +182,41 @@ def cmd_export(store: FinanceStore, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_setup(store: FinanceStore, args: argparse.Namespace) -> int:
+    from telemachus.finance.setup import (
+        DEFAULT_SETUP_YAML_PATH,
+        apply_setup_yaml,
+        create_setup_yaml_template,
+    )
+
+    if getattr(args, "create_template", False):
+        path = create_setup_yaml_template(args.file)
+        print(f"📄 Setup template ready at: {path}")
+        print("   Edit this file with your numbers, then run: python3 -m telemachus.finance setup")
+        return 0
+
+    path = args.file or DEFAULT_SETUP_YAML_PATH
+    if not Path(path).exists():
+        path = create_setup_yaml_template(path)
+        print(f"📄 Generated setup template at: {path}")
+        print("   Please edit this template with your numbers, then re-run: python3 -m telemachus.finance setup")
+        return 0
+
+    try:
+        summary = apply_setup_yaml(yaml_path=path, store=store)
+        print("\n✅ Successfully applied financial configuration:")
+        print(f"   • Starting balances initialized: {summary['balances_set']}")
+        print(f"   • Recurring rules updated:       {summary['rules_updated']}")
+        if summary.get("monthly_overview_updated"):
+            fixed_dollars = summary['fixed_bills_total_cents'] / 100.0
+            print(f"   • Monthly overview configured:   {summary['month']} (Fixed bills total: ${fixed_dollars:,.2f})")
+        print("\n💡 Run 'python3 -m telemachus.finance status' or 'python3 -m telemachus.finance balance' to inspect.")
+        return 0
+    except Exception as e:
+        print(f"❌ Error applying setup configuration: {e}")
+        return 1
+
+
 def main() -> int:
     common_parser = argparse.ArgumentParser(add_help=False)
     common_parser.add_argument("--vault-dir", help="Path to finances vault root (overrides default)")
@@ -221,6 +256,11 @@ def main() -> int:
     p_log.add_argument("--date", help="Transaction date (YYYY-MM-DD, default today)")
     p_log.add_argument("--memo", help="Optional memo or description")
 
+    # setup
+    p_setup = subparsers.add_parser("setup", parents=[common_parser], help="Apply or create initial setup configuration from setup.yaml")
+    p_setup.add_argument("--file", help="Path to custom setup.yaml (defaults to ~/.memory/private/finances/setup.yaml)")
+    p_setup.add_argument("--create", dest="create_template", action="store_true", help="Generate template if not present")
+
     # export
     p_exp = subparsers.add_parser("export", parents=[common_parser], help="Export to Beancount and CSV formats")
     p_exp.add_argument("--beancount", action="store_true", help="Export to journal.beancount")
@@ -231,7 +271,9 @@ def main() -> int:
     store = FinanceStore(root_dir=args.vault_dir)
     recurring = RecurringEngine(store)
 
-    if args.command == "status":
+    if args.command == "setup":
+        return cmd_setup(store, args)
+    elif args.command == "status":
         return cmd_status(store, recurring, args)
     elif args.command == "balance":
         return cmd_balance(store, args)
