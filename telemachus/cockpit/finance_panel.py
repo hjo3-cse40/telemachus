@@ -100,31 +100,44 @@ class FinanceTuiPanel:
                     cat_name = "Personal"
                     account_short = "Visa"
                     is_income = False
+                    is_savings_transfer = False
 
-                    for p in t.postings:
-                        if p.account_id.startswith("Income:"):
-                            is_income = True
-                            amount_cents = abs(p.amount_cents)
-                            cat_name = "Income"
-                            break
-                        elif p.account_id == "Assets:Savings:CapitalOne" and p.amount_cents > 0:
-                            is_income = True
-                            amount_cents = p.amount_cents
-                            cat_name = "Savings"
-                            account_short = "CapitalOne"
-                            break
-                        elif p.account_id.startswith("Expenses:"):
-                            amount_cents = p.amount_cents
-                            cat_name = p.account_id.split(":")[-1]
-                        elif p.account_id.startswith("Assets:"):
-                            account_short = p.account_id.split(":")[-1]
-                        elif p.account_id.startswith("Liabilities:"):
+                    source_postings = [p for p in t.postings if p.amount_cents < 0]
+                    target_postings = [p for p in t.postings if p.amount_cents > 0]
+
+                    # 1. Determine funding account from negative posting (source)
+                    if source_postings:
+                        src_acc = source_postings[0].account_id
+                        if "Checking" in src_acc:
+                            account_short = "Checking"
+                        elif "Visa" in src_acc or "CreditCard" in src_acc:
                             account_short = "Visa"
+                        elif "Savings" in src_acc:
+                            account_short = "Savings"
+                        elif "Income:" in src_acc:
+                            account_short = "Checking"
 
-                    if amount_cents == 0 and t.postings:
-                        amount_cents = max(abs(p.amount_cents) for p in t.postings)
+                    # 2. Determine category and amount from positive posting (destination)
+                    if target_postings:
+                        tgt_p = target_postings[0]
+                        amount_cents = tgt_p.amount_cents
+                        tgt_acc = tgt_p.account_id
 
-                    if is_income:
+                        if tgt_acc == "Assets:Savings:CapitalOne":
+                            cat_name = "Savings"
+                            is_savings_transfer = True
+                        elif tgt_acc.startswith("Expenses:"):
+                            cat_name = tgt_acc.split(":")[-1]
+                        elif tgt_acc.startswith("Assets:Checking"):
+                            is_income = True
+                            cat_name = "Income"
+                        elif tgt_acc.startswith("Income:"):
+                            is_income = True
+                            cat_name = "Income"
+                    elif source_postings:
+                        amount_cents = abs(source_postings[0].amount_cents)
+
+                    if is_income or is_savings_transfer:
                         inflow_cents += amount_cents
                     else:
                         outflow_cents += amount_cents
@@ -135,7 +148,7 @@ class FinanceTuiPanel:
                         "category": cat_name,
                         "account": account_short,
                         "amount_cents": amount_cents,
-                        "is_income": is_income,
+                        "is_income": is_income or is_savings_transfer,
                         "memo": t.memo,
                     })
 
@@ -209,12 +222,28 @@ class FinanceTuiPanel:
         self.refresh(force=True)
         return count
 
-    def edit_transaction(self, tx_id: str, date_str: str, new_bullet_line: str) -> Optional[Transaction]:
-        """Edits an existing transaction by replacing it with a newly parsed bullet."""
+    def edit_transaction(
+        self,
+        tx_id: str,
+        date_str: str,
+        new_bullet_line: str,
+        account_choice: Optional[str] = None,
+    ) -> Optional[Transaction]:
+        """Edits an existing transaction by replacing it with a newly parsed bullet and optional account override."""
         parsed = parse_bullet_line(new_bullet_line)
         if not parsed:
             return None
         parsed["date"] = date_str
+
+        if account_choice:
+            choice = account_choice.lower()
+            if "checking" in choice or "wells" in choice:
+                parsed["from_account"] = "Assets:Checking:WellsFargo"
+            elif "visa" in choice or "card" in choice:
+                parsed["from_account"] = "Liabilities:CreditCard:Visa"
+            elif "savings" in choice or "capital" in choice:
+                parsed["from_account"] = "Assets:Savings:CapitalOne"
+
         self.store.delete_transaction(tx_id)
         logged = self.store.log_batch_transactions([parsed], default_date=date_str)
         self.refresh(force=True)

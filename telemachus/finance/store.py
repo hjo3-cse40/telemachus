@@ -902,6 +902,11 @@ class FinanceStore:
                 target_acc = item.get("to_account") or "Expenses:Personal:Discretionary"
                 source_acc = item.get("from_account") or "Liabilities:CreditCard:Visa"
 
+            if item.get("from_account"):
+                source_acc = item["from_account"]
+            if item.get("to_account"):
+                target_acc = item["to_account"]
+
             if raw_cat in ("payday", "salary", "income") or (amount_val > 0 and target_acc == "Assets:Checking:WellsFargo"):
                 postings = [
                     Posting(account_id=source_acc, amount_cents=-amount_cents, memo=memo),

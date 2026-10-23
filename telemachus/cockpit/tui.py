@@ -68,6 +68,7 @@ class CockpitTUI:
         self.editing_date = ""
         self.editing_orig_text = ""
         self.editing_buffer = ""
+        self.editing_account_idx = 0
 
         self._init_curses()
         self.refresh_data()
@@ -548,17 +549,27 @@ class CockpitTUI:
 
             elif self.editing_stage == "item":
                 self.stdscr.addstr(start_y + 1, start_x + 3, f"Date: {self.editing_date}", curses.color_pair(1) | curses.A_BOLD)
-                orig_disp = f"Original: {self.editing_orig_text}"
-                self.stdscr.addstr(start_y + 2, start_x + 3, orig_disp[:box_w - 6], curses.color_pair(8))
-                self.stdscr.addstr(start_y + 4, start_x + 3, "Edit Notion-style bullet line:", curses.color_pair(2) | curses.A_BOLD)
 
-                input_y = start_y + 5
+                # Interactive Account Selector
+                acc_names = ["Checking", "Visa", "CapitalOne"]
+                acc_tokens = []
+                for i, name in enumerate(acc_names):
+                    if i == self.editing_account_idx:
+                        acc_tokens.append(f"▶ [{name}]")
+                    else:
+                        acc_tokens.append(f"  {name} ")
+                acc_line = "Account: " + "  ".join(acc_tokens)
+                self.stdscr.addstr(start_y + 2, start_x + 3, acc_line[:box_w - 6], curses.color_pair(4) | curses.A_BOLD)
+                self.stdscr.addstr(start_y + 3, start_x + 3, "(Press [Tab] to cycle account: Checking ⇄ Visa ⇄ CapitalOne)", curses.color_pair(8))
+
+                self.stdscr.addstr(start_y + 5, start_x + 3, "Notion Bullet:", curses.color_pair(2) | curses.A_BOLD)
+                input_y = start_y + 6
                 prompt = f"> {self.editing_buffer}█"
-                self.stdscr.addstr(input_y, start_x + 3, prompt[:box_w - 6], curses.color_pair(4) | curses.A_BOLD)
+                self.stdscr.addstr(input_y, start_x + 3, prompt[:box_w - 6], curses.color_pair(1) | curses.A_BOLD)
 
-                self.stdscr.addstr(start_y + 7, start_x + 3, "Examples: - groceries - 25.50   gas - 40   payday + 1350", curses.color_pair(8))
+                self.stdscr.addstr(start_y + 8, start_x + 3, "Examples: - groceries - 25.50   gas - 40   savings - 500", curses.color_pair(8))
 
-                hints = "[Enter] Save Changes   [d] Delete Item   [Esc] Cancel"
+                hints = "[Enter] Save Changes   [Tab] Cycle Account   [d] Delete   [Esc] Cancel"
                 self.stdscr.addstr(start_y + box_h - 2, start_x + 3, hints[:box_w - 6], curses.color_pair(2))
         except curses.error:
             pass
@@ -593,6 +604,16 @@ class CockpitTUI:
             bullet_text = self.finance_panel.item_to_bullet(target)
             self.editing_orig_text = bullet_text
             self.editing_buffer = bullet_text
+
+            acc_str = str(target.get("account", "")).lower()
+            if "checking" in acc_str or "wells" in acc_str:
+                self.editing_account_idx = 0
+            elif "visa" in acc_str or "card" in acc_str:
+                self.editing_account_idx = 1
+            elif "savings" in acc_str or "capital" in acc_str:
+                self.editing_account_idx = 2
+            else:
+                self.editing_account_idx = 0
         else:
             self.editing_stage = "day_menu"
             self.editing_buffer = ""
@@ -663,6 +684,16 @@ class CockpitTUI:
                         bullet_text = self.finance_panel.item_to_bullet(target)
                         self.editing_orig_text = bullet_text
                         self.editing_buffer = bullet_text
+
+                        acc_str = str(target.get("account", "")).lower()
+                        if "checking" in acc_str or "wells" in acc_str:
+                            self.editing_account_idx = 0
+                        elif "visa" in acc_str or "card" in acc_str:
+                            self.editing_account_idx = 1
+                        elif "savings" in acc_str or "capital" in acc_str:
+                            self.editing_account_idx = 2
+                        else:
+                            self.editing_account_idx = 0
                         return
                     else:
                         self.set_notification(f"Enter a number between 1 and {len(items)}")
@@ -678,20 +709,27 @@ class CockpitTUI:
                 self.editing_buffer += chr(ch)
 
         elif self.editing_stage == "item":
-            if ch in (10, 13, curses.KEY_ENTER):
+            if ch in (9, ord("\t")):  # Tab cycles account
+                self.editing_account_idx = (self.editing_account_idx + 1) % 3
+                acc_name = ["Checking", "Visa", "CapitalOne"][self.editing_account_idx]
+                self.set_notification(f"Funding Account changed to: {acc_name}")
+                return
+            elif ch in (10, 13, curses.KEY_ENTER):
                 new_text = self.editing_buffer.strip()
                 if not new_text:
                     self.is_editing_finances = False
                     return
-                res = self.finance_panel.edit_transaction(self.editing_tx_id, self.editing_date, new_text)
+                acc_choice = ["Checking", "Visa", "CapitalOne"][self.editing_account_idx]
+                res = self.finance_panel.edit_transaction(
+                    self.editing_tx_id, self.editing_date, new_text, account_choice=acc_choice
+                )
                 self.is_editing_finances = False
                 self.refresh_data()
                 if res:
-                    self.set_notification(f"✅ Updated transaction: {new_text}")
+                    self.set_notification(f"✅ Updated transaction: [{acc_choice}] {new_text}")
                 else:
                     self.set_notification("❌ Could not parse bullet. Example: - groceries - 25.50")
             elif ch in (ord("d"), ord("D")) and not self.editing_buffer:
-                # Pressing 'd' in item edit modal deletes it
                 self.finance_panel.delete_transaction(self.editing_tx_id)
                 self.is_editing_finances = False
                 self.refresh_data()

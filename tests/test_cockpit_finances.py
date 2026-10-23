@@ -300,6 +300,11 @@ class TestCockpitTUIFinances(unittest.TestCase):
         self.assertTrue(self.tui.is_editing_finances)
         self.assertEqual(self.tui.editing_stage, "item")
 
+        # Cycle account with Tab
+        init_acc = self.tui.editing_account_idx
+        self.tui.handle_edit_modal_key(9)  # Tab
+        self.assertEqual(self.tui.editing_account_idx, (init_acc + 1) % 3)
+
         # Edit buffer and commit
         self.tui.editing_buffer = "- groceries - 22.50"
         self.tui.handle_edit_modal_key(10)
