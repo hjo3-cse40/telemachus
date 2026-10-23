@@ -58,6 +58,20 @@ class TestImportText(unittest.TestCase):
         self.assertEqual(item2["amount_cents"], 5000)
         self.assertEqual(item2["category"], "payday")
 
+    def test_parse_bullet_savings(self):
+        # Format: savings + 500
+        item = parse_bullet_line("savings + 500")
+        self.assertIsNotNone(item)
+        self.assertEqual(item["amount_cents"], 50000)
+        self.assertEqual(item["category"], "savings")
+        self.assertEqual(item["account_id"], "Assets:Savings:CapitalOne")
+
+        # Format: savings deposit 300
+        item2 = parse_bullet_line("savings deposit 300")
+        self.assertIsNotNone(item2)
+        self.assertEqual(item2["amount_cents"], 30000)
+        self.assertEqual(item2["category"], "savings")
+
     def test_parse_date_headers(self):
         self.assertEqual(parse_date_header("2026-10-23"), "2026-10-23")
         self.assertEqual(parse_date_header("October 23, 2026"), "2026-10-23")

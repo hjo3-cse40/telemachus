@@ -102,6 +102,21 @@ def parse_bullet_line(line: str) -> Optional[Dict[str, Any]]:
     if not cleaned:
         return None
 
+    # Look for Savings deposit / transfer (e.g. "savings + 500", "savings deposit 500", "- savings - 500")
+    if any(k in cleaned.lower() for k in ("saving", "savings", "hysa", "capital one")):
+        num_m = re.search(r"\$?\s*([0-9]+(?:\.[0-9]{1,2})?)", cleaned)
+        if num_m:
+            amount = float(num_m.group(1))
+            desc = re.sub(r"[\+\-–—]?\s*\$?[0-9]+(?:\.[0-9]{1,2})?", "", cleaned).strip(" -:\t")
+            return {
+                "payee": desc or "Capital One HYSA Deposit",
+                "amount": amount,
+                "amount_cents": int(round(amount * 100)),
+                "category": "savings",
+                "account_id": "Assets:Savings:CapitalOne",
+                "memo": raw,
+            }
+
     # Look for plus format (Inflow / Payday)
     plus_match = re.search(r"\+\s*\$?([0-9]+(?:\.[0-9]{1,2})?)", cleaned)
     if plus_match or "payday" in cleaned.lower() or "salary" in cleaned.lower() or "deposit" in cleaned.lower():

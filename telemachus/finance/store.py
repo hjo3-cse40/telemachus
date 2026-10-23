@@ -879,6 +879,12 @@ class FinanceStore:
             "wifi": ("Expenses:Utilities:WiFi", "Assets:Checking:WellsFargo"),
             "pge": ("Expenses:Utilities:PGE", "Assets:Checking:WellsFargo"),
             "personal": ("Expenses:Personal:Discretionary", "Liabilities:CreditCard:Visa"),
+            "savings": ("Assets:Savings:CapitalOne", "Assets:Checking:WellsFargo"),
+            "saving": ("Assets:Savings:CapitalOne", "Assets:Checking:WellsFargo"),
+            "hysa": ("Assets:Savings:CapitalOne", "Assets:Checking:WellsFargo"),
+            "capital one": ("Assets:Savings:CapitalOne", "Assets:Checking:WellsFargo"),
+            "savings deposit": ("Assets:Savings:CapitalOne", "Assets:Checking:WellsFargo"),
+            "savings transfer": ("Assets:Savings:CapitalOne", "Assets:Checking:WellsFargo"),
         }
 
         logged_txs = []

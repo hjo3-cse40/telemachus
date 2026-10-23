@@ -107,6 +107,12 @@ class FinanceTuiPanel:
                             amount_cents = abs(p.amount_cents)
                             cat_name = "Income"
                             break
+                        elif p.account_id == "Assets:Savings:CapitalOne" and p.amount_cents > 0:
+                            is_income = True
+                            amount_cents = p.amount_cents
+                            cat_name = "Savings"
+                            account_short = "CapitalOne"
+                            break
                         elif p.account_id.startswith("Expenses:"):
                             amount_cents = p.amount_cents
                             cat_name = p.account_id.split(":")[-1]
@@ -114,6 +120,9 @@ class FinanceTuiPanel:
                             account_short = p.account_id.split(":")[-1]
                         elif p.account_id.startswith("Liabilities:"):
                             account_short = "Visa"
+
+                    if amount_cents == 0 and t.postings:
+                        amount_cents = max(abs(p.amount_cents) for p in t.postings)
 
                     if is_income:
                         inflow_cents += amount_cents
@@ -215,11 +224,13 @@ class FinanceTuiPanel:
         """Converts an item dict back into a clean bullet representation."""
         amt = abs(item["amount_cents"]) / 100.0
         amt_str = f"{amt:.2f}".rstrip("0").rstrip(".") if amt == int(amt) else f"{amt:.2f}"
-        if item.get("is_income"):
-            payee = item.get("payee") or "payday"
-            return f"{payee} + {amt_str}"
         cat = item.get("category") or "personal"
         payee = item.get("payee") or ""
-        if payee and payee.lower() != cat.lower():
+
+        if cat.lower() == "savings" or "savings" in payee.lower() or "capitalone" in item.get("account", "").lower():
+            return f"savings + {amt_str}"
+        elif item.get("is_income"):
+            return f"{payee or 'payday'} + {amt_str}"
+        elif payee and payee.lower() != cat.lower():
             return f"- {payee} - {amt_str}"
         return f"- {cat.lower()} - {amt_str}"

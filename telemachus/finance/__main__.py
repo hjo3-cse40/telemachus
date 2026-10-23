@@ -258,6 +258,32 @@ def cmd_delete_tx(store: FinanceStore, args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_deposit_savings(store: FinanceStore, args: argparse.Namespace) -> int:
+    date = args.date or datetime.now().strftime("%Y-%m-%d")
+    amount_cents = round(args.amount * 100)
+    postings = [
+        Posting(account_id="Assets:Checking:WellsFargo", amount_cents=-amount_cents, memo=args.memo or "Transfer to HYSA"),
+        Posting(account_id="Assets:Savings:CapitalOne", amount_cents=amount_cents, memo=args.memo or "HYSA Deposit"),
+    ]
+    tx = Transaction.create(
+        date=date,
+        payee="Capital One HYSA Deposit",
+        postings=postings,
+        memo=args.memo or "Transfer to HYSA",
+        source="cli",
+    )
+    logged = store.log_transaction(tx)
+    try:
+        FinanceExporter(store).export_to_beancount()
+    except Exception:
+        pass
+    print(f"\n✅ Logged ${args.amount:,.2f} savings deposit for {date}:")
+    print(f"   • From: Wells Fargo Checking (-${args.amount:,.2f})")
+    print(f"   • To:   Capital One Savings (+${args.amount:,.2f})")
+    print(f"   • Tx ID: {logged.id[:8]}")
+    return 0
+
+
 def cmd_breakdown(store: FinanceStore, recurring: RecurringEngine, args: argparse.Namespace) -> int:
     now_str = getattr(args, "date", None) or datetime.now().strftime("%Y-%m-%d")
     month_str = now_str[:7]
@@ -397,6 +423,12 @@ def main() -> int:
     p_deltx = subparsers.add_parser("delete-tx", parents=[common_parser], help="Delete a specific transaction by ID")
     p_deltx.add_argument("--id", required=True, help="Transaction ID")
 
+    # deposit-savings
+    p_dep = subparsers.add_parser("deposit-savings", parents=[common_parser], help="Log a savings transfer from checking to Capital One HYSA")
+    p_dep.add_argument("amount", type=float, help="Amount in dollars (e.g. 500 or 500.00)")
+    p_dep.add_argument("--date", help="Date of deposit (defaults to today YYYY-MM-DD)")
+    p_dep.add_argument("--memo", default="HYSA Deposit", help="Optional memo")
+
     # export
     p_exp = subparsers.add_parser("export", parents=[common_parser], help="Export to Beancount and CSV formats")
     p_exp.add_argument("--beancount", action="store_true", help="Export to journal.beancount")
@@ -417,6 +449,8 @@ def main() -> int:
         return cmd_clear_day(store, args)
     elif args.command == "delete-tx":
         return cmd_delete_tx(store, args)
+    elif args.command == "deposit-savings":
+        return cmd_deposit_savings(store, args)
     elif args.command == "paycheck":
         return cmd_paycheck(recurring, args)
     elif args.command == "status":
