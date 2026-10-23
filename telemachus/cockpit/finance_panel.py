@@ -93,6 +93,7 @@ class FinanceTuiPanel:
                 txs = grouped[date_key]
                 inflow_cents = 0
                 outflow_cents = 0
+                savings_cents = 0
                 items: List[Dict[str, Any]] = []
 
                 for t in txs:
@@ -137,8 +138,10 @@ class FinanceTuiPanel:
                     elif source_postings:
                         amount_cents = abs(source_postings[0].amount_cents)
 
-                    if is_income or is_savings_transfer:
+                    if is_income:
                         inflow_cents += amount_cents
+                    elif is_savings_transfer:
+                        savings_cents += amount_cents
                     else:
                         outflow_cents += amount_cents
 
@@ -148,7 +151,8 @@ class FinanceTuiPanel:
                         "category": cat_name,
                         "account": account_short,
                         "amount_cents": amount_cents,
-                        "is_income": is_income or is_savings_transfer,
+                        "is_income": is_income,
+                        "is_savings": is_savings_transfer,
                         "memo": t.memo,
                     })
 
@@ -163,6 +167,7 @@ class FinanceTuiPanel:
                     "day_title": day_title,
                     "inflow_cents": inflow_cents,
                     "outflow_cents": outflow_cents,
+                    "savings_cents": savings_cents,
                     "net_cents": inflow_cents - outflow_cents,
                     "items": items,
                 })

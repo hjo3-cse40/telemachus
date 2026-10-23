@@ -326,9 +326,41 @@ class CockpitTUI:
 
     def draw_finances_view(self, max_y: int, max_x: int) -> None:
         try:
-            # 1. Top Summary Banner
-            cf = getattr(self, "finance_cashflow", None)
+            # 1. Top Balances Banner (Checking, HYSA Savings, Outstanding Visa, Net Worth)
+            acc_bals = self.finance_balances.get("account_balances", {})
+            chk_cents = acc_bals.get("Assets:Checking:WellsFargo", 0)
+            sav_cents = acc_bals.get("Assets:Savings:CapitalOne", 0)
+            visa_cents = acc_bals.get("Liabilities:CreditCard:Visa", 0)
+            nw_cents = self.finance_balances.get("net_worth_cents", 0)
+
+            chk_str = self._fmt_money(chk_cents, self.mask_amounts)
+            sav_str = self._fmt_money(sav_cents, self.mask_amounts)
+            visa_str = self._fmt_money(visa_cents, self.mask_amounts)
+            nw_str = self._fmt_money(nw_cents, self.mask_amounts)
+
+            bals_line = f"💰 BALANCES:  Checking: {chk_str} │ HYSA Savings: {sav_str} │ Outstanding (Visa): {visa_str} │ Net Worth: {nw_str}"
+            self.stdscr.addstr(2, 2, bals_line[: max_x - 4], curses.color_pair(1) | curses.A_BOLD)
+
+            # 2. Targets & Savings Goals Banner
             ov = self.finance_overview
+            sav_goal = ov.savings_target_cents if ov else 0
+            sav_goal_str = self._fmt_money(sav_goal, self.mask_amounts)
+            cushion_cents = ov.remaining_cushion_cents if ov else 0
+            cushion_str = self._fmt_money(cushion_cents, self.mask_amounts)
+
+            pc = self.finance_paycheck
+            if pc:
+                safe_spend_cents = pc.safe_to_spend_cents
+                burn_cents = safe_spend_cents // max(1, pc.days_in_cycle)
+                safe_str = self._fmt_money(safe_spend_cents, self.mask_amounts)
+                burn_str = self._fmt_money(burn_cents, self.mask_amounts)
+                targets_line = f"🎯 TARGETS:   Savings Goal: {sav_goal_str}/mo │ Cushion Left: {cushion_str} │ Safe to Spend: {safe_str} ({burn_str}/d)"
+            else:
+                targets_line = f"🎯 TARGETS:   Savings Goal: {sav_goal_str}/mo │ Cushion Left: {cushion_str}"
+            self.stdscr.addstr(3, 2, targets_line[: max_x - 4], curses.color_pair(2) | curses.A_BOLD)
+
+            # 3. Monthly Cash Flow Rollup Banner
+            cf = getattr(self, "finance_cashflow", None)
             month_label = ov.month if ov else datetime.now().strftime("%Y-%m")
 
             if cf:
@@ -336,62 +368,44 @@ class CockpitTUI:
                 inc_str = self._fmt_money(cf.inflow_cents, self.mask_amounts)
                 exp_str = self._fmt_money(cf.outflow_cents, self.mask_amounts)
                 rate_str = f"{cf.savings_rate_pct:.1f}%" if not self.mask_amounts else "**%"
-                cushion_part = ""
-                if ov and ov.income_cents > 0:
-                    cush_str = self._fmt_money(ov.remaining_cushion_cents, self.mask_amounts)
-                    cushion_part = f" · Cushion: {cush_str}"
-                top_line = f"💳 FINANCES ({month_label}) · Net: {net_str} ({rate_str}) · Income: {inc_str} · Expenses: {exp_str}{cushion_part}"
-            elif ov and ov.income_cents > 0:
-                inc_str = self._fmt_money(ov.income_cents, self.mask_amounts)
-                cush_str = self._fmt_money(ov.remaining_cushion_cents, self.mask_amounts)
-                top_line = f"💳 FINANCES ({month_label}) · Income: {inc_str} · Cushion Left: {cush_str}"
+                cf_line = f"📊 CASH FLOW ({month_label}): Inflow: {inc_str} │ Spent: {exp_str} │ Net: {net_str} ({rate_str})"
             else:
-                top_line = f"💳 FINANCES ({month_label}) · Local Double-Entry Ledger"
-            self.stdscr.addstr(2, 2, top_line[: max_x - 4], curses.color_pair(1) | curses.A_BOLD)
-
-            pc = self.finance_paycheck
-            if pc:
-                avail_str = self._fmt_money(pc.safe_to_spend_cents, self.mask_amounts)
-                daily_burn_cents = pc.safe_to_spend_cents // max(1, pc.days_in_cycle)
-                burn_str = self._fmt_money(daily_burn_cents, self.mask_amounts)
-                sub_line = f"🗓️ Paycheck Window ({pc.paycheck_date} → {pc.next_paycheck_date}) · Safe to Spend: {avail_str} · Burn: {burn_str}/day"
-            else:
-                sub_line = "🗓️ Paycheck Window · (Run 'python3 -m telemachus.finance plan' to calculate allocation)"
-            self.stdscr.addstr(3, 2, sub_line[: max_x - 4], curses.color_pair(2))
+                cf_line = f"📊 CASH FLOW ({month_label}): Double-entry ledger active"
+            self.stdscr.addstr(4, 2, cf_line[: max_x - 4], curses.color_pair(4) | curses.A_BOLD)
 
             # Horizontal Separator
-            self.stdscr.addstr(4, 1, "─" * max(1, max_x - 2), curses.color_pair(8))
+            self.stdscr.addstr(5, 1, "─" * max(1, max_x - 2), curses.color_pair(8))
 
-            # 2. Main Dual-Column Layout
+            # 4. Main Dual-Column Layout
             split_x = min(36, max(26, max_x // 3))
 
             # Left Column Header
             left_focus_prefix = "▶ " if self.finances_focus == "days" else "  "
             left_hdr_attr = (curses.color_pair(7) | curses.A_BOLD) if self.finances_focus == "days" else (curses.color_pair(4) | curses.A_BOLD)
-            self.stdscr.addstr(5, 2, f"{left_focus_prefix + 'DAY NAVIGATOR':<18} {'NET':>8}"[:split_x - 2], left_hdr_attr)
-            self.stdscr.addstr(6, 1, "─" * (split_x - 1), curses.color_pair(8))
+            self.stdscr.addstr(6, 2, f"{left_focus_prefix + 'DAY NAVIGATOR':<18} {'NET':>8}"[:split_x - 2], left_hdr_attr)
+            self.stdscr.addstr(7, 1, "─" * (split_x - 1), curses.color_pair(8))
 
             # Right Column Header & Divider
             right_x = split_x + 2
             right_w = max(10, max_x - right_x - 1)
 
-            for y in range(5, max_y - 2):
+            for y in range(6, max_y - 2):
                 self.stdscr.addstr(y, split_x, "│", curses.color_pair(8))
 
-            avail_day_rows = max(1, max_y - 9)
+            avail_day_rows = max(1, max_y - 10)
             visible_days = self.finance_days[self.day_scroll_offset : self.day_scroll_offset + avail_day_rows]
 
             if not self.finance_days:
-                self.stdscr.addstr(7, 2, "(No days logged yet)", curses.color_pair(8))
-                self.stdscr.addstr(5, right_x, "DAY DETAILS", curses.color_pair(1) | curses.A_BOLD)
-                self.stdscr.addstr(7, right_x, "No transactions logged.", curses.color_pair(8))
-                self.stdscr.addstr(8, right_x, "Press [a] to log a new day with Notion bullet format,", curses.color_pair(4))
-                self.stdscr.addstr(9, right_x, "or run 'python3 -m telemachus.finance import-text --file <path>' to bulk ingest.", curses.color_pair(4))
+                self.stdscr.addstr(8, 2, "(No days logged yet)", curses.color_pair(8))
+                self.stdscr.addstr(6, right_x, "DAY DETAILS", curses.color_pair(1) | curses.A_BOLD)
+                self.stdscr.addstr(8, right_x, "No transactions logged.", curses.color_pair(8))
+                self.stdscr.addstr(9, right_x, "Press [a] to log a new day with Notion bullet format,", curses.color_pair(4))
+                self.stdscr.addstr(10, right_x, "or run 'python3 -m telemachus.finance import-text --file <path>' to bulk ingest.", curses.color_pair(4))
                 return
 
             for idx, d in enumerate(visible_days):
                 actual_idx = self.day_scroll_offset + idx
-                row_y = 7 + idx
+                row_y = 8 + idx
                 if row_y >= max_y - 2:
                     break
 
@@ -417,24 +431,36 @@ class CockpitTUI:
                 day_in = self._fmt_money(curr["inflow_cents"], self.mask_amounts)
                 right_focus_prefix = "▶ " if self.finances_focus == "items" else "  "
                 right_hdr_attr = (curses.color_pair(7) | curses.A_BOLD) if self.finances_focus == "items" else (curses.color_pair(1) | curses.A_BOLD)
+
                 header_right = f"{right_focus_prefix}📅 {curr['day_title']} ({curr['date']}) · Spent: {day_out} · Inflow: {day_in}"
-                self.stdscr.addstr(5, right_x, header_right[:right_w], right_hdr_attr)
+                if curr.get("savings_cents", 0) > 0:
+                    day_sav = self._fmt_money(curr["savings_cents"], self.mask_amounts)
+                    header_right += f" · Savings: {day_sav}"
+
+                self.stdscr.addstr(6, right_x, header_right[:right_w], right_hdr_attr)
 
                 if right_w >= 50:
                     tbl_hdr = f"  {'ACCOUNT':<10} {'CATEGORY':<14} {'DESCRIPTION / PAYEE':<24} {'AMOUNT':>10}"
                 else:
                     tbl_hdr = f"  {'CATEGORY':<12} {'DESCRIPTION':<16} {'AMOUNT':>10}"
-                self.stdscr.addstr(6, right_x, tbl_hdr[:right_w], curses.color_pair(2) | curses.A_BOLD)
+                self.stdscr.addstr(7, right_x, tbl_hdr[:right_w], curses.color_pair(2) | curses.A_BOLD)
 
                 items = curr["items"]
-                for i_idx, item in enumerate(items[: max(1, max_y - 9)]):
-                    item_y = 7 + i_idx
+                for i_idx, item in enumerate(items[: max(1, max_y - 10)]):
+                    item_y = 8 + i_idx
                     if item_y >= max_y - 2:
                         break
 
                     amt = item["amount_cents"]
-                    amt_str = self._fmt_money(amt, self.mask_amounts, signed=item["is_income"])
-                    amt_pair = curses.color_pair(5) if item["is_income"] else curses.color_pair(3)
+                    if item.get("is_savings"):
+                        amt_str = f"→{self._fmt_money(amt, self.mask_amounts)}"
+                        amt_pair = curses.color_pair(2)  # Purple / Magenta for savings transfers
+                    elif item.get("is_income"):
+                        amt_str = self._fmt_money(amt, self.mask_amounts, signed=True)
+                        amt_pair = curses.color_pair(5)  # Green for inflow
+                    else:
+                        amt_str = self._fmt_money(amt, self.mask_amounts, signed=True)
+                        amt_pair = curses.color_pair(3)  # Red for expense
 
                     is_item_sel = (self.finances_focus == "items" and i_idx == self.selected_item_idx)
                     row_attr = (curses.color_pair(7) | curses.A_BOLD) if is_item_sel else curses.color_pair(8)
@@ -813,15 +839,15 @@ class CockpitTUI:
 
             # Click in finance view (Left Column: Days, Right Column: Items)
             split_x = min(36, max(26, curses.COLS // 3)) if hasattr(curses, "COLS") else 32
-            if self.current_tab == 4 and 7 <= my <= 30:
+            if self.current_tab == 4 and 8 <= my <= 35:
                 if mx <= split_x:
-                    clicked_day = self.day_scroll_offset + (my - 7)
+                    clicked_day = self.day_scroll_offset + (my - 8)
                     if 0 <= clicked_day < len(self.finance_days):
                         self.selected_day_idx = clicked_day
                         self.finances_focus = "days"
                         self.selected_item_idx = 0
                 else:
-                    clicked_item = my - 7
+                    clicked_item = my - 8
                     curr_items = self.finance_days[self.selected_day_idx]["items"] if self.finance_days else []
                     if 0 <= clicked_item < len(curr_items):
                         self.selected_item_idx = clicked_item
