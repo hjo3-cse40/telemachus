@@ -165,6 +165,41 @@ starting_balances:
         all_bal = self.store.get_all_balances()
         self.assertEqual(all_bal["net_worth_cents"], 1440050)
 
+    def test_setup_calibration_with_historical_transactions(self):
+        """When setup.yaml has current balances as of today, historical transactions are calibrated so totals match exactly."""
+        # 1. Log historical transactions in August/September/October
+        self.store.log_batch_transactions(
+            [
+                {"category": "groceries", "amount": 50.00},
+                {"category": "savings", "amount": 400.00},
+                {"category": "credit_card_payment", "amount": 200.00},
+                {"category": "payday", "amount": 1000.00},
+            ],
+            default_date="2026-08-15",
+        )
+
+        # 2. User sets their actual balances as of today (2026-10-24)
+        yaml_path = Path(self.test_dir) / "test_calibration.yaml"
+        sample_yaml = """
+as_of_date: "2026-10-24"
+starting_balances:
+  wells_fargo_checking: 1500.00
+  capital_one_savings: 8000.00
+  visa_credit_card: 0.00
+"""
+        yaml_path.write_text(sample_yaml, encoding="utf-8")
+        apply_setup_yaml(yaml_path=yaml_path, store=self.store)
+
+        # 3. Verify that live balances as of today match the user's entered balances down to the cent
+        wf_bal = self.store.get_account_balance("Assets:Checking:WellsFargo")
+        self.assertEqual(wf_bal, 150000)
+
+        hysa_bal = self.store.get_account_balance("Assets:Savings:CapitalOne")
+        self.assertEqual(hysa_bal, 800000)
+
+        visa_bal = self.store.get_account_balance("Liabilities:CreditCard:Visa")
+        self.assertEqual(visa_bal, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

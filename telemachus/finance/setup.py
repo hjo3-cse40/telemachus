@@ -280,25 +280,48 @@ def apply_setup_yaml(yaml_path: Optional[Path | str] = None, store: Optional[Fin
                     conn.execute("DELETE FROM transactions WHERE id = ?;", (r["id"],))
                 conn.commit()
 
+        # Check for historical transactions prior to or on as_of_date to avoid double-counting
+        with store._get_connection() as conn:
+            hist_row = conn.execute(
+                """
+                SELECT COALESCE(SUM(p.amount_cents), 0) as hist_cents, MIN(t.date) as min_date
+                FROM postings p
+                JOIN transactions t ON p.transaction_id = t.id
+                WHERE p.account_id = ? AND t.source != 'setup' AND t.date <= ?;
+                """,
+                (acc_id, as_of_date),
+            ).fetchone()
+            hist_cents = int(hist_row["hist_cents"]) if hist_row else 0
+            min_date = hist_row["min_date"] if hist_row and hist_row["min_date"] else None
+
+        tx_date = as_of_date
+        if min_date and min_date < as_of_date:
+            tx_date = min_date
+            adjusted_asset_cents = cents - hist_cents
+            adjusted_liab_cents = -cents - hist_cents
+        else:
+            adjusted_asset_cents = cents
+            adjusted_liab_cents = -cents
+
         # Build balanced transaction
         if acc.account_type == AccountType.ASSET:
             postings = [
-                Posting(account_id=acc_id, amount_cents=cents, memo="Starting opening balance"),
-                Posting(account_id="Equity:OpeningBalances", amount_cents=-cents, memo="Equity offset"),
+                Posting(account_id=acc_id, amount_cents=adjusted_asset_cents, memo="Starting opening balance"),
+                Posting(account_id="Equity:OpeningBalances", amount_cents=-adjusted_asset_cents, memo="Equity offset"),
             ]
         elif acc.account_type == AccountType.LIABILITY:
             postings = [
-                Posting(account_id=acc_id, amount_cents=-cents, memo="Starting card balance"),
-                Posting(account_id="Equity:OpeningBalances", amount_cents=cents, memo="Equity offset"),
+                Posting(account_id=acc_id, amount_cents=adjusted_liab_cents, memo="Starting card balance"),
+                Posting(account_id="Equity:OpeningBalances", amount_cents=-adjusted_liab_cents, memo="Equity offset"),
             ]
         else:
             postings = [
-                Posting(account_id=acc_id, amount_cents=cents, memo="Starting balance"),
-                Posting(account_id="Equity:OpeningBalances", amount_cents=-cents, memo="Equity offset"),
+                Posting(account_id=acc_id, amount_cents=adjusted_asset_cents, memo="Starting balance"),
+                Posting(account_id="Equity:OpeningBalances", amount_cents=-adjusted_asset_cents, memo="Equity offset"),
             ]
 
         tx = Transaction.create(
-            date=as_of_date,
+            date=tx_date,
             payee="Opening Balance",
             postings=postings,
             memo=f"Initial setup opening balance for {acc_id}",
