@@ -357,21 +357,23 @@ class CockpitTUI:
                 visa_cents = next((v for k, v in acc_bals.items() if "visa" in k.lower() or "credit" in k.lower() or "card" in k.lower()), 0)
 
             nw_cents = self.finance_balances.get("net_worth_cents", 0)
+            chk_post_cents = chk_cents - (self.finance_paycheck.bills_due_cents if self.finance_paycheck else 0)
 
             chk_str = self._fmt_money(chk_cents, self.mask_amounts)
+            chk_post_str = self._fmt_money(chk_post_cents, self.mask_amounts)
             sav_str = self._fmt_money(sav_cents, self.mask_amounts)
             visa_str = self._fmt_money(visa_cents, self.mask_amounts)
             nw_str = self._fmt_money(nw_cents, self.mask_amounts)
 
-            bals_line = f"💰 BALANCES:  Checking: {chk_str} │ HYSA Savings: {sav_str} │ Outstanding (Visa): {visa_str} │ Net Worth: {nw_str}"
+            bals_line = f"💰 CASH POSITION: Checking: {chk_str} │ After Bills: {chk_post_str} │ Visa: {visa_str} │ Net Worth: {nw_str}"
             if max_x >= 90:
-                self.stdscr.addstr(2, 2, "💰 BALANCES ", curses.color_pair(1) | curses.A_BOLD)
-                self.stdscr.addstr(2, 14, "Checking: ", curses.color_pair(8))
-                self.stdscr.addstr(2, 24, f"{chk_str}  ", curses.color_pair(5) | curses.A_BOLD)
-                h_x = 26 + len(chk_str)
-                self.stdscr.addstr(2, h_x, "│ HYSA: ", curses.color_pair(8))
-                self.stdscr.addstr(2, h_x + 8, f"{sav_str}  ", curses.color_pair(1) | curses.A_BOLD)
-                v_x = h_x + 10 + len(sav_str)
+                self.stdscr.addstr(2, 2, "💰 CASH POSITION ", curses.color_pair(1) | curses.A_BOLD)
+                self.stdscr.addstr(2, 19, "Checking: ", curses.color_pair(8))
+                self.stdscr.addstr(2, 29, f"{chk_str}  ", curses.color_pair(5) | curses.A_BOLD)
+                p_x = 31 + len(chk_str)
+                self.stdscr.addstr(2, p_x, "│ After Bills: ", curses.color_pair(8))
+                self.stdscr.addstr(2, p_x + 15, f"{chk_post_str}  ", curses.color_pair(5) | curses.A_BOLD)
+                v_x = p_x + 17 + len(chk_post_str)
                 self.stdscr.addstr(2, v_x, "│ Visa: ", curses.color_pair(8))
                 vis_pair = curses.color_pair(4) if visa_cents > 0 else curses.color_pair(5)
                 self.stdscr.addstr(2, v_x + 8, f"{visa_str}  ", vis_pair | curses.A_BOLD)
@@ -394,7 +396,7 @@ class CockpitTUI:
                 w_start = pc.paycheck_date[5:] if len(pc.paycheck_date) >= 10 else pc.paycheck_date
                 w_end = pc.next_paycheck_date[5:] if len(pc.next_paycheck_date) >= 10 else pc.next_paycheck_date
                 line_2w = (
-                    f"💵 2-WEEK WINDOW ({w_start} ➔ {w_end}) │ Paycheck: {pay_str} │ HYSA: -{sav_xfer_str} │ "
+                    f"💵 2-WEEK WINDOW ({w_start} ➔ {w_end}) │ Checking: {chk_str} ➔ After Bills: {chk_post_str} │ "
                     f"Bills Due: -{bills_str} │ 🛡️ SAFE-TO-SPEND: {safe_str} ({burn_str}/d)"
                 )
             else:

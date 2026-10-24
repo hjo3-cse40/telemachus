@@ -460,6 +460,9 @@ class PaycheckWindowAllocation:
     gas_allocated_cents: int
     variable_needs_cents: int
     safe_to_spend_cents: int
+    checking_balance_cents: int = 0
+    checking_after_bills_cents: int = 0
+    credit_card_reminder: str = ""
     notes: str = ""
     other_bills: List[Dict[str, Any]] = field(default_factory=list)
 
@@ -477,6 +480,9 @@ class PaycheckWindowAllocation:
             "savings_transfer_cents": self.savings_transfer_cents,
             "net_checking_cents": self.net_checking_cents,
             "bills_due_cents": self.bills_due_cents,
+            "checking_balance_cents": self.checking_balance_cents,
+            "checking_after_bills_cents": self.checking_after_bills_cents,
+            "credit_card_reminder": self.credit_card_reminder,
             "bills": self.bills,
             "other_bills": self.other_bills,
             "groceries_allocated_cents": self.groceries_allocated_cents,

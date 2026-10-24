@@ -1241,9 +1241,9 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
 
         lines = [
             f"### Upcoming Obligations Radar (Next {days} Days)",
-            f"- **Liquid Capital**:       {_f(cash_flow['liquid_capital_cents'])}",
-            f"- **Committed Bills**:      {_f(cash_flow['committed_cents'])}",
-            f"- **Safe-to-Spend Buffer**: {_f(cash_flow['safe_to_spend_cents'])}",
+            f"- **Current Checking Balance**:        {_f(cash_flow['checking_balance_cents'])}",
+            f"- **Committed Bills**:                 -{_f(cash_flow['committed_cents'])}",
+            f"- **Checking After Committed Bills**:  **{_f(cash_flow['checking_after_bills_cents'])}**",
             "",
             "| Due Date | Obligation | Amount | Status | Type | Autopay |",
             "| :--- | :--- | :---: | :---: | :---: | :---: |",
@@ -1380,22 +1380,36 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
             return f"${cents / 100.0:,.2f}"
 
         lines = [
+            f"### 🏦 Cash Position Summary (Checking Account)",
+            f"- **Current Checking Balance**:        {_f(alloc.checking_balance_cents)}",
+            f"- **Payments Due in Window**:          -{_f(alloc.bills_due_cents)}",
+            f"- **Checking After Due Payments**:      **{_f(alloc.checking_after_bills_cents)}**",
+            "",
+        ]
+
+        if alloc.credit_card_reminder:
+            lines.extend([
+                f"💳 **Credit Card Reminder**: {alloc.credit_card_reminder}",
+                "",
+            ])
+
+        lines.extend([
             f"### Paycheck Cash Flow Partition ({alloc.paycheck_date} to {alloc.next_paycheck_date})",
             f"- **Paycheck Take-Home**:        {_f(alloc.paycheck_amount_cents)}",
-            f"- **Immediate HYSA Savings**:     {_f(alloc.savings_transfer_cents)} (Moved straight to Capital One HYSA)",
+            f"- **Immediate HYSA Savings**:    -{_f(alloc.savings_transfer_cents)} (Moved straight to Capital One HYSA)",
             f"- **Net Checking Inflow**:        {_f(alloc.net_checking_cents)}",
-            f"- **Bills Due in Window**:        {_f(alloc.bills_due_cents)} ({len(alloc.bills)} bills due)",
-            f"- **2-Week Variable Needs**:      {_f(alloc.variable_needs_cents)} (Groceries: {_f(alloc.groceries_allocated_cents)}, Gas: {_f(alloc.gas_allocated_cents)})",
-            f"- **SAFE-TO-SPEND CUSHION**:      {_f(alloc.safe_to_spend_cents)} (Flexible spending for this cycle)",
+            f"- **Bills Due in Window**:       -{_f(alloc.bills_due_cents)} ({len([b for b in alloc.bills if b.get('status') == 'due'])} bills due)",
+            f"- **2-Week Variable Needs**:     -{_f(alloc.variable_needs_cents)} (Groceries: {_f(alloc.groceries_allocated_cents)}, Gas: {_f(alloc.gas_allocated_cents)})",
+            f"- **SAFE-TO-SPEND CUSHION**:      **{_f(alloc.safe_to_spend_cents)}** (Flexible spending for this cycle)",
             "",
             "| Due Date | Obligation | Amount | Status | Autopay |",
             "| :--- | :--- | :---: | :---: | :---: |",
-        ]
+        ])
         if not alloc.bills:
             lines.append("| — | No recurring bills scheduled in this cycle | $0.00 | — | — |")
         else:
             for b in alloc.bills:
-                lines.append(f"| {b['due_date']} | {b['name']} | {_f(b['amount_cents'])} | [{b['status'].upper()}] | {'Yes' if b['is_autopay'] else 'No'} |")
+                lines.append(f"| {b['due_date']} | {b['name']} | {_f(b['amount_cents'])} | [{b['status'].upper()}] | {'Yes' if b.get('is_autopay') else 'No'} |")
 
         return "\n".join(lines)
 
@@ -1414,9 +1428,21 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
         lines = [
             f"### Comprehensive Financial Situation & Bi-Weekly Allocation Breakdown",
             f"- **As of Date**:            {now_str} (Month: {month_str})",
-            f"- **Liquid Capital**:         {_f(balances['liquid_assets_cents'])} (Wells Fargo Checking + Capital One HYSA)",
-            f"- **Net Worth**:              {_f(balances['net_worth_cents'])}",
             "",
+            f"#### 🏦 Cash Position Summary (Checking Account)",
+            f"- **Current Checking Balance**:        {_f(alloc.checking_balance_cents)}",
+            f"- **Payments Due in Window**:          -{_f(alloc.bills_due_cents)}",
+            f"- **Checking After Due Payments**:      **{_f(alloc.checking_after_bills_cents)}**",
+            "",
+        ]
+
+        if alloc.credit_card_reminder:
+            lines.extend([
+                f"💳 **Credit Card Reminder**: {alloc.credit_card_reminder}",
+                "",
+            ])
+
+        lines.extend([
             f"#### 🗓️ Monthly Plan Breakdown ({month_str})",
             f"- **Monthly Take-Home**:      {_f(overview.income_cents)}",
             f"- **HYSA Savings Target**:    {_f(overview.savings_target_cents)} (Target transfer to Capital One HYSA)",
@@ -1432,7 +1458,7 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
             f"- **Immediate HYSA Savings**: -{_f(alloc.savings_transfer_cents)} (Moved straight to Capital One HYSA)",
             f"- **Net Checking Inflow**:    {_f(alloc.net_checking_cents)}",
             f"- **Bills Due in Window**:    -{_f(alloc.bills_due_cents)}",
-        ]
+        ])
 
         if alloc.bills:
             lines.append("  **Bills Due in this 2-Week Window:**")

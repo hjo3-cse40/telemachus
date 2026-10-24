@@ -659,7 +659,7 @@ paycheck_plan:
         addstr_calls = [c[0] for c in self.mock_stdscr.addstr.call_args_list]
         combined_text = " ".join(str(arg) for call in addstr_calls for arg in call)
 
-        self.assertIn("BALANCES", combined_text)
+        self.assertTrue("CASH POSITION" in combined_text or "BALANCES" in combined_text)
         self.assertIn("2-WEEK WINDOW", combined_text)
         self.assertIn("Savings", combined_text)
         self.assertIn("Brother", combined_text)
@@ -904,6 +904,78 @@ starting_balances:
         self.assertEqual(sav_goal.saved_cents, 42500)
         self.assertEqual(sav_goal.progress_pct, 50.0)
         self.assertEqual(sav_goal.remaining_cents, 42500)
+
+    def test_brother_payment_pulls_monthly_amount_not_total_goal(self):
+        """Verifies 2-week paycheck allocation pulls the monthly installment for brother ($150), not total loan goal ($1,000)."""
+        yaml_path = Path(self.temp_dir.name) / "test_brother_yaml.yaml"
+        sample_yaml = """
+fixed_bills:
+  brother:
+    amount: 150.00
+    due_day: 1
+    category: "Fixed Bill"
+
+goals:
+  brother:
+    target: 1000.00
+    already_paid: 200.00
+"""
+        yaml_path.write_text(sample_yaml, encoding="utf-8")
+        self.store.setup_yaml_path = yaml_path
+        apply_setup_yaml(yaml_path=yaml_path, store=self.store)
+
+        engine = RecurringEngine(self.store)
+        # Window starting Oct 24 spans through Nov 06, catching Nov 1
+        alloc = engine.get_paycheck_allocation(as_of_date="2026-10-24", yaml_path=yaml_path)
+
+        bro_bill = next((b for b in alloc.bills if "brother" in b["name"].lower() or "kahram" in b["name"].lower()), None)
+        self.assertIsNotNone(bro_bill)
+        # MUST be monthly installment of $150.00 (15000 cents), NEVER $800.00 ($1000 - $200)
+        self.assertEqual(bro_bill["amount_cents"], 15000)
+        self.assertEqual(bro_bill["status"], "due")
+        self.assertIn("150.00", bro_bill["note"])
+
+    def test_cash_position_checking_only_and_credit_card_reminder(self):
+        """Verifies cash position summary strictly uses checking account (excluding savings) and reminds about credit card date."""
+        yaml_path = Path(self.temp_dir.name) / "test_cash_pos_yaml.yaml"
+        sample_yaml = """
+starting_balances:
+  wells_fargo_checking: 1200.00
+  capitol_one_saving: 8000.00
+  visa_credit_card: 50.00
+
+fixed_bills:
+  wifi:
+    amount: 55.74
+    due_day: 28
+  credit_card:
+    amount: 0.00
+    due_day: 2
+"""
+        yaml_path.write_text(sample_yaml, encoding="utf-8")
+        self.store.setup_yaml_path = yaml_path
+        apply_setup_yaml(yaml_path=yaml_path, store=self.store)
+
+        engine = RecurringEngine(self.store)
+        alloc = engine.get_paycheck_allocation(as_of_date="2026-10-24", yaml_path=yaml_path)
+
+        # 1. Checking balance is strictly $1,200.00 (120000 cents), does NOT include $8,000 savings
+        self.assertEqual(alloc.checking_balance_cents, 120000)
+
+        # Bills due: wifi (5574) + cc balance (5000) + pge (7500) = 18074 cents ($180.74)
+        self.assertEqual(alloc.bills_due_cents, 18074)
+
+        # Checking after due bills: 120000 - 18074 = 101926 ($1,019.26)
+        self.assertEqual(alloc.checking_after_bills_cents, 101926)
+
+        # 2. Credit Card reminder is present for Nov 2
+        self.assertIn("2026-11-02", alloc.credit_card_reminder)
+        self.assertIn("50.00", alloc.credit_card_reminder)
+
+        # 3. Committed cash flow also strictly uses checking
+        cf = engine.get_committed_cash_flow(days_ahead=14)
+        self.assertEqual(cf["checking_balance_cents"], 120000)
+        self.assertEqual(cf["checking_after_bills_cents"], 120000 - cf["committed_cents"])
 
 
 if __name__ == "__main__":

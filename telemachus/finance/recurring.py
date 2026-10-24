@@ -446,10 +446,11 @@ class RecurringEngine:
         return obligations
 
     def get_committed_cash_flow(self, days_ahead: int = 30) -> Dict[str, Any]:
-        """Calculates deterministic liquid capital, committed upcoming bills, and Safe-to-Spend buffer."""
-        balances = self.store.get_all_balances()
-        liquid_cents = balances["liquid_assets_cents"]
-
+        """Calculates deterministic checking cash flow, committed upcoming bills, and projected remainder.
+        
+        Strictly uses Wells Fargo Checking account (excluding Capital One Savings per user instruction).
+        """
+        chk_cents = self.store.get_account_balance("Assets:Checking:WellsFargo")
         upcoming = self.get_upcoming_obligations(days_ahead=days_ahead)
         # Sum only unpaid bills
         committed_cents = sum(
@@ -457,13 +458,16 @@ class RecurringEngine:
             for item in upcoming
             if item["status"] in (BillStatus.SCHEDULED.value, BillStatus.BILLED.value)
         )
-        safe_to_spend_cents = max(0, liquid_cents - committed_cents)
+        checking_after_bills_cents = chk_cents - committed_cents
+        safe_to_spend_cents = max(0, checking_after_bills_cents)
 
         return {
             "as_of_date": datetime.now().strftime("%Y-%m-%d"),
             "days_ahead": days_ahead,
-            "liquid_capital_cents": liquid_cents,
+            "checking_balance_cents": chk_cents,
+            "liquid_capital_cents": chk_cents,  # Exclude savings: cash position is checking only
             "committed_cents": committed_cents,
+            "checking_after_bills_cents": checking_after_bills_cents,
             "safe_to_spend_cents": safe_to_spend_cents,
             "upcoming_bills_count": len(upcoming),
             "pending_bills_count": sum(1 for b in upcoming if b["status"] != "paid"),
@@ -576,6 +580,9 @@ class RecurringEngine:
             "spotify": ("Expenses:Subscriptions:Spotify", "Spotify", 25),
             "rent": ("Expenses:Home:Rent", "Apartment Rent", 1),
             "credit_card": ("Liabilities:CreditCard:Visa", "Credit Card Payment (Visa)", 2),
+            "visa": ("Liabilities:CreditCard:Visa", "Credit Card Payment (Visa)", 2),
+            "visa_credit_card": ("Liabilities:CreditCard:Visa", "Credit Card Payment (Visa)", 2),
+            "credit_card_payment": ("Liabilities:CreditCard:Visa", "Credit Card Payment (Visa)", 2),
         }
 
         # Build list of active bill specs
@@ -599,7 +606,8 @@ class RecurringEngine:
             })
 
         # Ensure Credit Card is evaluated
-        if "credit_card" not in seen_keys:
+        has_cc = any(k in seen_keys for k in ("credit_card", "visa", "visa_credit_card", "credit_card_payment"))
+        if not has_cc:
             bill_specs.append({
                 "key": "credit_card",
                 "name": "Credit Card Payment (Visa)",
@@ -645,55 +653,38 @@ class RecurringEngine:
                     key = spec["key"]
                     handled_keys_in_window.add(key)
 
-                    # A. Brother Payment (Kahram)
+                    # A. Brother Payment (Kahram) - Strictly pull monthly installment amount, not multi-month debt total
                     if key in ("kahram", "brother"):
-                        target_cents = spec["amount_cents"] or 15000
-                        # Check goals section for overrides
-                        if setup_data and setup_data.get("goals"):
-                            bro_goal = (setup_data["goals"].get("brother") or setup_data["goals"].get("kahram") or {})
-                            if isinstance(bro_goal, dict):
-                                gt = _parse_cents(bro_goal.get("target") or bro_goal.get("amount") or bro_goal.get("goal"))
-                                if gt is not None:
-                                    target_cents = gt
-                                if spec["already_paid_cents"] is None:
-                                    gp = _parse_cents(
-                                        bro_goal.get("already_paid")
-                                        or bro_goal.get("paid")
-                                        or bro_goal.get("current")
-                                        or bro_goal.get("actual")
-                                    )
-                                    if gp is not None:
-                                        spec["already_paid_cents"] = gp
+                        monthly_amount = spec["amount_cents"] or 15000
 
-                        baseline = spec.get("already_paid_cents")
-                        if baseline is not None:
-                            total_paid = baseline
-                        else:
-                            # Calculate actual payments in this month from database
-                            with self.store._get_connection() as conn:
-                                k_row = conn.execute(
-                                    """
-                                    SELECT COALESCE(SUM(p.amount_cents), 0) as total
-                                    FROM postings p
-                                    JOIN transactions t ON p.transaction_id = t.id
-                                    WHERE p.account_id IN ('Expenses:Family:Kahram', 'Expenses:Family:Brother')
-                                      AND t.date >= ? AND t.date <= ?;
-                                    """,
-                                    (f"{m_str}-01", f"{m_str}-31"),
-                                ).fetchone()
-                                actual_paid_month = int(k_row["total"]) if k_row else 0
-                            total_paid = actual_paid_month
+                        # Calculate actual payments in this month from database
+                        with self.store._get_connection() as conn:
+                            k_row = conn.execute(
+                                """
+                                SELECT COALESCE(SUM(p.amount_cents), 0) as total
+                                FROM postings p
+                                JOIN transactions t ON p.transaction_id = t.id
+                                WHERE p.account_id IN ('Expenses:Family:Kahram', 'Expenses:Family:Brother')
+                                  AND t.date >= ? AND t.date <= ?;
+                                """,
+                                (f"{m_str}-01", f"{m_str}-31"),
+                            ).fetchone()
+                            actual_paid_month = int(k_row["total"]) if k_row else 0
 
-                        rem = max(0, target_cents - total_paid)
+                        paid_this_month = actual_paid_month
+                        if spec.get("already_paid_cents") is not None:
+                            paid_this_month = max(paid_this_month, spec["already_paid_cents"])
+
+                        rem = max(0, monthly_amount - paid_this_month)
 
                         if rem == 0:
                             status_str = "paid"
                             amt_due = 0
-                            note_str = f"Already paid in full (${total_paid / 100:.2f} / ${target_cents / 100:.2f}) - No payment needed"
+                            note_str = f"Monthly installment paid in full (${paid_this_month / 100:.2f} / ${monthly_amount / 100:.2f})"
                         else:
                             status_str = "due"
                             amt_due = rem
-                            note_str = f"${rem / 100:.2f} remaining due (${total_paid / 100:.2f} paid of ${target_cents / 100:.2f})"
+                            note_str = f"${rem / 100:.2f} monthly payment due (${paid_this_month / 100:.2f} paid of ${monthly_amount / 100:.2f})"
 
                         window_bills.append({
                             "name": spec["name"],
@@ -703,19 +694,21 @@ class RecurringEngine:
                             "note": note_str,
                             "notes": note_str,
                             "account_id": spec["account_id"],
+                            "is_autopay": False,
                         })
 
-                    # B. Credit Card Payment (Visa)
-                    elif key == "credit_card":
+                    # B. Credit Card Payment (Visa) - Always remind about payment date in this window
+                    elif key in ("credit_card", "visa", "visa_credit_card", "credit_card_payment"):
                         card_bal = self.store.get_account_balance("Liabilities:CreditCard:Visa")
+                        due_bal = max(0, card_bal)
                         if card_bal <= 0:
                             status_str = "paid"
                             amt_due = 0
-                            note_str = "Paid in full ($0.00 balance due)"
+                            note_str = f"💳 Payment date reminder: Due on {d_str} ($0.00 current balance due - Paid in full)"
                         else:
                             status_str = "due"
-                            amt_due = card_bal
-                            note_str = f"${card_bal / 100:.2f} current balance due"
+                            amt_due = due_bal
+                            note_str = f"💳 Payment date reminder: Due on {d_str} (${card_bal / 100:.2f} current balance due)"
 
                         window_bills.append({
                             "name": spec["name"],
@@ -725,6 +718,7 @@ class RecurringEngine:
                             "note": note_str,
                             "notes": note_str,
                             "account_id": spec["account_id"],
+                            "is_autopay": True,
                         })
 
                     # C. Standard Fixed Bills (WiFi, PG&E, Gym, Rent, Subscriptions)
@@ -747,6 +741,7 @@ class RecurringEngine:
                             "note": note_str,
                             "notes": note_str,
                             "account_id": spec["account_id"],
+                            "is_autopay": True,
                         })
 
         # Collect bills outside this 14-day window for clear context
@@ -790,9 +785,24 @@ class RecurringEngine:
         gas_alloc = round(gas_planned / 2)
         variable_needs_cents = groceries_alloc + dining_alloc + gas_alloc
 
-        # 8. Compute Net Checking and Safe-to-Spend
+        # 8. Cash Position: Checking account ONLY (exclude Capital One Savings per user direction)
+        chk_cents = self.store.get_account_balance("Assets:Checking:WellsFargo")
+        checking_after_bills_cents = chk_cents - bills_due_cents
+
+        # 9. Credit card reminder extraction
+        cc_reminder = ""
+        for b in window_bills:
+            if any(term in b.get("name", "").lower() for term in ("credit", "visa")):
+                cc_reminder = f"Payment date is on {b['due_date']} ({b.get('note', '')})"
+                break
+
+        # 10. Compute Net Checking and Safe-to-Spend for this cycle
         net_checking_cents = max(0, plan.paycheck_amount_cents - plan.savings_per_paycheck_cents)
         safe_to_spend_cents = max(0, net_checking_cents - bills_due_cents - variable_needs_cents)
+
+        notes_str = f"2-Week allocation from {paycheck_date_str} to {end_window_str}"
+        if cc_reminder:
+            notes_str += f" │ 💳 {cc_reminder}"
 
         return PaycheckWindowAllocation(
             paycheck_date=paycheck_date_str,
@@ -802,6 +812,9 @@ class RecurringEngine:
             savings_transfer_cents=plan.savings_per_paycheck_cents,
             net_checking_cents=net_checking_cents,
             bills_due_cents=bills_due_cents,
+            checking_balance_cents=chk_cents,
+            checking_after_bills_cents=checking_after_bills_cents,
+            credit_card_reminder=cc_reminder,
             bills=window_bills,
             other_bills=other_bills,
             groceries_allocated_cents=groceries_alloc,
@@ -809,7 +822,7 @@ class RecurringEngine:
             gas_allocated_cents=gas_alloc,
             variable_needs_cents=variable_needs_cents,
             safe_to_spend_cents=safe_to_spend_cents,
-            notes=f"2-Week allocation from {paycheck_date_str} to {end_window_str}",
+            notes=notes_str,
         )
 
     def get_all_recurring_bills_breakdown(

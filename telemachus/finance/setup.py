@@ -195,7 +195,7 @@ def _resolve_account_id(key: str, store: FinanceStore) -> Optional[str]:
         return "Assets:Checking:WellsFargo"
 
     # Savings / HYSA aliases
-    if any(k in clean for k in ("savings", "capital_one", "capitalone", "hysa")):
+    if any(k in clean for k in ("saving", "capital", "capitol", "hysa")):
         return "Assets:Savings:CapitalOne"
 
     # Credit card / Visa aliases
@@ -347,13 +347,17 @@ def apply_setup_yaml(yaml_path: Optional[Path | str] = None, store: Optional[Fin
     # 2. Process Fixed Recurring Bills
     fixed_bills = data.get("fixed_bills", {})
     rule_map = {
-        "kahram": "rule_kahram",
-        "brother": "rule_kahram",
-        "gym": "rule_gym",
-        "apple_icloud": "rule_apple_cloud",
-        "spotify": "rule_spotify",
-        "wifi": "rule_wifi",
-        "rent": "rule_rent",
+        "kahram": ("rule_kahram", "Expenses:Family:Kahram"),
+        "brother": ("rule_kahram", "Expenses:Family:Kahram"),
+        "gym": ("rule_gym", "Expenses:Subscriptions:Gym"),
+        "apple_icloud": ("rule_apple_cloud", "Expenses:Subscriptions:AppleCloud"),
+        "spotify": ("rule_spotify", "Expenses:Subscriptions:Spotify"),
+        "wifi": ("rule_wifi", "Expenses:Utilities:WiFi"),
+        "rent": ("rule_rent", "Expenses:Home:Rent"),
+        "credit_card": ("rule_credit_card", "Liabilities:CreditCard:Visa"),
+        "visa": ("rule_credit_card", "Liabilities:CreditCard:Visa"),
+        "visa_credit_card": ("rule_credit_card", "Liabilities:CreditCard:Visa"),
+        "pge": ("rule_pge", "Expenses:Utilities:PGE"),
     }
 
     total_fixed_cents = 0
@@ -361,7 +365,9 @@ def apply_setup_yaml(yaml_path: Optional[Path | str] = None, store: Optional[Fin
     for key, cfg in fixed_bills.items():
         if not isinstance(cfg, dict):
             continue
-        rule_id = rule_map.get(key, f"rule_{key}")
+        rule_info = rule_map.get(key, (f"rule_{key}", f"Expenses:{key.replace('_', ' ').title()}"))
+        rule_id = rule_info[0] if isinstance(rule_info, tuple) else rule_info
+        to_acc = rule_info[1] if isinstance(rule_info, tuple) else f"Expenses:{key.replace('_', ' ').title()}"
         due_day = int(cfg.get("due_day", 1))
         is_active = bool(cfg.get("active", True))
         amount_cents = _parse_cents(cfg.get("amount", 0.0)) or 0
@@ -388,15 +394,17 @@ def apply_setup_yaml(yaml_path: Optional[Path | str] = None, store: Optional[Fin
                 total_fixed_cents += amount_cents
         else:
             cat = cfg.get("category", "Fixed Bill")
+            if not store.get_account(to_acc):
+                store.create_account(to_acc, AccountType.EXPENSE, name=key.replace("_", " ").title())
             new_rule = RecurringRule(
                 id=rule_id,
                 name=cfg.get("name", key.replace("_", " ").title()),
                 rule_type=RuleType.FIXED,
-                frequency="monthly",
+                frequency=Frequency.MONTHLY,
                 due_day_of_month=due_day,
                 base_amount_cents=amount_cents,
                 from_account="Assets:Checking:WellsFargo",
-                to_account=f"Expenses:{key.replace('_', ' ').title()}",
+                to_account=to_acc,
                 is_autopay=True,
                 lead_time_days=3,
                 is_active=is_active,
