@@ -36,6 +36,7 @@ class FinanceTuiPanel:
         self.recurring = RecurringEngine(self.store)
 
         self._last_mtime: float = 0.0
+        self._last_setup_mtime: float = 0.0
         self._cached_days: List[Dict[str, Any]] = []
         self._cached_overview: Optional[MonthlyOverview] = None
         self._cached_cashflow: Optional[CashFlowSummary] = None
@@ -44,7 +45,7 @@ class FinanceTuiPanel:
         self._cache_time: float = 0.0
 
     def _is_cache_stale(self) -> bool:
-        """Checks if SQLite database file modified or cache TTL expired (10s)."""
+        """Checks if SQLite database file or setup.yaml modified or cache TTL expired (10s)."""
         now = time.time()
         if now - self._cache_time > 10.0:
             return True
@@ -54,6 +55,15 @@ class FinanceTuiPanel:
                 mtime = db_path.stat().st_mtime
                 if mtime != self._last_mtime:
                     self._last_mtime = mtime
+                    return True
+            except OSError:
+                pass
+        setup_p = self.store.get_setup_yaml_path()
+        if setup_p and setup_p.exists():
+            try:
+                s_mtime = setup_p.stat().st_mtime
+                if s_mtime != self._last_setup_mtime:
+                    self._last_setup_mtime = s_mtime
                     return True
             except OSError:
                 pass

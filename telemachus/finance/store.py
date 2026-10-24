@@ -835,92 +835,183 @@ class FinanceStore:
 
         # 1. Savings Goal Target and Baseline
         savings_target = overview.savings_target_cents
-        savings_baseline = 0
+        savings_baseline = None
         if setup_data:
             goals_cfg = setup_data.get("goals") or {}
-            sav_cfg = goals_cfg.get("savings") or {}
+            sav_cfg = goals_cfg.get("savings") or goals_cfg.get("saving") or {}
             if isinstance(sav_cfg, dict):
-                t = _parse_cents(sav_cfg.get("target"))
+                t = _parse_cents(sav_cfg.get("target") or sav_cfg.get("amount") or sav_cfg.get("goal"))
                 if t is not None:
                     savings_target = t
-                b = _parse_cents(sav_cfg.get("already_saved") or sav_cfg.get("already_paid"))
+                b = _parse_cents(
+                    sav_cfg.get("already_saved")
+                    or sav_cfg.get("saved")
+                    or sav_cfg.get("current")
+                    or sav_cfg.get("already_paid")
+                    or sav_cfg.get("paid")
+                    or sav_cfg.get("actual")
+                )
                 if b is not None:
                     savings_baseline = b
+            elif isinstance(sav_cfg, (int, float, str)):
+                t = _parse_cents(sav_cfg)
+                if t is not None:
+                    savings_target = t
+
+            # Also check top-level setup_data.get("savings") or setup_data.get("savings_goal")
+            top_sav = setup_data.get("savings") or setup_data.get("savings_goal") or {}
+            if isinstance(top_sav, dict):
+                t = _parse_cents(top_sav.get("target") or top_sav.get("amount"))
+                if t is not None and savings_target == 0:
+                    savings_target = t
+                b = _parse_cents(
+                    top_sav.get("already_saved")
+                    or top_sav.get("saved")
+                    or top_sav.get("current")
+                    or top_sav.get("already_paid")
+                    or top_sav.get("paid")
+                    or top_sav.get("actual")
+                )
+                if b is not None and savings_baseline is None:
+                    savings_baseline = b
+
+            # Also check monthly_targets for savings_target / already_saved
+            mt = setup_data.get("monthly_targets") or {}
+            if isinstance(mt, dict):
+                if savings_target == 0:
+                    t = _parse_cents(mt.get("savings_target") or mt.get("savings"))
+                    if t is not None:
+                        savings_target = t
+                if savings_baseline is None:
+                    b = _parse_cents(
+                        mt.get("already_saved")
+                        or mt.get("savings_saved")
+                        or mt.get("savings_actual")
+                    )
+                    if b is not None:
+                        savings_baseline = b
 
         # 2. Brother / Kahram Payment Goal Target and Baseline
         kahram_target = 10000
-        kahram_baseline = 0
+        kahram_baseline = None
         if setup_data:
             goals_cfg = setup_data.get("goals") or {}
-            bro_cfg = goals_cfg.get("brother") or goals_cfg.get("kahram") or {}
+            bro_cfg = (
+                goals_cfg.get("brother")
+                or goals_cfg.get("kahram")
+                or goals_cfg.get("brother_payment")
+                or {}
+            )
             if isinstance(bro_cfg, dict):
-                t = _parse_cents(bro_cfg.get("target") or bro_cfg.get("amount"))
+                t = _parse_cents(bro_cfg.get("target") or bro_cfg.get("amount") or bro_cfg.get("goal"))
                 if t is not None:
                     kahram_target = t
-                b = _parse_cents(bro_cfg.get("already_paid"))
+                b = _parse_cents(
+                    bro_cfg.get("already_paid")
+                    or bro_cfg.get("paid")
+                    or bro_cfg.get("current")
+                    or bro_cfg.get("already_saved")
+                    or bro_cfg.get("saved")
+                    or bro_cfg.get("actual")
+                )
                 if b is not None:
                     kahram_baseline = b
-            # Fallback to fixed_bills.kahram if not in goals section
-            k_bill = (setup_data.get("fixed_bills") or {}).get("kahram") or {}
+            elif isinstance(bro_cfg, (int, float, str)):
+                t = _parse_cents(bro_cfg)
+                if t is not None:
+                    kahram_target = t
+
+            # Fallback to fixed_bills.kahram or fixed_bills.brother if not in goals section
+            fb = setup_data.get("fixed_bills") or {}
+            k_bill = fb.get("kahram") or fb.get("brother") or {}
             if isinstance(k_bill, dict):
                 if kahram_target == 10000:
-                    t = _parse_cents(k_bill.get("amount"))
+                    t = _parse_cents(k_bill.get("amount") or k_bill.get("target"))
                     if t is not None:
                         kahram_target = t
-                if kahram_baseline == 0:
-                    b = _parse_cents(k_bill.get("already_paid"))
+                if kahram_baseline is None:
+                    b = _parse_cents(
+                        k_bill.get("already_paid")
+                        or k_bill.get("paid")
+                        or k_bill.get("current")
+                        or k_bill.get("actual")
+                    )
                     if b is not None:
                         kahram_baseline = b
 
-        with self._get_connection() as conn:
-            # Savings Goal: Net transfers into Capital One Savings
-            sav_row = conn.execute(
-                """
-                SELECT COALESCE(SUM(p.amount_cents), 0) as total
-                FROM postings p
-                JOIN transactions t ON p.transaction_id = t.id
-                WHERE p.account_id = 'Assets:Savings:CapitalOne'
-                  AND t.date >= ? AND t.date <= ?;
-                """,
-                (start_date, end_date),
-            ).fetchone()
-            saved_cents = max(0, savings_baseline + int(sav_row["total"]))
-            goals.append(
-                GoalProgress(
-                    name="💰 Savings Target",
-                    target_cents=savings_target,
-                    saved_cents=saved_cents,
-                    status="completed" if saved_cents >= savings_target else "open",
-                )
+            # Also check top-level setup_data.get("brother") or setup_data.get("kahram")
+            top_bro = setup_data.get("brother") or setup_data.get("kahram") or {}
+            if isinstance(top_bro, dict):
+                if kahram_target == 10000:
+                    t = _parse_cents(top_bro.get("target") or top_bro.get("amount"))
+                    if t is not None:
+                        kahram_target = t
+                if kahram_baseline is None:
+                    b = _parse_cents(
+                        top_bro.get("already_paid")
+                        or top_bro.get("paid")
+                        or top_bro.get("current")
+                        or top_bro.get("actual")
+                    )
+                    if b is not None:
+                        kahram_baseline = b
+
+        # 3. Determine Progress Amounts (Prioritizing setup.yaml source of truth)
+        if savings_baseline is not None:
+            saved_cents = max(0, savings_baseline)
+        else:
+            with self._get_connection() as conn:
+                sav_row = conn.execute(
+                    """
+                    SELECT COALESCE(SUM(p.amount_cents), 0) as total
+                    FROM postings p
+                    JOIN transactions t ON p.transaction_id = t.id
+                    WHERE p.account_id = 'Assets:Savings:CapitalOne'
+                      AND t.date >= ? AND t.date <= ?;
+                    """,
+                    (start_date, end_date),
+                ).fetchone()
+                saved_cents = max(0, int(sav_row["total"]))
+
+        goals.append(
+            GoalProgress(
+                name="💰 Savings Target",
+                target_cents=savings_target,
+                saved_cents=saved_cents,
+                status="completed" if saved_cents >= savings_target else "open",
             )
+        )
 
-            # Kahram Payment Goal
-            kahram_row = conn.execute(
-                """
-                SELECT COALESCE(SUM(p.amount_cents), 0) as total
-                FROM postings p
-                JOIN transactions t ON p.transaction_id = t.id
-                WHERE p.account_id IN ('Expenses:Family:Kahram', 'Expenses:Family:Brother')
-                  AND t.date >= ? AND t.date <= ?;
-                """,
-                (start_date, end_date),
-            ).fetchone()
-            actual_paid = int(kahram_row["total"])
-            total_kahram_paid = max(0, kahram_baseline + actual_paid)
+        if kahram_baseline is not None:
+            total_kahram_paid = max(0, kahram_baseline)
+        else:
+            with self._get_connection() as conn:
+                kahram_row = conn.execute(
+                    """
+                    SELECT COALESCE(SUM(p.amount_cents), 0) as total
+                    FROM postings p
+                    JOIN transactions t ON p.transaction_id = t.id
+                    WHERE p.account_id IN ('Expenses:Family:Kahram', 'Expenses:Family:Brother')
+                      AND t.date >= ? AND t.date <= ?;
+                    """,
+                    (start_date, end_date),
+                ).fetchone()
+                total_kahram_paid = max(0, int(kahram_row["total"]))
 
-            if kahram_target == 10000:
+        if kahram_target == 10000:
+            with self._get_connection() as conn:
                 rule_row = conn.execute("SELECT base_amount_cents FROM recurring_rules WHERE id = 'rule_kahram';").fetchone()
                 if rule_row:
                     kahram_target = int(rule_row["base_amount_cents"])
 
-            goals.append(
-                GoalProgress(
-                    name="🏠 Brother (Kahram) Payment",
-                    target_cents=kahram_target,
-                    saved_cents=total_kahram_paid,
-                    status="completed" if total_kahram_paid >= kahram_target else "open",
-                )
+        goals.append(
+            GoalProgress(
+                name="🏠 Brother (Kahram) Payment",
+                target_cents=kahram_target,
+                saved_cents=total_kahram_paid,
+                status="completed" if total_kahram_paid >= kahram_target else "open",
             )
+        )
 
         return goals
 

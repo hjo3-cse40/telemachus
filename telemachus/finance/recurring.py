@@ -652,30 +652,38 @@ class RecurringEngine:
                         if setup_data and setup_data.get("goals"):
                             bro_goal = (setup_data["goals"].get("brother") or setup_data["goals"].get("kahram") or {})
                             if isinstance(bro_goal, dict):
-                                gt = _parse_cents(bro_goal.get("target"))
+                                gt = _parse_cents(bro_goal.get("target") or bro_goal.get("amount") or bro_goal.get("goal"))
                                 if gt is not None:
                                     target_cents = gt
                                 if spec["already_paid_cents"] is None:
-                                    gp = _parse_cents(bro_goal.get("already_paid"))
+                                    gp = _parse_cents(
+                                        bro_goal.get("already_paid")
+                                        or bro_goal.get("paid")
+                                        or bro_goal.get("current")
+                                        or bro_goal.get("actual")
+                                    )
                                     if gp is not None:
                                         spec["already_paid_cents"] = gp
 
-                        # Calculate actual payments in this month
-                        with self.store._get_connection() as conn:
-                            k_row = conn.execute(
-                                """
-                                SELECT COALESCE(SUM(p.amount_cents), 0) as total
-                                FROM postings p
-                                JOIN transactions t ON p.transaction_id = t.id
-                                WHERE p.account_id IN ('Expenses:Family:Kahram', 'Expenses:Family:Brother')
-                                  AND t.date >= ? AND t.date <= ?;
-                                """,
-                                (f"{m_str}-01", f"{m_str}-31"),
-                            ).fetchone()
-                            actual_paid_month = int(k_row["total"]) if k_row else 0
+                        baseline = spec.get("already_paid_cents")
+                        if baseline is not None:
+                            total_paid = baseline
+                        else:
+                            # Calculate actual payments in this month from database
+                            with self.store._get_connection() as conn:
+                                k_row = conn.execute(
+                                    """
+                                    SELECT COALESCE(SUM(p.amount_cents), 0) as total
+                                    FROM postings p
+                                    JOIN transactions t ON p.transaction_id = t.id
+                                    WHERE p.account_id IN ('Expenses:Family:Kahram', 'Expenses:Family:Brother')
+                                      AND t.date >= ? AND t.date <= ?;
+                                    """,
+                                    (f"{m_str}-01", f"{m_str}-31"),
+                                ).fetchone()
+                                actual_paid_month = int(k_row["total"]) if k_row else 0
+                            total_paid = actual_paid_month
 
-                        baseline = spec["already_paid_cents"] or 0
-                        total_paid = baseline + actual_paid_month
                         rem = max(0, target_cents - total_paid)
 
                         if rem == 0:
