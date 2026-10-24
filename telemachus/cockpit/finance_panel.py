@@ -287,6 +287,8 @@ class FinanceTuiPanel:
 
     def get_paycheck_allocation(self, as_of_date: Optional[str] = None) -> Any:
         """Returns 14-day paycheck window allocation."""
-        from telemachus.finance.recurring import RecurringEngine
-        engine = RecurringEngine(self.store)
-        return engine.get_paycheck_allocation(as_of_date=as_of_date)
+        return self.recurring.get_paycheck_allocation(as_of_date=as_of_date)
+
+    def get_monthly_bills_breakdown(self, month: Optional[str] = None) -> Dict[str, Any]:
+        """Returns recurring bills sorted by due date and monthly overview with Notion formulas."""
+        return self.recurring.get_all_recurring_bills_breakdown(month=month)

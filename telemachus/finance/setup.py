@@ -348,6 +348,7 @@ def apply_setup_yaml(yaml_path: Optional[Path | str] = None, store: Optional[Fin
     fixed_bills = data.get("fixed_bills", {})
     rule_map = {
         "kahram": "rule_kahram",
+        "brother": "rule_kahram",
         "gym": "rule_gym",
         "apple_icloud": "rule_apple_cloud",
         "spotify": "rule_spotify",
@@ -385,6 +386,26 @@ def apply_setup_yaml(yaml_path: Optional[Path | str] = None, store: Optional[Fin
             summary["rules_updated"] += 1
             if is_active:
                 total_fixed_cents += amount_cents
+        else:
+            cat = cfg.get("category", "Fixed Bill")
+            new_rule = RecurringRule(
+                id=rule_id,
+                name=cfg.get("name", key.replace("_", " ").title()),
+                rule_type=RuleType.FIXED,
+                frequency="monthly",
+                due_day_of_month=due_day,
+                base_amount_cents=amount_cents,
+                from_account="Assets:Checking:WellsFargo",
+                to_account=f"Expenses:{key.replace('_', ' ').title()}",
+                is_autopay=True,
+                lead_time_days=3,
+                is_active=is_active,
+                notes=cfg.get("notes", f"Configured via setup.yaml ({cat})"),
+            )
+            recurring.add_rule(new_rule)
+            summary["rules_updated"] += 1
+            if is_active:
+                total_fixed_cents += amount_cents
 
     summary["fixed_bills_total_cents"] = total_fixed_cents
 
@@ -392,12 +413,12 @@ def apply_setup_yaml(yaml_path: Optional[Path | str] = None, store: Optional[Fin
     monthly_targets = data.get("monthly_targets", {})
     if monthly_targets:
         month = str(monthly_targets.get("month") or time.strftime("%Y-%m"))
-        income_cents = _parse_cents(monthly_targets.get("income", 0.0)) or 0
+        income_cents = _parse_cents(monthly_targets.get("monthly_income") if monthly_targets.get("monthly_income") is not None else monthly_targets.get("income", 0.0)) or 0
         savings_target_cents = _parse_cents(monthly_targets.get("savings_target", 0.0)) or 0
-        groceries_planned_cents = _parse_cents(monthly_targets.get("groceries_planned", 0.0)) or 0
-        dining_planned_cents = _parse_cents(monthly_targets.get("dining_planned", 0.0)) or 0
-        gas_planned_cents = _parse_cents(monthly_targets.get("gas_planned", 0.0)) or 0
-        pge_cents = _parse_cents(monthly_targets.get("pge_estimate", 0.0)) or 0
+        groceries_planned_cents = _parse_cents(monthly_targets.get("groceries_planned") if monthly_targets.get("groceries_planned") is not None else monthly_targets.get("groceries", 0.0)) or 0
+        dining_planned_cents = _parse_cents(monthly_targets.get("dining_planned") if monthly_targets.get("dining_planned") is not None else monthly_targets.get("dining", 0.0)) or 0
+        gas_planned_cents = _parse_cents(monthly_targets.get("gas_planned") if monthly_targets.get("gas_planned") is not None else monthly_targets.get("gas", 0.0)) or 0
+        pge_cents = _parse_cents(monthly_targets.get("pge_estimate") if monthly_targets.get("pge_estimate") is not None else monthly_targets.get("pge", 0.0)) or 0
         notes = str(monthly_targets.get("notes") or "Configured via setup.yaml")
 
         store.set_monthly_overview(

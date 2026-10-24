@@ -328,10 +328,14 @@ class TestCockpitTUIFinances(unittest.TestCase):
         self.tui.finance_overview = None
         self.tui.finance_paycheck = None
         self.tui.finance_balances = {}
+        self.tui.finance_bills_breakdown = {}
+        self.tui.finances_view_mode = "daily"
         self.tui.finances_focus = "days"
         self.tui.selected_day_idx = 0
         self.tui.day_scroll_offset = 0
         self.tui.selected_item_idx = 0
+        self.tui.selected_bill_idx = 0
+        self.tui.bills_scroll_offset = 0
         self.tui.mask_amounts = False
         self.tui.is_adding_finances = False
         self.tui.is_editing_finances = False
@@ -752,6 +756,120 @@ goals:
         # Brother payment is 100% completed
         self.assertEqual(brother_goal.saved_cents, 15000)
         self.assertEqual(brother_goal.status, "completed")
+
+    def test_recurring_bills_breakdown_sorted_by_due_date_and_formulas(self):
+        """Verifies bills sorted by due date (1-31) and Notion monthly overview formulas."""
+        yaml_path = Path(self.temp_dir.name) / "test_setup.yaml"
+        sample_yaml = """
+monthly_targets:
+  monthly_income: 2700.00
+  savings_target: 1000.00
+  groceries: 300.00
+  gas: 120.00
+  pge_estimate: 75.00
+
+fixed_bills:
+  brother:
+    amount: 150.00
+    due_day: 1
+    category: "Fixed Bill"
+  gym:
+    amount: 39.99
+    due_day: 1
+    category: "Fixed Bill"
+  apple_icloud:
+    amount: 2.99
+    due_day: 11
+    category: "Subscription"
+  spotify:
+    amount: 11.99
+    due_day: 25
+    category: "Subscription"
+  wifi:
+    amount: 55.74
+    due_day: 28
+    category: "Fixed Bill"
+
+goals:
+  brother:
+    target: 150.00
+    already_paid: 150.00
+"""
+        yaml_path.write_text(sample_yaml, encoding="utf-8")
+        self.store.setup_yaml_path = yaml_path
+        apply_setup_yaml(yaml_path=yaml_path, store=self.store)
+
+        engine = RecurringEngine(self.store)
+        res = engine.get_all_recurring_bills_breakdown("2026-10", yaml_path=yaml_path)
+
+        bills = res["bills"]
+        self.assertTrue(len(bills) >= 5)
+
+        # Check due dates are sorted ascending
+        due_days = [b["due_day"] for b in bills]
+        self.assertEqual(due_days, sorted(due_days))
+
+        # First bills should be due on 1st (Brother, Gym)
+        self.assertEqual(bills[0]["due_day"], 1)
+
+        # Check fixed bills sum: 150 + 39.99 + 2.99 + 11.99 + 55.74 = 260.71 (26071 cents)
+        self.assertEqual(res["fixed_bills_total_cents"], 26071)
+
+        # Check Notion overview
+        overview = res["overview"]
+        self.assertIsNotNone(overview)
+        self.assertEqual(overview.income_cents, 270000)
+        self.assertEqual(overview.savings_target_cents, 100000)
+        self.assertEqual(overview.all_bills_cents, 26071 + 7500)  # fixed + pge
+
+    @unittest.mock.patch("curses.color_pair", return_value=0)
+    def test_cockpit_tui_bills_overview_toggle_and_rendering(self, mock_cp):
+        """Verifies Cockpit Tab [4] [v] toggle between Daily Ledger and Recurring Bills views."""
+        yaml_path = Path(self.temp_dir.name) / "test_setup.yaml"
+        sample_yaml = """
+monthly_targets:
+  monthly_income: 2700.00
+  savings_target: 1000.00
+  groceries: 300.00
+  gas: 120.00
+  pge_estimate: 75.00
+fixed_bills:
+  brother:
+    amount: 150.00
+    due_day: 1
+    category: "Fixed Bill"
+  wifi:
+    amount: 55.74
+    due_day: 28
+    category: "Fixed Bill"
+"""
+        yaml_path.write_text(sample_yaml, encoding="utf-8")
+        self.store.setup_yaml_path = yaml_path
+        apply_setup_yaml(yaml_path=yaml_path, store=self.store)
+
+        self.tui.refresh_data()
+        self.tui.current_tab = 4
+
+        # 1. Default mode is 'daily'
+        self.assertEqual(self.tui.finances_view_mode, "daily")
+        self.mock_stdscr.reset_mock()
+        self.tui.draw_finances_view(35, 90)
+        addstr_calls = [c[0] for c in self.mock_stdscr.addstr.call_args_list]
+        combined = " ".join(str(arg) for call in addstr_calls for arg in call)
+        self.assertIn("[v] DAY NAVIGATOR", combined)
+
+        # 2. Toggle to 'bills' mode
+        self.tui.finances_view_mode = "bills"
+        self.mock_stdscr.reset_mock()
+        self.tui.draw_finances_view(35, 90)
+        addstr_calls_bills = [c[0] for c in self.mock_stdscr.addstr.call_args_list]
+        combined_bills = " ".join(str(arg) for call in addstr_calls_bills for arg in call)
+
+        self.assertIn("RECURRING BILLS", combined_bills)
+        self.assertIn("MONTHLY OVERVIEW", combined_bills)
+        self.assertIn("Planned Total Personal", combined_bills)
+        self.assertIn("Remaining Cushion", combined_bills)
+        self.assertIn("Fixed Bills", combined_bills)
 
 
 if __name__ == "__main__":

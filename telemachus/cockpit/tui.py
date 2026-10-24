@@ -49,10 +49,14 @@ class CockpitTUI:
         self.finance_paycheck: Any = None
         self.finance_balances: Dict[str, Any] = {}
         self.finance_goals: List[Any] = []
+        self.finance_bills_breakdown: Dict[str, Any] = {}
+        self.finances_view_mode: str = "daily"  # "daily" or "bills"
         self.finances_focus: str = "days"  # "days" or "items"
         self.selected_day_idx = 0
         self.day_scroll_offset = 0
         self.selected_item_idx = 0
+        self.selected_bill_idx = 0
+        self.bills_scroll_offset = 0
         self.mask_amounts = False
 
         # In-Cockpit Modal State for Logging Daily Finances
@@ -119,6 +123,7 @@ class CockpitTUI:
             self.finance_paycheck = self.finance_panel.get_paycheck_allocation()
             self.finance_balances = self.finance_panel.get_balances()
             self.finance_goals = self.finance_panel.get_goals_progress()
+            self.finance_bills_breakdown = self.finance_panel.get_monthly_bills_breakdown()
 
             if self.finance_days and self.selected_day_idx >= len(self.finance_days):
                 self.selected_day_idx = len(self.finance_days) - 1
@@ -428,13 +433,18 @@ class CockpitTUI:
             # Horizontal Separator at Line 6
             self.stdscr.addstr(6, 1, "─" * max(1, max_x - 2), curses.color_pair(8))
 
-            # 4. Main Dual-Column Layout (Lines 7+)
+            # 4. View Switcher Mode: Bills View vs Daily Ledger View
+            if getattr(self, "finances_view_mode", "daily") == "bills":
+                self.draw_bills_overview_view(max_y, max_x)
+                return
+
+            # Main Dual-Column Layout (Lines 7+)
             split_x = min(36, max(26, max_x // 3))
 
             # Left Column Header (Line 7)
             left_focus_prefix = "▶ " if self.finances_focus == "days" else "  "
             left_hdr_attr = (curses.color_pair(7) | curses.A_BOLD) if self.finances_focus == "days" else (curses.color_pair(4) | curses.A_BOLD)
-            self.stdscr.addstr(7, 2, f"{left_focus_prefix + 'DAY NAVIGATOR':<18} {'NET':>8}"[:split_x - 2], left_hdr_attr)
+            self.stdscr.addstr(7, 2, f"{left_focus_prefix + '[v] DAY NAVIGATOR':<18} {'NET':>8}"[:split_x - 2], left_hdr_attr)
             self.stdscr.addstr(8, 1, "─" * (split_x - 1), curses.color_pair(8))
 
             # Right Column Header & Divider
@@ -544,6 +554,137 @@ class CockpitTUI:
                         self.stdscr.addstr(item_y, right_x + 2, f"{cat_str:<12}", row_attr)
                         self.stdscr.addstr(item_y, right_x + 15, f"{desc_str:<{desc_w}}"[:desc_w], row_attr)
                         self.stdscr.addstr(item_y, col_amt_x, f"{amt_str:>12}", curses.color_pair(7) | curses.A_BOLD if is_item_sel else (amt_pair | curses.A_BOLD))
+        except curses.error:
+            pass
+
+    def draw_bills_overview_view(self, max_y: int, max_x: int) -> None:
+        """Renders the Recurring Fixed Bills table (sorted by due date) & Monthly Overview (Notion formulas)."""
+        bb = getattr(self, "finance_bills_breakdown", {}) or {}
+        bills = bb.get("bills", [])
+        fixed_sum_cents = bb.get("fixed_bills_total_cents", 0)
+        overview = bb.get("overview") or self.finance_overview
+
+        # Dimensions: Dual column layout
+        split_x = min(58, max(38, int(max_x * 0.52)))
+        right_x = split_x + 2
+        right_w = max(10, max_x - right_x - 1)
+
+        try:
+            # Vertical divider between tables
+            for y in range(7, max_y - 2):
+                self.stdscr.addstr(y, split_x, "│", curses.color_pair(8))
+
+            # -------------------------------------------------------------
+            # Left Column: Recurring Bills Table (Sorted by Due Date 1-31)
+            # -------------------------------------------------------------
+            left_hdr = " [v] RECURRING BILLS (By Due Date) "
+            self.stdscr.addstr(7, 2, left_hdr[:split_x - 3], curses.color_pair(7) | curses.A_BOLD)
+
+            # Table subheader at Line 8
+            if split_x >= 52:
+                self.stdscr.addstr(8, 2, "DUE", curses.color_pair(2) | curses.A_BOLD)
+                self.stdscr.addstr(8, 7, f"{'BILL / OBLIGATION':<18}", curses.color_pair(2) | curses.A_BOLD)
+                self.stdscr.addstr(8, 26, f"{'CATEGORY':<12}", curses.color_pair(2) | curses.A_BOLD)
+                self.stdscr.addstr(8, 39, f"{'STATUS':<8}", curses.color_pair(2) | curses.A_BOLD)
+                self.stdscr.addstr(8, 48, f"{'AMOUNT':>8}", curses.color_pair(2) | curses.A_BOLD)
+            else:
+                self.stdscr.addstr(8, 2, f"{'DUE':<4} {'BILL':<16} {'STATUS':<8} {'AMOUNT':>7}"[:split_x - 3], curses.color_pair(2) | curses.A_BOLD)
+
+            # Available rows for bills list
+            avail_rows = max(1, max_y - 12)
+            visible_bills = bills[self.bills_scroll_offset : self.bills_scroll_offset + avail_rows]
+
+            for idx, b in enumerate(visible_bills):
+                actual_idx = self.bills_scroll_offset + idx
+                row_y = 9 + idx
+                if row_y >= max_y - 3:
+                    break
+
+                is_sel = (actual_idx == self.selected_bill_idx)
+                row_attr = (curses.color_pair(7) | curses.A_BOLD) if is_sel else curses.color_pair(8)
+
+                due_day_str = f"{b['due_day']:02d}"
+                name_str = b["name"][:18]
+                cat_str = b["category"][:11]
+                stat_text = b["status_text"][:9]
+                amt_str = self._fmt_money(b["amount_cents"], self.mask_amounts)
+
+                if is_sel:
+                    self.stdscr.addstr(row_y, 1, " " * (split_x - 1), row_attr)
+
+                if split_x >= 52:
+                    self.stdscr.addstr(row_y, 2, due_day_str, curses.color_pair(4) | (curses.A_BOLD if is_sel else 0))
+                    self.stdscr.addstr(row_y, 7, f"{name_str:<18}", row_attr)
+                    self.stdscr.addstr(row_y, 26, f"{cat_str:<12}", curses.color_pair(6) if is_sel else curses.color_pair(8))
+                    stat_pair = curses.color_pair(5) if b["status"] == "paid" else curses.color_pair(3)
+                    self.stdscr.addstr(row_y, 39, f"{stat_text:<8}", stat_pair | curses.A_BOLD)
+                    self.stdscr.addstr(row_y, 48, f"{amt_str:>8}", curses.color_pair(1) | curses.A_BOLD if is_sel else curses.color_pair(8))
+                else:
+                    self.stdscr.addstr(row_y, 2, due_day_str, curses.color_pair(4) | curses.A_BOLD)
+                    self.stdscr.addstr(row_y, 7, f"{name_str[:15]:<16}", row_attr)
+                    stat_pair = curses.color_pair(5) if b["status"] == "paid" else curses.color_pair(3)
+                    self.stdscr.addstr(row_y, 24, f"{stat_text[:7]:<8}", stat_pair | curses.A_BOLD)
+                    self.stdscr.addstr(row_y, split_x - len(amt_str) - 2, amt_str, row_attr)
+
+            # Left column bottom sum (Line max_y - 2)
+            self.stdscr.addstr(max_y - 3, 1, "─" * (split_x - 1), curses.color_pair(8))
+            sum_str = self._fmt_money(fixed_sum_cents, self.mask_amounts)
+            sum_line = f" SUM: {sum_str} Fixed Bills (Excl. PG&E)"
+            self.stdscr.addstr(max_y - 2, 1, sum_line[:split_x - 2], curses.color_pair(5) | curses.A_BOLD)
+
+            # -------------------------------------------------------------
+            # Right Column: Monthly Overview & Notion Formulas
+            # -------------------------------------------------------------
+            self.stdscr.addstr(7, right_x, "📊 MONTHLY OVERVIEW & FORMULAS (Notion)"[:right_w], curses.color_pair(1) | curses.A_BOLD)
+            self.stdscr.addstr(8, right_x, "─" * right_w, curses.color_pair(8))
+
+            if overview:
+                m_label = overview.month
+                st_label = overview.status.upper()
+                inc_str = self._fmt_money(overview.income_cents, self.mask_amounts)
+                sav_str = self._fmt_money(overview.savings_target_cents, self.mask_amounts)
+                fix_str = self._fmt_money(overview.fixed_bills_cents, self.mask_amounts)
+                pge_str = self._fmt_money(overview.pge_cents, self.mask_amounts)
+                all_b_str = self._fmt_money(overview.all_bills_cents, self.mask_amounts)
+
+                g_act_str = self._fmt_money(overview.groceries_actual_cents, self.mask_amounts)
+                g_plan_str = self._fmt_money(overview.groceries_planned_cents, self.mask_amounts)
+                g_left_str = self._fmt_money(overview.groceries_left_cents, self.mask_amounts, signed=True)
+
+                gas_act_str = self._fmt_money(overview.gas_actual_cents, self.mask_amounts)
+                gas_plan_str = self._fmt_money(overview.gas_planned_cents, self.mask_amounts)
+                gas_left_str = self._fmt_money(overview.gas_left_cents, self.mask_amounts, signed=True)
+
+                pers_str = self._fmt_money(overview.total_personal_cents, self.mask_amounts)
+                var_str = self._fmt_money(overview.variable_variance_cents, self.mask_amounts, signed=True)
+                cush_str = self._fmt_money(overview.remaining_cushion_cents, self.mask_amounts, signed=True)
+
+                # Line 9: Month & Status
+                self.stdscr.addstr(9, right_x, f"📅 Month: {m_label} │ Status: [{st_label}]"[:right_w], curses.color_pair(2) | curses.A_BOLD)
+
+                # Inflow & Macro Deductions (Lines 10-14)
+                self.stdscr.addstr(10, right_x, f"  💵 Monthly Income:          {inc_str:>12}"[:right_w], curses.color_pair(5))
+                self.stdscr.addstr(11, right_x, f"  🎯 Savings Target:         -{sav_str:>12}"[:right_w], curses.color_pair(2))
+                self.stdscr.addstr(12, right_x, f"  📌 Fixed Bills Total:       -{fix_str:>12}"[:right_w], curses.color_pair(3))
+                self.stdscr.addstr(13, right_x, f"  ⚡ PG&E (Estimate/Actual):  -{pge_str:>12}"[:right_w], curses.color_pair(4))
+                self.stdscr.addstr(14, right_x, f"  🏷️ All Bills (Fixed + PG&E): {all_b_str:>12}"[:right_w], curses.color_pair(8) | curses.A_BOLD)
+
+                # Variable Expenses Section (Lines 15-18)
+                if max_y >= 22:
+                    self.stdscr.addstr(15, right_x, "  " + "─" * max(1, right_w - 4), curses.color_pair(8))
+                    self.stdscr.addstr(16, right_x, f"  🛒 Groceries: {g_act_str} (Plan: {g_plan_str} · Left: {g_left_str})"[:right_w], curses.color_pair(8))
+                    self.stdscr.addstr(17, right_x, f"  ⛽ Gas:       {gas_act_str} (Plan: {gas_plan_str} · Left: {gas_left_str})"[:right_w], curses.color_pair(8))
+                    self.stdscr.addstr(18, right_x, "  " + "─" * max(1, right_w - 4), curses.color_pair(8))
+
+                    # Notion Formula Outputs (Lines 19-21)
+                    self.stdscr.addstr(19, right_x, f"  👤 Planned Total Personal:  {pers_str:>12}"[:right_w], curses.color_pair(1) | curses.A_BOLD)
+                    var_pair = curses.color_pair(5) if overview.variable_variance_cents >= 0 else curses.color_pair(3)
+                    self.stdscr.addstr(20, right_x, f"  📈 Variable Variance:       {var_str:>12}"[:right_w], var_pair | curses.A_BOLD)
+                    cush_pair = curses.color_pair(5) if overview.remaining_cushion_cents >= 0 else curses.color_pair(3)
+                    self.stdscr.addstr(21, right_x, f"  🛡️ Remaining Cushion:       {cush_str:>12}"[:right_w], cush_pair | curses.A_BOLD)
+
+                    if overview.notes and max_y >= 24:
+                        self.stdscr.addstr(23, right_x, f"  📝 Notes: {overview.notes}"[:right_w], curses.color_pair(4))
         except curses.error:
             pass
 
@@ -871,7 +1012,10 @@ class CockpitTUI:
                 self.stdscr.addstr(max_y - 1, 1, f"🔔 {self.notification}"[: max_x - 2], curses.color_pair(4) | curses.A_BOLD)
             else:
                 if self.current_tab == 4:
-                    hint = " [j/k]: Move  [Tab]: Switch Day/Items  [a]: Add  [e]: Edit  [d]: Delete  [m]: Mask  [q]: Exit"
+                    if getattr(self, "finances_view_mode", "daily") == "bills":
+                        hint = " [j/k]: Move  [v]: View Ledger  [m]: Mask  [r]: Refresh  [q]: Exit"
+                    else:
+                        hint = " [j/k]: Move  [Tab]: Switch Day/Items  [v]: Recurring Bills  [a]: Add  [e]: Edit  [d]: Delete  [m]: Mask  [q]: Exit"
                 else:
                     hint = " [↑/↓/j/k]: Navigate  [1-4]: Views  [t]: Triage in OpenCode  [r]: Refresh  [q]: Exit"
                 self.stdscr.addstr(max_y - 1, 1, hint[: max_x - 2], curses.color_pair(1))
@@ -899,28 +1043,50 @@ class CockpitTUI:
                 if clicked_idx < len(self.emails):
                     self.selected_email_idx = clicked_idx
 
-            # Click in finance view (Left Column: Days, Right Column: Items)
-            split_x = min(36, max(26, curses.COLS // 3)) if hasattr(curses, "COLS") else 32
-            if self.current_tab == 4 and 9 <= my <= 35:
-                if mx <= split_x:
-                    clicked_day = self.day_scroll_offset + (my - 9)
-                    if 0 <= clicked_day < len(self.finance_days):
-                        self.selected_day_idx = clicked_day
-                        self.finances_focus = "days"
-                        self.selected_item_idx = 0
+            # Click in finance view
+            if self.current_tab == 4:
+                # Click on Line 7 toggles Daily Ledger vs Recurring Bills view
+                if my == 7 and mx <= 36:
+                    self.finances_view_mode = "bills" if getattr(self, "finances_view_mode", "daily") == "daily" else "daily"
+                    mode_label = "Recurring Bills" if self.finances_view_mode == "bills" else "Daily Ledger"
+                    self.set_notification(f"Finances View: {mode_label}")
+                    return
+
+                if getattr(self, "finances_view_mode", "daily") == "bills":
+                    split_x = min(58, max(38, int(curses.COLS * 0.52))) if hasattr(curses, "COLS") else 45
+                    if 9 <= my <= 35 and mx <= split_x:
+                        clicked_bill = self.bills_scroll_offset + (my - 9)
+                        bb = getattr(self, "finance_bills_breakdown", {}) or {}
+                        bills = bb.get("bills", [])
+                        if 0 <= clicked_bill < len(bills):
+                            self.selected_bill_idx = clicked_bill
                 else:
-                    clicked_item = my - 9
-                    curr_items = self.finance_days[self.selected_day_idx]["items"] if self.finance_days else []
-                    if 0 <= clicked_item < len(curr_items):
-                        self.selected_item_idx = clicked_item
-                        self.finances_focus = "items"
+                    split_x = min(36, max(26, curses.COLS // 3)) if hasattr(curses, "COLS") else 32
+                    if 9 <= my <= 35:
+                        if mx <= split_x:
+                            clicked_day = self.day_scroll_offset + (my - 9)
+                            if 0 <= clicked_day < len(self.finance_days):
+                                self.selected_day_idx = clicked_day
+                                self.finances_focus = "days"
+                                self.selected_item_idx = 0
+                        else:
+                            clicked_item = my - 9
+                            curr_items = self.finance_days[self.selected_day_idx]["items"] if self.finance_days else []
+                            if 0 <= clicked_item < len(curr_items):
+                                self.selected_item_idx = clicked_item
+                                self.finances_focus = "items"
 
             # Trackpad scroll up / down
             if bstate & curses.BUTTON4_PRESSED:  # Scroll Up
                 if self.current_tab == 1:
                     self.selected_email_idx = max(0, self.selected_email_idx - 1)
                 elif self.current_tab == 4:
-                    if self.finances_focus == "days":
+                    if getattr(self, "finances_view_mode", "daily") == "bills":
+                        if self.selected_bill_idx > 0:
+                            self.selected_bill_idx -= 1
+                            if self.selected_bill_idx < self.bills_scroll_offset:
+                                self.bills_scroll_offset = self.selected_bill_idx
+                    elif self.finances_focus == "days":
                         self.selected_day_idx = max(0, self.selected_day_idx - 1)
                         if self.selected_day_idx < self.day_scroll_offset:
                             self.day_scroll_offset = self.selected_day_idx
@@ -930,7 +1096,12 @@ class CockpitTUI:
                 if self.current_tab == 1:
                     self.selected_email_idx = min(len(self.emails) - 1, self.selected_email_idx + 1)
                 elif self.current_tab == 4:
-                    if self.finances_focus == "days":
+                    if getattr(self, "finances_view_mode", "daily") == "bills":
+                        bb = getattr(self, "finance_bills_breakdown", {}) or {}
+                        bills = bb.get("bills", [])
+                        if self.selected_bill_idx < len(bills) - 1:
+                            self.selected_bill_idx += 1
+                    elif self.finances_focus == "days":
                         if self.selected_day_idx < len(self.finance_days) - 1:
                             self.selected_day_idx += 1
                     else:
@@ -1029,45 +1200,68 @@ class CockpitTUI:
                 elif ch in (ord("t"), ord("T")):
                     self.trigger_opencode_action("Triage my unread emails and summarize urgent items using telemachus-email")
             elif self.current_tab == 4:
-                if ch in (9, ord("\t")):  # Tab key toggles focus between Days and Items
-                    self.finances_focus = "items" if self.finances_focus == "days" else "days"
-                    self.set_notification(f"Focus: {self.finances_focus.upper()}")
-                elif ch in (curses.KEY_RIGHT, ord("l")):
-                    self.finances_focus = "items"
-                elif ch in (curses.KEY_LEFT, ord("h")):
-                    self.finances_focus = "days"
-                elif ch in (curses.KEY_UP, ord("k")):
-                    if self.finances_focus == "days":
-                        if self.selected_day_idx > 0:
-                            self.selected_day_idx -= 1
-                            self.selected_item_idx = 0
-                            if self.selected_day_idx < self.day_scroll_offset:
-                                self.day_scroll_offset = self.selected_day_idx
-                    else:
-                        if self.selected_item_idx > 0:
-                            self.selected_item_idx -= 1
-                elif ch in (curses.KEY_DOWN, ord("j")):
-                    if self.finances_focus == "days":
-                        if self.selected_day_idx < len(self.finance_days) - 1:
-                            self.selected_day_idx += 1
-                            self.selected_item_idx = 0
-                            avail_day_rows = max(1, max_y - 9)
-                            if self.selected_day_idx >= self.day_scroll_offset + avail_day_rows:
-                                self.day_scroll_offset += 1
-                    else:
-                        curr_items = self.finance_days[self.selected_day_idx]["items"] if self.finance_days else []
-                        if self.selected_item_idx < len(curr_items) - 1:
-                            self.selected_item_idx += 1
-                elif ch in (ord("a"), ord("A")):
-                    self.open_add_modal()
-                elif ch in (ord("e"), ord("E")):
-                    self.open_edit_modal()
-                elif ch in (ord("d"), ord("D")):
-                    self.delete_selected_finance()
-                elif ch in (ord("m"), ord("M")):
-                    self.mask_amounts = not self.mask_amounts
-                    status = "masked" if self.mask_amounts else "unmasked"
-                    self.set_notification(f"Finance amounts {status}.")
+                if ch in (ord("v"), ord("V")):
+                    self.finances_view_mode = "bills" if getattr(self, "finances_view_mode", "daily") == "daily" else "daily"
+                    mode_label = "Recurring Bills & Monthly Budget" if self.finances_view_mode == "bills" else "Daily Ledger"
+                    self.set_notification(f"Switched view to {mode_label}")
+                elif getattr(self, "finances_view_mode", "daily") == "bills":
+                    bb = getattr(self, "finance_bills_breakdown", {}) or {}
+                    bills = bb.get("bills", [])
+                    avail_rows = max(1, max_y - 12)
+                    if ch in (curses.KEY_UP, ord("k")):
+                        if self.selected_bill_idx > 0:
+                            self.selected_bill_idx -= 1
+                            if self.selected_bill_idx < self.bills_scroll_offset:
+                                self.bills_scroll_offset = self.selected_bill_idx
+                    elif ch in (curses.KEY_DOWN, ord("j")):
+                        if self.selected_bill_idx < len(bills) - 1:
+                            self.selected_bill_idx += 1
+                            if self.selected_bill_idx >= self.bills_scroll_offset + avail_rows:
+                                self.bills_scroll_offset += 1
+                    elif ch in (ord("m"), ord("M")):
+                        self.mask_amounts = not self.mask_amounts
+                        status = "masked" if self.mask_amounts else "unmasked"
+                        self.set_notification(f"Finance amounts {status}.")
+                else:
+                    if ch in (9, ord("\t")):  # Tab key toggles focus between Days and Items
+                        self.finances_focus = "items" if self.finances_focus == "days" else "days"
+                        self.set_notification(f"Focus: {self.finances_focus.upper()}")
+                    elif ch in (curses.KEY_RIGHT, ord("l")):
+                        self.finances_focus = "items"
+                    elif ch in (curses.KEY_LEFT, ord("h")):
+                        self.finances_focus = "days"
+                    elif ch in (curses.KEY_UP, ord("k")):
+                        if self.finances_focus == "days":
+                            if self.selected_day_idx > 0:
+                                self.selected_day_idx -= 1
+                                self.selected_item_idx = 0
+                                if self.selected_day_idx < self.day_scroll_offset:
+                                    self.day_scroll_offset = self.selected_day_idx
+                        else:
+                            if self.selected_item_idx > 0:
+                                self.selected_item_idx -= 1
+                    elif ch in (curses.KEY_DOWN, ord("j")):
+                        if self.finances_focus == "days":
+                            if self.selected_day_idx < len(self.finance_days) - 1:
+                                self.selected_day_idx += 1
+                                self.selected_item_idx = 0
+                                avail_day_rows = max(1, max_y - 9)
+                                if self.selected_day_idx >= self.day_scroll_offset + avail_day_rows:
+                                    self.day_scroll_offset += 1
+                        else:
+                            curr_items = self.finance_days[self.selected_day_idx]["items"] if self.finance_days else []
+                            if self.selected_item_idx < len(curr_items) - 1:
+                                self.selected_item_idx += 1
+                    elif ch in (ord("a"), ord("A")):
+                        self.open_add_modal()
+                    elif ch in (ord("e"), ord("E")):
+                        self.open_edit_modal()
+                    elif ch in (ord("d"), ord("D")):
+                        self.delete_selected_finance()
+                    elif ch in (ord("m"), ord("M")):
+                        self.mask_amounts = not self.mask_amounts
+                        status = "masked" if self.mask_amounts else "unmasked"
+                        self.set_notification(f"Finance amounts {status}.")
 
 
 def main():

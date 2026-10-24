@@ -812,3 +812,179 @@ class RecurringEngine:
             notes=f"2-Week allocation from {paycheck_date_str} to {end_window_str}",
         )
 
+    def get_all_recurring_bills_breakdown(
+        self, month: Optional[str] = None, yaml_path: Optional[Path | str] = None
+    ) -> Dict[str, Any]:
+        """Returns comprehensive breakdown of recurring bills sorted deterministically by due date (1-31).
+        
+        Matches Notion '1) Recurring Fixed Bills' table with live status (Paid vs Due)
+        and '2) Monthly Overview' Notion budget formulas.
+        """
+        if not month:
+            month = datetime.now().strftime("%Y-%m")
+        start_date = f"{month}-01"
+        import calendar
+        y, m = map(int, month.split("-"))
+        _, last_day = calendar.monthrange(y, m)
+        end_date = f"{month}-{last_day:02d}"
+
+        # 1. Load setup.yaml live
+        target_yaml = yaml_path or self.yaml_path or self.store.get_setup_yaml_path()
+        setup_data = None
+        if target_yaml:
+            try:
+                from telemachus.finance.setup import load_setup_yaml, _parse_cents
+                setup_data = load_setup_yaml(target_yaml)
+            except Exception:
+                pass
+        if "_parse_cents" not in locals():
+            _parse_cents = lambda x: int(round(float(x) * 100)) if x is not None else None
+
+        # 2. Extract configured bills from setup.yaml (or database fallback)
+        configured_bills = {}
+        if setup_data and setup_data.get("fixed_bills"):
+            fb = setup_data["fixed_bills"]
+            for k, v in fb.items():
+                if isinstance(v, dict):
+                    configured_bills[k] = v
+
+        STD_BILL_METADATA = {
+            "kahram": ("Expenses:Family:Kahram", "Kahram payment", "Fixed Bill", 1),
+            "brother": ("Expenses:Family:Kahram", "Brother Payment", "Fixed Bill", 1),
+            "gym": ("Expenses:Subscriptions:Gym", "Gym Membership", "Fixed Bill", 1),
+            "apple_icloud": ("Expenses:Subscriptions:AppleCloud", "Apple iCloud", "Subscription", 11),
+            "spotify": ("Expenses:Subscriptions:Spotify", "Spotify", "Subscription", 25),
+            "wifi": ("Expenses:Utilities:WiFi", "Wi-Fi", "Fixed Bill", 28),
+            "pge": ("Expenses:Utilities:PGE", "PG&E Electric & Gas", "Utility (Variable)", 28),
+            "credit_card": ("Liabilities:CreditCard:Visa", "Credit Card (Visa)", "Card Balance", 2),
+            "rent": ("Expenses:Home:Rent", "Apartment Rent", "Fixed Bill", 1),
+        }
+
+        bills: List[Dict[str, Any]] = []
+        seen_keys = set()
+
+        for k, v in configured_bills.items():
+            clean_k = k.lower().replace("-", "_").replace(" ", "_")
+            seen_keys.add(clean_k)
+            acc, def_name, def_cat, def_day = STD_BILL_METADATA.get(
+                clean_k, (f"Expenses:{k.title()}", k.title(), "Fixed Bill", 1)
+            )
+            due_day = int(v.get("due_day", def_day))
+            amt = _parse_cents(v.get("amount", 0.0)) or 0
+            category = v.get("category") or def_cat
+            name = v.get("name") or def_name
+            is_active = bool(v.get("active", True))
+
+            # Status determination for month
+            notes = v.get("notes") or ""
+            status = "due"
+            status_text = "⏳ Due"
+
+            if clean_k in ("kahram", "brother"):
+                # Check already_paid from setup
+                already_paid = _parse_cents(v.get("already_paid"))
+                if already_paid is None and setup_data and setup_data.get("goals"):
+                    bg = setup_data["goals"].get("brother") or setup_data["goals"].get("kahram") or {}
+                    if isinstance(bg, dict):
+                        already_paid = _parse_cents(bg.get("already_paid") or bg.get("paid"))
+                if already_paid is not None:
+                    paid_tot = already_paid
+                else:
+                    with self.store._get_connection() as conn:
+                        k_row = conn.execute(
+                            """
+                            SELECT COALESCE(SUM(p.amount_cents), 0) as total
+                            FROM postings p
+                            JOIN transactions t ON p.transaction_id = t.id
+                            WHERE p.account_id IN ('Expenses:Family:Kahram', 'Expenses:Family:Brother')
+                              AND t.date >= ? AND t.date <= ?;
+                            """,
+                            (start_date, end_date),
+                        ).fetchone()
+                        paid_tot = int(k_row["total"]) if k_row else 0
+                if paid_tot >= amt and amt > 0:
+                    status = "paid"
+                    status_text = "✅ Paid"
+                elif paid_tot > 0:
+                    status = "due"
+                    status_text = f"⏳ Rem: ${(amt - paid_tot)/100:.2f}"
+            else:
+                is_paid = self._is_bill_paid_in_month(acc, month)
+                if is_paid:
+                    status = "paid"
+                    status_text = "✅ Paid"
+
+            bills.append({
+                "key": clean_k,
+                "name": name,
+                "category": category,
+                "due_day": due_day,
+                "amount_cents": amt,
+                "status": status,
+                "status_text": status_text,
+                "account_id": acc,
+                "is_active": is_active,
+                "notes": notes,
+                "is_variable": False,
+            })
+
+        # Add PG&E variable bill if not explicitly added
+        if "pge" not in seen_keys:
+            pge_est = 7500
+            if setup_data and setup_data.get("monthly_targets"):
+                p = _parse_cents(setup_data["monthly_targets"].get("pge_estimate"))
+                if p:
+                    pge_est = p
+            pge_paid = self._is_bill_paid_in_month("Expenses:Utilities:PGE", month)
+            bills.append({
+                "key": "pge",
+                "name": "PG&E Electric & Gas",
+                "category": "Utility (Variable)",
+                "due_day": 28,
+                "amount_cents": pge_est,
+                "status": "paid" if pge_paid else "due",
+                "status_text": "✅ Paid" if pge_paid else "⏳ Due",
+                "account_id": "Expenses:Utilities:PGE",
+                "is_active": True,
+                "notes": "Estimated monthly baseline",
+                "is_variable": True,
+            })
+
+        # Add Credit Card if not explicitly added
+        if "credit_card" not in seen_keys:
+            card_bal = self.store.get_account_balance("Liabilities:CreditCard:Visa")
+            cc_status = "paid" if card_bal <= 0 else "due"
+            cc_text = "✅ $0" if card_bal <= 0 else f"⏳ Bal: ${card_bal/100:.2f}"
+            bills.append({
+                "key": "credit_card",
+                "name": "Credit Card (Visa)",
+                "category": "Card Balance",
+                "due_day": 2,
+                "amount_cents": max(0, card_bal),
+                "status": cc_status,
+                "status_text": cc_text,
+                "account_id": "Liabilities:CreditCard:Visa",
+                "is_active": True,
+                "notes": "Due on 2nd of month",
+                "is_variable": False,
+            })
+
+        # Sort bills strictly by due_day (1 to 31)
+        bills.sort(key=lambda b: (b["due_day"], b["name"]))
+
+        # Fixed Bills SUM: sum of active fixed bills (excluding variable PG&E and credit card)
+        fixed_sum_cents = sum(
+            b["amount_cents"]
+            for b in bills
+            if b["is_active"] and not b["is_variable"] and b["key"] != "credit_card"
+        )
+
+        overview = self.store.get_monthly_overview(month)
+
+        return {
+            "month": month,
+            "bills": bills,
+            "fixed_bills_total_cents": fixed_sum_cents,
+            "overview": overview,
+        }
+
