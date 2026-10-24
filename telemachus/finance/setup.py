@@ -210,6 +210,19 @@ def _resolve_account_id(key: str, store: FinanceStore) -> Optional[str]:
     return None
 
 
+def load_setup_yaml(yaml_path: Optional[Path | str] = None) -> Optional[Dict[str, Any]]:
+    """Safely loads configuration data directly from setup.yaml if available."""
+    path = Path(yaml_path).expanduser().resolve() if yaml_path else DEFAULT_SETUP_YAML_PATH
+    if not path.exists():
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    except Exception as e:
+        logger.debug(f"Failed to load setup.yaml from {path}: {e}")
+        return None
+
+
 def apply_setup_yaml(yaml_path: Optional[Path | str] = None, store: Optional[FinanceStore] = None) -> Dict[str, Any]:
     """Applies configuration from setup.yaml to SQLite store and recurring engine.
     
@@ -226,7 +239,8 @@ def apply_setup_yaml(yaml_path: Optional[Path | str] = None, store: Optional[Fin
         data = yaml.safe_load(f) or {}
 
     store = store or FinanceStore()
-    recurring = RecurringEngine(store)
+    store.setup_yaml_path = path
+    recurring = RecurringEngine(store, yaml_path=path)
 
     as_of_date = str(data.get("as_of_date") or time.strftime("%Y-%m-%d"))
     summary: Dict[str, Any] = {

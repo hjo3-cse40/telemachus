@@ -1431,12 +1431,28 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
             f"- **Bi-Weekly Paycheck**:     {_f(alloc.paycheck_amount_cents)}",
             f"- **Immediate HYSA Savings**: -{_f(alloc.savings_transfer_cents)} (Moved straight to Capital One HYSA)",
             f"- **Net Checking Inflow**:    {_f(alloc.net_checking_cents)}",
-            f"- **Bills Due in Window**:    -{_f(alloc.bills_due_cents)} ({len(alloc.bills)} bills scheduled)",
+            f"- **Bills Due in Window**:    -{_f(alloc.bills_due_cents)}",
+        ]
+
+        if alloc.bills:
+            lines.append("  **Bills Due in this 2-Week Window:**")
+            for b in alloc.bills:
+                note_str = f" ({b['note']})" if b.get("note") else ""
+                lines.append(f"  • **{b['name']}** (Due: {b['due_date']}): {_f(b['amount_cents'])}{note_str}")
+
+        if getattr(alloc, "other_bills", None):
+            lines.append("")
+            lines.append("  **Bills Outside This Window (Later Cycle):**")
+            for ob in alloc.other_bills:
+                lines.append(f"  • {ob['name']}: {_f(ob['amount_cents'])} ({ob['note']})")
+
+        lines.extend([
+            "",
             f"- **2-Week Groceries**:       -{_f(alloc.groceries_allocated_cents)}",
             f"- **2-Week Eating Out**:      -{_f(alloc.dining_allocated_cents)}",
             f"- **2-Week Car Gas**:         -{_f(alloc.gas_allocated_cents)}",
             f"- **SAFE-TO-SPEND CUSHION**:  **{_f(alloc.safe_to_spend_cents)}** (Discretionary cash for next 14 days)",
-        ]
+        ])
         return "\n".join(lines)
 
     else:

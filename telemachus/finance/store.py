@@ -69,7 +69,25 @@ class FinanceStore:
         self.root_dir = Path(root_dir).expanduser().resolve() if root_dir else get_finance_root()
         self.db_path = self.root_dir / "finances.sqlite3"
         self.lock_path = self.root_dir / ".lock"
+        self.setup_yaml_path: Optional[Path] = None
         self._init_storage()
+
+    def get_setup_yaml_path(self) -> Optional[Path]:
+        """Resolves the setup.yaml path corresponding to this store."""
+        if self.setup_yaml_path and self.setup_yaml_path.exists():
+            return self.setup_yaml_path
+        if os.environ.get("TELEMACHUS_SETUP_YAML"):
+            p = Path(os.environ["TELEMACHUS_SETUP_YAML"]).expanduser().resolve()
+            if p.exists():
+                return p
+        sibling_yaml = self.root_dir / "setup.yaml"
+        if sibling_yaml.exists():
+            return sibling_yaml
+        if self.root_dir == get_finance_root():
+            default_p = get_finance_root() / "setup.yaml"
+            if default_p.exists():
+                return default_p
+        return None
 
     def _init_storage(self) -> None:
         """Ensures the directory exists with 0700 permissions and initializes database tables."""
@@ -805,6 +823,55 @@ class FinanceStore:
 
         goals: List[GoalProgress] = []
 
+        # Read setup.yaml for live targets and baseline already_paid amounts
+        setup_data = None
+        yaml_p = self.get_setup_yaml_path()
+        if yaml_p:
+            try:
+                from telemachus.finance.setup import load_setup_yaml, _parse_cents
+                setup_data = load_setup_yaml(yaml_p)
+            except Exception:
+                pass
+
+        # 1. Savings Goal Target and Baseline
+        savings_target = overview.savings_target_cents
+        savings_baseline = 0
+        if setup_data:
+            goals_cfg = setup_data.get("goals") or {}
+            sav_cfg = goals_cfg.get("savings") or {}
+            if isinstance(sav_cfg, dict):
+                t = _parse_cents(sav_cfg.get("target"))
+                if t is not None:
+                    savings_target = t
+                b = _parse_cents(sav_cfg.get("already_saved") or sav_cfg.get("already_paid"))
+                if b is not None:
+                    savings_baseline = b
+
+        # 2. Brother / Kahram Payment Goal Target and Baseline
+        kahram_target = 10000
+        kahram_baseline = 0
+        if setup_data:
+            goals_cfg = setup_data.get("goals") or {}
+            bro_cfg = goals_cfg.get("brother") or goals_cfg.get("kahram") or {}
+            if isinstance(bro_cfg, dict):
+                t = _parse_cents(bro_cfg.get("target") or bro_cfg.get("amount"))
+                if t is not None:
+                    kahram_target = t
+                b = _parse_cents(bro_cfg.get("already_paid"))
+                if b is not None:
+                    kahram_baseline = b
+            # Fallback to fixed_bills.kahram if not in goals section
+            k_bill = (setup_data.get("fixed_bills") or {}).get("kahram") or {}
+            if isinstance(k_bill, dict):
+                if kahram_target == 10000:
+                    t = _parse_cents(k_bill.get("amount"))
+                    if t is not None:
+                        kahram_target = t
+                if kahram_baseline == 0:
+                    b = _parse_cents(k_bill.get("already_paid"))
+                    if b is not None:
+                        kahram_baseline = b
+
         with self._get_connection() as conn:
             # Savings Goal: Net transfers into Capital One Savings
             sav_row = conn.execute(
@@ -817,17 +884,17 @@ class FinanceStore:
                 """,
                 (start_date, end_date),
             ).fetchone()
-            saved_cents = max(0, int(sav_row["total"]))
+            saved_cents = max(0, savings_baseline + int(sav_row["total"]))
             goals.append(
                 GoalProgress(
-                    name="💰 Savings",
-                    target_cents=overview.savings_target_cents,
+                    name="💰 Savings Target",
+                    target_cents=savings_target,
                     saved_cents=saved_cents,
-                    status="open" if saved_cents < overview.savings_target_cents else "completed",
+                    status="completed" if saved_cents >= savings_target else "open",
                 )
             )
 
-            # Kahram Payment
+            # Kahram Payment Goal
             kahram_row = conn.execute(
                 """
                 SELECT COALESCE(SUM(p.amount_cents), 0) as total
@@ -838,16 +905,20 @@ class FinanceStore:
                 """,
                 (start_date, end_date),
             ).fetchone()
-            kahram_paid = max(0, int(kahram_row["total"]))
-            rule_row = conn.execute("SELECT base_amount_cents FROM recurring_rules WHERE id = 'rule_kahram';").fetchone()
-            kahram_target = int(rule_row["base_amount_cents"]) if rule_row else 10000
+            actual_paid = int(kahram_row["total"])
+            total_kahram_paid = max(0, kahram_baseline + actual_paid)
+
+            if kahram_target == 10000:
+                rule_row = conn.execute("SELECT base_amount_cents FROM recurring_rules WHERE id = 'rule_kahram';").fetchone()
+                if rule_row:
+                    kahram_target = int(rule_row["base_amount_cents"])
 
             goals.append(
                 GoalProgress(
-                    name="🏠 Kahram Payment",
+                    name="🏠 Brother (Kahram) Payment",
                     target_cents=kahram_target,
-                    saved_cents=kahram_paid,
-                    status="open" if kahram_paid < kahram_target else "completed",
+                    saved_cents=total_kahram_paid,
+                    status="completed" if total_kahram_paid >= kahram_target else "open",
                 )
             )
 

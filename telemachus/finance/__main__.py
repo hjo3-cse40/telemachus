@@ -347,9 +347,10 @@ def cmd_breakdown(store: FinanceStore, recurring: RecurringEngine, args: argpars
     print(f"  • Immediate HYSA Savings:     -{_f(alloc.savings_transfer_cents, 'HYSA_SAVINGS'):>12} (Moved straight to Capital One)")
     print(f"  • Net Checking Inflow:         {_f(alloc.net_checking_cents, 'NET_CHECKING'):>12}")
     print("  " + "-" * 50)
-    print(f"  • Upcoming Bills in Window:   -{_f(alloc.bills_due_cents, 'BILLS_DUE'):>12} ({len(alloc.bills)} bills scheduled)")
+    print(f"  • Upcoming Bills in Window:   -{_f(alloc.bills_due_cents, 'BILLS_DUE'):>12} ({len(alloc.bills)} bills evaluated)")
     for b in alloc.bills:
-        print(f"      - {b['due_date']}  {b['name']:<24} {_f(b['amount_cents']):>10}")
+        note_str = f" ({b['note']})" if b.get("note") else ""
+        print(f"      - {b['due_date']}  {b['name']:<28} {_f(b['amount_cents']):>10}{note_str}")
     print(f"  • 2-Week Groceries Allocation:-{_f(alloc.groceries_allocated_cents, 'GROCERIES_2W'):>12}")
     if alloc.dining_allocated_cents > 0:
         print(f"  • 2-Week Dining Out Buffer:   -{_f(alloc.dining_allocated_cents, 'DINING_2W'):>12}")

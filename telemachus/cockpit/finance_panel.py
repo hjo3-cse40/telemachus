@@ -270,3 +270,13 @@ class FinanceTuiPanel:
         elif payee and payee.lower() != cat.lower():
             return f"- {payee} - {amt_str}"
         return f"- {cat.lower()} - {amt_str}"
+
+    def get_goals_progress(self, month: Optional[str] = None) -> List[Any]:
+        """Returns visual GoalProgress objects for monthly tracking bars."""
+        return self.store.get_goals_progress(month=month)
+
+    def get_paycheck_allocation(self, as_of_date: Optional[str] = None) -> Any:
+        """Returns 14-day paycheck window allocation."""
+        from telemachus.finance.recurring import RecurringEngine
+        engine = RecurringEngine(self.store)
+        return engine.get_paycheck_allocation(as_of_date=as_of_date)

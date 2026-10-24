@@ -3,21 +3,25 @@ from __future__ import annotations
 
 import curses
 from datetime import datetime
+import json
 import os
 from pathlib import Path
 import tempfile
+import time
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from telemachus.cockpit.finance_panel import FinanceTuiPanel
+from telemachus.cockpit.telemetry import CockpitTelemetry
 from telemachus.cockpit.tui import CockpitTUI
 from telemachus.finance.import_text import (
     import_text_document,
     parse_bullet_line,
     parse_date_header,
 )
-from telemachus.finance.models import RecurringRule, RuleType
+from telemachus.finance.models import Posting, RecurringRule, RuleType, Transaction
 from telemachus.finance.recurring import RecurringEngine
+from telemachus.finance.setup import apply_setup_yaml
 from telemachus.finance.store import FinanceStore
 
 
@@ -474,6 +478,245 @@ class TestCockpitTUIFinances(unittest.TestCase):
         self.tui.delete_selected_finance()
         days_after = self.panel.get_daily_ledger()
         self.assertEqual(len(days_after[0]["items"]), 1)
+
+    def test_two_week_due_dates_across_month_boundary_with_credit_card_and_already_paid(self):
+        """Verifies 14-day window properly spans Oct 24 - Nov 06, evaluating late Oct bills, Nov 1-2 bills,
+        and querying live credit card balance and Kahram baseline already_paid."""
+        yaml_path = Path(self.temp_dir.name) / "test_setup.yaml"
+        sample_yaml = """
+as_of_date: "2026-10-24"
+starting_balances:
+  wells_fargo_checking: 1500.00
+  capital_one_savings: 5000.00
+  visa_credit_card: 45.00
+
+fixed_bills:
+  kahram:
+    amount: 150.00
+    due_day: 1
+    already_paid: 50.00
+    active: true
+  gym:
+    amount: 60.00
+    due_day: 1
+    active: true
+  wifi:
+    amount: 35.73
+    due_day: 28
+    active: true
+  pge:
+    amount: 85.00
+    due_day: 28
+    active: true
+  apple_icloud:
+    amount: 2.99
+    due_day: 11
+    active: true
+  spotify:
+    amount: 11.99
+    due_day: 20
+    active: true
+
+goals:
+  brother:
+    target: 150.00
+    already_paid: 50.00
+  savings:
+    target: 1000.00
+    already_saved: 400.00
+
+paycheck_plan:
+  paycheck_amount: 1350.00
+  savings_per_paycheck: 500.00
+  frequency: "biweekly"
+  anchor_date: "2026-10-24"
+
+monthly_targets:
+  month: "2026-10"
+  income: 2700.00
+  savings_target: 1000.00
+  groceries_planned: 300.00
+  dining_planned: 100.00
+  gas_planned: 150.00
+  pge_estimate: 85.00
+"""
+        yaml_path.write_text(sample_yaml, encoding="utf-8")
+        apply_setup_yaml(yaml_path=yaml_path, store=self.store)
+
+        # Confirm Visa liability balance is $45.00 (4500 cents)
+        cc_bal = self.store.get_account_balance("Liabilities:CreditCard:Visa")
+        self.assertEqual(cc_bal, 4500)
+
+        recurring = RecurringEngine(self.store, yaml_path=yaml_path)
+        alloc = recurring.get_paycheck_allocation(as_of_date="2026-10-24")
+
+        # Cycle is 2026-10-24 through 2026-11-06 (14 days)
+        self.assertEqual(alloc.paycheck_date, "2026-10-24")
+        self.assertEqual(alloc.next_paycheck_date, "2026-11-07")
+        self.assertEqual(alloc.days_in_cycle, 14)
+
+        # Income & Savings
+        self.assertEqual(alloc.paycheck_amount_cents, 135000)
+        self.assertEqual(alloc.savings_transfer_cents, 50000)
+        self.assertEqual(alloc.net_checking_cents, 85000)
+
+        # Variable needs: (300/2) + (100/2) + (150/2) = 150 + 50 + 75 = 275.00
+        self.assertEqual(alloc.variable_needs_cents, 27500)
+
+        # Bills Due within window:
+        # 1. WiFi (Oct 28): $35.73 -> 3573
+        # 2. PG&E (Oct 28): $85.00 -> 8500
+        # 3. Kahram / Brother (Nov 1): $150.00 - $50.00 (already_paid) = $100.00 -> 10000
+        # 4. Gym (Nov 1): $60.00 -> 6000
+        # 5. Credit Card (Nov 2): $45.00 -> 4500 (from live Visa balance)
+        # Expected total bills due: 3573 + 8500 + 10000 + 6000 + 4500 = 32573 ($325.73)
+        bill_names = [b["name"] for b in alloc.bills_due]
+        self.assertTrue(any("WiFi" in n for n in bill_names))
+        self.assertTrue(any("PG&E" in n for n in bill_names))
+        self.assertTrue(any("Brother" in n or "Kahram" in n for n in bill_names))
+        self.assertTrue(any("Gym" in n for n in bill_names))
+        self.assertTrue(any("Credit Card" in n for n in bill_names))
+
+        # Check Brother bill note mentions already paid
+        bro_bill = [b for b in alloc.bills_due if "Brother" in b["name"] or "Kahram" in b["name"]][0]
+        self.assertEqual(bro_bill["amount_cents"], 10000)
+        self.assertIn("$50.00 paid", bro_bill["notes"])
+
+        # Check Credit card bill note mentions balance
+        cc_bill = [b for b in alloc.bills_due if "Credit Card" in b["name"]][0]
+        self.assertEqual(cc_bill["amount_cents"], 4500)
+        self.assertIn("$45.00 current balance due", cc_bill["notes"])
+
+        self.assertEqual(alloc.bills_due_cents, 32573)
+
+        # Check out-of-window bills are segregated in other_bills
+        other_names = [b["name"] for b in alloc.other_bills]
+        self.assertTrue(any("iCloud" in n for n in other_names))
+        self.assertTrue(any("Spotify" in n for n in other_names))
+
+        # Safe-to-spend: 850.00 - 325.73 - 275.00 = 249.27 (24927 cents)
+        self.assertEqual(alloc.safe_to_spend_cents, 24927)
+
+    def test_goal_progress_tracker_with_already_paid(self):
+        """Verifies live ASCII progress bars for monthly Savings and Brother payment targets."""
+        yaml_path = Path(self.temp_dir.name) / "test_setup.yaml"
+        sample_yaml = """
+goals:
+  brother:
+    target: 150.00
+    already_paid: 75.00
+  savings:
+    target: 1000.00
+    already_saved: 500.00
+"""
+        yaml_path.write_text(sample_yaml, encoding="utf-8")
+        self.store.setup_yaml_path = yaml_path
+
+        goals = self.store.get_goals_progress("2026-10")
+        savings_goal = [g for g in goals if "Savings" in g.name][0]
+        brother_goal = [g for g in goals if "Brother" in g.name or "Kahram" in g.name][0]
+
+        self.assertEqual(savings_goal.target_cents, 100000)
+        self.assertEqual(savings_goal.saved_cents, 50000)
+        self.assertEqual(savings_goal.progress_pct, 50.0)
+        self.assertIn("50.0%", savings_goal.progress_bar)
+
+        self.assertEqual(brother_goal.target_cents, 15000)
+        self.assertEqual(brother_goal.saved_cents, 7500)
+        self.assertEqual(brother_goal.progress_pct, 50.0)
+        self.assertIn("50.0%", brother_goal.progress_bar)
+
+    @unittest.mock.patch("curses.color_pair", return_value=0)
+    def test_cockpit_tui_finance_view_rendering_with_cards_and_bars(self, mock_cp):
+        """Verifies Cockpit Tab [4: Finances] renders summary cards, progress bars, and allocation."""
+        yaml_path = Path(self.temp_dir.name) / "test_setup.yaml"
+        sample_yaml = """
+goals:
+  brother:
+    target: 150.00
+    already_paid: 100.00
+  savings:
+    target: 1000.00
+    already_saved: 800.00
+paycheck_plan:
+  paycheck_amount: 1350.00
+  savings_per_paycheck: 500.00
+  frequency: "biweekly"
+  anchor_date: "2026-10-24"
+"""
+        yaml_path.write_text(sample_yaml, encoding="utf-8")
+        self.store.setup_yaml_path = yaml_path
+
+        self.tui.refresh_data()
+        self.tui.current_tab = 4
+        self.mock_stdscr.reset_mock()
+        self.tui.draw_finances_view(35, 90)
+
+        addstr_calls = [c[0] for c in self.mock_stdscr.addstr.call_args_list]
+        combined_text = " ".join(str(arg) for call in addstr_calls for arg in call)
+
+        self.assertIn("BALANCES", combined_text)
+        self.assertIn("2-WEEK WINDOW", combined_text)
+        self.assertIn("Savings", combined_text)
+        self.assertIn("Brother", combined_text)
+
+    def test_telemetry_lm_studio_status_parsing(self):
+        """Verifies LM Studio live status indicators in telemetry banner."""
+        with tempfile.NamedTemporaryFile("w+", suffix=".json", delete=False) as f:
+            status_file = Path(f.name)
+
+        try:
+            telem = CockpitTelemetry()
+            # 1. Processing Prompt state
+            status_file.write_text(
+                json.dumps({
+                    "status": "processing_prompt",
+                    "model": "qwen3.5-9b",
+                    "start_time": time.time(),
+                    "tokens_produced": 0,
+                    "speed_tps": 0.0,
+                }),
+                encoding="utf-8",
+            )
+            st = telem.get_llm_status(status_path=status_file)
+            self.assertEqual(st["status"], "processing_prompt")
+            header = telem.format_single_line_header(max_width=120, status_path=status_file)
+            self.assertIn("LM Studio: Processing Prompt...", header)
+
+            # 2. Producing Tokens state
+            status_file.write_text(
+                json.dumps({
+                    "status": "producing_tokens",
+                    "model": "qwen3.5-9b",
+                    "start_time": time.time() - 2.0,
+                    "tokens_produced": 48,
+                    "speed_tps": 24.0,
+                }),
+                encoding="utf-8",
+            )
+            st2 = telem.get_llm_status(status_path=status_file)
+            self.assertEqual(st2["status"], "producing_tokens")
+            header2 = telem.format_single_line_header(max_width=120, status_path=status_file)
+            self.assertIn("Producing (48 tok · 24.0 t/s)", header2)
+
+            # 3. Idle / Ready state
+            status_file.write_text(
+                json.dumps({
+                    "status": "idle",
+                    "model": "qwen3.5-9b",
+                    "start_time": time.time(),
+                    "tokens_produced": 0,
+                    "speed_tps": 0.0,
+                }),
+                encoding="utf-8",
+            )
+            st3 = telem.get_llm_status(status_path=status_file)
+            self.assertEqual(st3["status"], "idle")
+            header3 = telem.format_single_line_header(max_width=120, status_path=status_file)
+            self.assertIn("MODEL:", header3)
+        finally:
+            if status_file.exists():
+                status_file.unlink()
 
 
 if __name__ == "__main__":

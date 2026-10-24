@@ -215,4 +215,4 @@ class TestHelperRequests(TestProxyIntake):
         self.post([{"role": "system", "content": "You are opencode, an interactive CLI tool."},
                    {"role": "user", "content": "what is 17 times 23?"}])
         self.assertNotIn("reasoning_effort", self.lm.requests[0])
-        self.assertEqual(len(self.submitted), 1)
+        self.assertTrue(self.wait_for(lambda: len(self.submitted) == 1))

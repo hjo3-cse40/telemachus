@@ -10,6 +10,7 @@ import http.server
 import json
 import logging
 import os
+from pathlib import Path
 import queue
 import socket
 import socketserver
@@ -51,6 +52,76 @@ def is_helper_request(payload: Dict[str, Any]) -> bool:
 UPSTREAM_TIMEOUT_S = 900
 
 
+class LLMStreamMonitor:
+    """Thread-safe monitor that writes live prompt processing and token generation metrics."""
+    _instance: Optional["LLMStreamMonitor"] = None
+
+    def __init__(self, status_path: Optional[Path] = None):
+        self.status_path = status_path or (Path.home() / ".memory" / "llm_status.json")
+        try:
+            self.status_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        self._lock = threading.Lock()
+        self._last_write = 0.0
+
+    @classmethod
+    def get_instance(cls) -> "LLMStreamMonitor":
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    def start_request(self, model: str = "") -> None:
+        with self._lock:
+            self._write({
+                "status": "processing_prompt",
+                "model": model,
+                "start_time": time.time(),
+                "tokens_produced": 0,
+                "speed_tps": 0.0,
+            })
+
+    def update_tokens(self, tokens_count: int, gen_start_time: float) -> None:
+        now = time.time()
+        if now - self._last_write < 0.08:
+            return
+        duration = max(0.01, now - gen_start_time)
+        speed = round(tokens_count / duration, 1)
+        with self._lock:
+            self._write({
+                "status": "producing_tokens",
+                "tokens_produced": tokens_count,
+                "speed_tps": speed,
+                "duration_sec": round(duration, 1),
+                "start_time": gen_start_time,
+            })
+            self._last_write = now
+
+    def finish_request(self, tokens_count: int, gen_start_time: float) -> None:
+        duration = max(0.01, time.time() - gen_start_time)
+        speed = round(tokens_count / duration, 1)
+        with self._lock:
+            self._write({
+                "status": "idle",
+                "last_tokens": tokens_count,
+                "last_speed_tps": speed,
+                "last_duration_sec": round(duration, 1),
+                "finished_at": time.time(),
+            })
+
+    def reset_idle(self) -> None:
+        with self._lock:
+            self._write({"status": "idle", "finished_at": time.time()})
+
+    def _write(self, data: Dict[str, Any]) -> None:
+        try:
+            tmp = self.status_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data), encoding="utf-8")
+            tmp.replace(self.status_path)
+        except Exception:
+            pass
+
+
 class IngressProxyHandler(http.server.BaseHTTPRequestHandler):
     """Handles incoming OpenAI-compatible API calls, prunes tools, and proxies upstream."""
 
@@ -82,7 +153,7 @@ class IngressProxyHandler(http.server.BaseHTTPRequestHandler):
         else:
             self._proxy_passthrough("POST")
 
-    def _stream_response(self, resp: http.client.HTTPResponse) -> None:
+    def _stream_response(self, resp: http.client.HTTPResponse, monitor: Optional[LLMStreamMonitor] = None) -> None:
         """Streams upstream response with correct HTTP/1.1 chunked framing if needed."""
         is_chunked = resp.getheader("Transfer-Encoding", "").lower() == "chunked"
         self._headers_sent = True
@@ -105,12 +176,26 @@ class IngressProxyHandler(http.server.BaseHTTPRequestHandler):
 
         self.end_headers()
 
+        gen_start_time = None
+        tokens_count = 0
+
         while True:
             # read1 returns what has arrived; read(4096) would wait for 4 KB and hold
             # back the streamed thinking and answer tokens.
             chunk = resp.read1(4096)
             if not chunk:
                 break
+
+            if monitor:
+                if gen_start_time is None:
+                    gen_start_time = time.time()
+                events = chunk.count(b"data: {")
+                if events > 0:
+                    tokens_count += events
+                elif len(chunk) > 10 and b"data:" not in chunk:
+                    tokens_count += max(1, len(chunk) // 4)
+                monitor.update_tokens(tokens_count, gen_start_time)
+
             if is_chunked:
                 self.wfile.write(f"{len(chunk):X}\r\n".encode("ascii") + chunk + b"\r\n")
             else:
@@ -120,6 +205,11 @@ class IngressProxyHandler(http.server.BaseHTTPRequestHandler):
         if is_chunked:
             self.wfile.write(b"0\r\n\r\n")
             self.wfile.flush()
+
+        if monitor and gen_start_time:
+            monitor.finish_request(tokens_count, gen_start_time)
+        elif monitor:
+            monitor.reset_idle()
 
     def _proxy_passthrough(self, method: str) -> None:
         """Pipes non-chat requests (like /v1/models or /v1/embeddings) directly upstream."""
@@ -207,6 +297,8 @@ class IngressProxyHandler(http.server.BaseHTTPRequestHandler):
         # Forward upstream
         conn = http.client.HTTPConnection(self.upstream_host, self.upstream_port, timeout=self.upstream_timeout)
         self._headers_sent = False
+        monitor = LLMStreamMonitor.get_instance()
+        monitor.start_request(model=payload.get("model", "qwen3.5"))
         try:
             headers = {k: v for k, v in self.headers.items() if k.lower() not in ("host", "content-length", "connection")}
             headers["Host"] = f"{self.upstream_host}:{self.upstream_port}"
@@ -217,7 +309,7 @@ class IngressProxyHandler(http.server.BaseHTTPRequestHandler):
 
             conn.request("POST", self.path, body=modified_body, headers=headers)
             resp = conn.getresponse()
-            self._stream_response(resp)
+            self._stream_response(resp, monitor=monitor)
 
             # Memory intake: only when this request starts a new user turn. Tool rounds of
             # the agent loop end with a tool or assistant message and are not queued.
@@ -226,6 +318,7 @@ class IngressProxyHandler(http.server.BaseHTTPRequestHandler):
             if messages and messages[-1].get("role") == "user" and not helper:
                 memory_intake_queue.submit(messages)
         except Exception as e:
+            monitor.reset_idle()
             # Loud: the client may only see a cut stream, so the log must say why.
             logger.warning(f"Upstream LM Studio error ({'during' if self._headers_sent else 'before'} the response): "
                            f"{type(e).__name__}: {e}")

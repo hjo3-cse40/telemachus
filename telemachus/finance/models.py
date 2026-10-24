@@ -461,6 +461,12 @@ class PaycheckWindowAllocation:
     variable_needs_cents: int
     safe_to_spend_cents: int
     notes: str = ""
+    other_bills: List[Dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def bills_due(self) -> List[Dict[str, Any]]:
+        """Alias for bills list for compatibility."""
+        return self.bills
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -472,6 +478,7 @@ class PaycheckWindowAllocation:
             "net_checking_cents": self.net_checking_cents,
             "bills_due_cents": self.bills_due_cents,
             "bills": self.bills,
+            "other_bills": self.other_bills,
             "groceries_allocated_cents": self.groceries_allocated_cents,
             "dining_allocated_cents": self.dining_allocated_cents,
             "gas_allocated_cents": self.gas_allocated_cents,

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 import math
+from pathlib import Path
 import time
 from typing import Any, Dict, List, Optional, Tuple
 import uuid
@@ -31,8 +32,9 @@ from telemachus.finance.store import FinanceStore
 class RecurringEngine:
     """Manages recurring bills and deterministic forward cash flow commitments."""
 
-    def __init__(self, store: FinanceStore):
+    def __init__(self, store: FinanceStore, yaml_path: Optional[Path | str] = None):
         self.store = store
+        self.yaml_path = Path(yaml_path).expanduser().resolve() if yaml_path else None
         self._seed_default_rules()
 
     def _seed_default_rules(self) -> None:
@@ -471,23 +473,71 @@ class RecurringEngine:
     # ==========================================================================
     # Paycheck Cash Flow Partitioning
     # ==========================================================================
-    def get_paycheck_allocation(self, as_of_date: Optional[str] = None) -> PaycheckWindowAllocation:
-        """Calculates deterministic cash flow partition for the current or upcoming paycheck.
+    def _is_bill_paid_in_month(self, account_id: str, month: str) -> bool:
+        """Checks if any payment transaction was logged for this account in the specified month."""
+        start_date = f"{month}-01"
+        import calendar
+        y, m = map(int, month.split("-"))
+        _, last_day = calendar.monthrange(y, m)
+        end_date = f"{month}-{last_day:02d}"
+
+        with self.store._get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) as cnt
+                FROM postings p
+                JOIN transactions t ON p.transaction_id = t.id
+                WHERE p.account_id = ? AND t.date >= ? AND t.date <= ? AND p.amount_cents > 0;
+                """,
+                (account_id, start_date, end_date),
+            ).fetchone()
+            return int(row["cnt"]) > 0 if row else False
+
+    def get_paycheck_allocation(
+        self, as_of_date: Optional[str] = None, yaml_path: Optional[Path | str] = None
+    ) -> PaycheckWindowAllocation:
+        """Calculates deterministic cash flow partition for the 2-week window starting from as_of_date.
         
-        Slices cash flow into:
+        Evaluates exact calendar due dates within the 14-day window against setup.yaml:
         1. Net Take-Home Paycheck Inflow
         2. Immediate HYSA Savings Transfer (off the top)
-        3. Bills due specifically within this paycheck window
-        4. 2-Week Variable Allowance (50% of monthly groceries & gas)
+        3. Bills due specifically within this 14-day window (full amounts, credit card balance check, already_paid deduction)
+        4. 2-Week Variable Allowance (50% of monthly groceries, dining & gas)
         5. Safe-to-Spend Discretionary Remainder
         """
         now_str = as_of_date or datetime.now().strftime("%Y-%m-%d")
         now_dt = datetime.strptime(now_str, "%Y-%m-%d")
 
-        # 1. Retrieve or derive PaycheckPlan
-        plan = self.store.get_paycheck_plan()
+        # 1. Load setup.yaml live as primary source of truth if available
+        setup_data = None
+        target_yaml = yaml_path or self.yaml_path or self.store.get_setup_yaml_path()
+        if target_yaml:
+            try:
+                from telemachus.finance.setup import load_setup_yaml, _parse_cents
+                setup_data = load_setup_yaml(target_yaml)
+            except Exception:
+                pass
+        if "_parse_cents" not in locals():
+            _parse_cents = lambda x: int(round(float(x) * 100)) if x is not None else None
+
+        # 2. Retrieve or derive PaycheckPlan
+        plan = None
+        if setup_data and setup_data.get("paycheck_plan"):
+            cfg = setup_data["paycheck_plan"]
+            amt = _parse_cents(cfg.get("paycheck_amount"))
+            sav = _parse_cents(cfg.get("savings_per_paycheck"))
+            if amt and sav is not None:
+                plan = PaycheckPlan(
+                    paycheck_amount_cents=amt,
+                    savings_per_paycheck_cents=sav,
+                    frequency=str(cfg.get("frequency", "biweekly")).lower(),
+                    anchor_date=str(cfg.get("anchor_date", now_str)),
+                )
+
         if not plan:
-            # Fall back to deriving from active monthly overview
+            plan = self.store.get_paycheck_plan()
+
+        if not plan:
             current_month = now_dt.strftime("%Y-%m")
             overview = self.store.get_monthly_overview(current_month)
             derived_income = round(overview.income_cents / 2) if overview.income_cents > 0 else 135000
@@ -496,51 +546,243 @@ class RecurringEngine:
                 paycheck_amount_cents=derived_income,
                 savings_per_paycheck_cents=derived_savings,
                 frequency="biweekly",
-                anchor_date=f"{current_month}-15",
+                anchor_date=now_str,
             )
 
-        # 2. Calculate Paycheck Window boundaries
-        if plan.frequency == "semimonthly":
-            if now_dt.day < 15:
-                paycheck_dt = now_dt.replace(day=1)
-                next_paycheck_dt = now_dt.replace(day=15)
-            else:
-                paycheck_dt = now_dt.replace(day=15)
-                # Next is 1st of next month
-                next_paycheck_dt = (now_dt.replace(day=28) + timedelta(days=4)).replace(day=1)
-        else:
-            # Bi-weekly (every 14 days)
-            try:
-                anchor_dt = datetime.strptime(plan.anchor_date, "%Y-%m-%d")
-            except Exception:
-                anchor_dt = now_dt
-            diff_days = (now_dt - anchor_dt).days
-            cycle_idx = diff_days // 14
-            paycheck_dt = anchor_dt + timedelta(days=cycle_idx * 14)
-            next_paycheck_dt = paycheck_dt + timedelta(days=14)
+        # 3. 14-Day Evaluation Window: starting from now_dt
+        days_in_cycle = 14
+        start_dt = now_dt
+        end_dt = start_dt + timedelta(days=days_in_cycle - 1)
+        paycheck_date_str = start_dt.strftime("%Y-%m-%d")
+        end_window_str = end_dt.strftime("%Y-%m-%d")
+        next_paycheck_str = (end_dt + timedelta(days=1)).strftime("%Y-%m-%d")
 
-        paycheck_date_str = paycheck_dt.strftime("%Y-%m-%d")
-        next_paycheck_str = next_paycheck_dt.strftime("%Y-%m-%d")
-        end_window_str = (next_paycheck_dt - timedelta(days=1)).strftime("%Y-%m-%d")
-        days_in_cycle = (next_paycheck_dt - paycheck_dt).days
+        # 4. Map of active bills from setup.yaml (or database fallback)
+        configured_bills = {}
+        if setup_data and setup_data.get("fixed_bills"):
+            fb = setup_data["fixed_bills"]
+            for k, v in fb.items():
+                if isinstance(v, dict) and v.get("active", True):
+                    configured_bills[k] = v
 
-        # 3. Find obligations due in this exact paycheck window [paycheck_date, next_paycheck_date - 1]
-        upcoming_all = self.get_upcoming_obligations(days_ahead=45)
-        window_bills = [
-            b for b in upcoming_all
-            if paycheck_date_str <= b["due_date"] <= end_window_str
-        ]
-        bills_due_cents = sum(b["amount_cents"] for b in window_bills)
+        # Default standard bill metadata
+        STD_BILL_ACCOUNTS = {
+            "kahram": ("Expenses:Family:Kahram", "Brother Payment (Kahram)", 1),
+            "brother": ("Expenses:Family:Kahram", "Brother Payment", 1),
+            "gym": ("Expenses:Subscriptions:Gym", "Gym Membership", 1),
+            "wifi": ("Expenses:Utilities:WiFi", "WiFi / Internet", 28),
+            "pge": ("Expenses:Utilities:PGE", "PG&E Electric & Gas", 28),
+            "apple_icloud": ("Expenses:Subscriptions:AppleCloud", "Apple iCloud", 11),
+            "spotify": ("Expenses:Subscriptions:Spotify", "Spotify", 25),
+            "rent": ("Expenses:Home:Rent", "Apartment Rent", 1),
+            "credit_card": ("Liabilities:CreditCard:Visa", "Credit Card Payment (Visa)", 2),
+        }
 
-        # 4. Allocate 2-week variable budget (Groceries, Dining, Gas from monthly overview)
-        month_str = paycheck_dt.strftime("%Y-%m")
+        # Build list of active bill specs
+        bill_specs = []
+        seen_keys = set()
+        for k, v in configured_bills.items():
+            clean_k = k.lower().replace("-", "_").replace(" ", "_")
+            seen_keys.add(clean_k)
+            acc, default_name, default_day = STD_BILL_ACCOUNTS.get(clean_k, (f"Expenses:{k.title()}", k.title(), 1))
+            due_day = int(v.get("due_day", default_day))
+            amt = _parse_cents(v.get("amount", 0.0)) or 0
+            already_paid = _parse_cents(v.get("already_paid"))
+            bill_specs.append({
+                "key": clean_k,
+                "name": v.get("name") or default_name,
+                "account_id": acc,
+                "due_day": due_day,
+                "amount_cents": amt,
+                "already_paid_cents": already_paid,
+                "is_active": bool(v.get("active", True)),
+            })
+
+        # Ensure Credit Card is evaluated
+        if "credit_card" not in seen_keys:
+            bill_specs.append({
+                "key": "credit_card",
+                "name": "Credit Card Payment (Visa)",
+                "account_id": "Liabilities:CreditCard:Visa",
+                "due_day": 2,
+                "amount_cents": 0,
+                "already_paid_cents": None,
+                "is_active": True,
+            })
+
+        # Ensure PG&E is evaluated from monthly_targets if not in fixed_bills
+        if "pge" not in seen_keys:
+            pge_est = 7500
+            if setup_data and setup_data.get("monthly_targets"):
+                pge_val = _parse_cents(setup_data["monthly_targets"].get("pge_estimate"))
+                if pge_val:
+                    pge_est = pge_val
+            bill_specs.append({
+                "key": "pge",
+                "name": "PG&E Electric & Gas",
+                "account_id": "Expenses:Utilities:PGE",
+                "due_day": 28,
+                "amount_cents": pge_est,
+                "already_paid_cents": None,
+                "is_active": True,
+            })
+
+        # 5. Smart Due-Date Evaluation across the 14 days
+        window_bills = []
+        other_bills = []
+        handled_keys_in_window = set()
+
+        for day_offset in range(days_in_cycle):
+            check_date = start_dt + timedelta(days=day_offset)
+            d_str = check_date.strftime("%Y-%m-%d")
+            m_str = check_date.strftime("%Y-%m")
+            d_day = check_date.day
+
+            for spec in bill_specs:
+                if not spec["is_active"]:
+                    continue
+                if spec["due_day"] == d_day:
+                    key = spec["key"]
+                    handled_keys_in_window.add(key)
+
+                    # A. Brother Payment (Kahram)
+                    if key in ("kahram", "brother"):
+                        target_cents = spec["amount_cents"] or 15000
+                        # Check goals section for overrides
+                        if setup_data and setup_data.get("goals"):
+                            bro_goal = (setup_data["goals"].get("brother") or setup_data["goals"].get("kahram") or {})
+                            if isinstance(bro_goal, dict):
+                                gt = _parse_cents(bro_goal.get("target"))
+                                if gt is not None:
+                                    target_cents = gt
+                                if spec["already_paid_cents"] is None:
+                                    gp = _parse_cents(bro_goal.get("already_paid"))
+                                    if gp is not None:
+                                        spec["already_paid_cents"] = gp
+
+                        # Calculate actual payments in this month
+                        with self.store._get_connection() as conn:
+                            k_row = conn.execute(
+                                """
+                                SELECT COALESCE(SUM(p.amount_cents), 0) as total
+                                FROM postings p
+                                JOIN transactions t ON p.transaction_id = t.id
+                                WHERE p.account_id IN ('Expenses:Family:Kahram', 'Expenses:Family:Brother')
+                                  AND t.date >= ? AND t.date <= ?;
+                                """,
+                                (f"{m_str}-01", f"{m_str}-31"),
+                            ).fetchone()
+                            actual_paid_month = int(k_row["total"]) if k_row else 0
+
+                        baseline = spec["already_paid_cents"] or 0
+                        total_paid = baseline + actual_paid_month
+                        rem = max(0, target_cents - total_paid)
+
+                        if rem == 0:
+                            status_str = "paid"
+                            amt_due = 0
+                            note_str = f"Already paid in full (${total_paid / 100:.2f} / ${target_cents / 100:.2f}) - No payment needed"
+                        else:
+                            status_str = "due"
+                            amt_due = rem
+                            note_str = f"${rem / 100:.2f} remaining due (${total_paid / 100:.2f} paid of ${target_cents / 100:.2f})"
+
+                        window_bills.append({
+                            "name": spec["name"],
+                            "due_date": d_str,
+                            "amount_cents": amt_due,
+                            "status": status_str,
+                            "note": note_str,
+                            "notes": note_str,
+                            "account_id": spec["account_id"],
+                        })
+
+                    # B. Credit Card Payment (Visa)
+                    elif key == "credit_card":
+                        card_bal = self.store.get_account_balance("Liabilities:CreditCard:Visa")
+                        if card_bal <= 0:
+                            status_str = "paid"
+                            amt_due = 0
+                            note_str = "Paid in full ($0.00 balance due)"
+                        else:
+                            status_str = "due"
+                            amt_due = card_bal
+                            note_str = f"${card_bal / 100:.2f} current balance due"
+
+                        window_bills.append({
+                            "name": spec["name"],
+                            "due_date": d_str,
+                            "amount_cents": amt_due,
+                            "status": status_str,
+                            "note": note_str,
+                            "notes": note_str,
+                            "account_id": spec["account_id"],
+                        })
+
+                    # C. Standard Fixed Bills (WiFi, PG&E, Gym, Rent, Subscriptions)
+                    else:
+                        is_paid = self._is_bill_paid_in_month(spec["account_id"], m_str)
+                        if is_paid:
+                            status_str = "paid"
+                            amt_due = 0
+                            note_str = "Already paid for this cycle"
+                        else:
+                            status_str = "due"
+                            amt_due = spec["amount_cents"]
+                            note_str = "Due in this window"
+
+                        window_bills.append({
+                            "name": spec["name"],
+                            "due_date": d_str,
+                            "amount_cents": amt_due,
+                            "status": status_str,
+                            "note": note_str,
+                            "notes": note_str,
+                            "account_id": spec["account_id"],
+                        })
+
+        # Collect bills outside this 14-day window for clear context
+        for spec in bill_specs:
+            if not spec["is_active"] or spec["key"] in handled_keys_in_window or spec["key"] == "credit_card":
+                continue
+            out_note = f"Due on day {spec['due_day']} (outside this 2-week window)"
+            other_bills.append({
+                "name": spec["name"],
+                "due_day": spec["due_day"],
+                "amount_cents": spec["amount_cents"],
+                "status": "outside_window",
+                "note": out_note,
+                "notes": out_note,
+            })
+
+        # 6. Calculate Totals
+        bills_due_cents = sum(b["amount_cents"] for b in window_bills if b.get("status") == "due")
+
+        # 7. Allocate 2-week variable needs (Groceries, Dining, Gas)
+        month_str = start_dt.strftime("%Y-%m")
         overview = self.store.get_monthly_overview(month_str)
-        groceries_alloc = round(overview.groceries_planned_cents / 2)
-        dining_alloc = round(overview.dining_planned_cents / 2)
-        gas_alloc = round(overview.gas_planned_cents / 2)
+        groceries_planned = overview.groceries_planned_cents
+        dining_planned = overview.dining_planned_cents
+        gas_planned = overview.gas_planned_cents
+
+        if setup_data and setup_data.get("monthly_targets"):
+            mt = setup_data["monthly_targets"]
+            g = _parse_cents(mt.get("groceries_planned"))
+            if g is not None:
+                groceries_planned = g
+            d = _parse_cents(mt.get("dining_planned"))
+            if d is not None:
+                dining_planned = d
+            f = _parse_cents(mt.get("gas_planned"))
+            if f is not None:
+                gas_planned = f
+
+        groceries_alloc = round(groceries_planned / 2)
+        dining_alloc = round(dining_planned / 2)
+        gas_alloc = round(gas_planned / 2)
         variable_needs_cents = groceries_alloc + dining_alloc + gas_alloc
 
-        # 5. Compute Net Checking and Safe-to-Spend
+        # 8. Compute Net Checking and Safe-to-Spend
         net_checking_cents = max(0, plan.paycheck_amount_cents - plan.savings_per_paycheck_cents)
         safe_to_spend_cents = max(0, net_checking_cents - bills_due_cents - variable_needs_cents)
 
@@ -553,11 +795,12 @@ class RecurringEngine:
             net_checking_cents=net_checking_cents,
             bills_due_cents=bills_due_cents,
             bills=window_bills,
+            other_bills=other_bills,
             groceries_allocated_cents=groceries_alloc,
             dining_allocated_cents=dining_alloc,
             gas_allocated_cents=gas_alloc,
             variable_needs_cents=variable_needs_cents,
             safe_to_spend_cents=safe_to_spend_cents,
-            notes=f"Paycheck cycle from {paycheck_date_str} to {end_window_str}",
+            notes=f"2-Week allocation from {paycheck_date_str} to {end_window_str}",
         )
 
