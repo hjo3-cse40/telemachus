@@ -90,6 +90,15 @@ class TestImportText(unittest.TestCase):
         self.assertEqual(parse_date_header("23 Oct"), "2026-10-23")
         self.assertEqual(parse_date_header("15th August"), "2026-08-15")
 
+        # 12/September variations strictly follow Day first, then Month -> 2026-09-12
+        self.assertEqual(parse_date_header("12/September"), "2026-09-12")
+        self.assertEqual(parse_date_header("12/Sep"), "2026-09-12")
+        self.assertEqual(parse_date_header("12/Sept"), "2026-09-12")
+        self.assertEqual(parse_date_header("12-September"), "2026-09-12")
+        self.assertEqual(parse_date_header("12/9"), "2026-09-12")
+        self.assertEqual(parse_date_header("12/09"), "2026-09-12")
+        self.assertEqual(parse_date_header("12/09/2026"), "2026-09-12")
+
     def test_import_text_document_day_month_format(self):
         temp_dir = tempfile.TemporaryDirectory()
         try:

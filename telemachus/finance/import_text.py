@@ -68,57 +68,58 @@ def parse_date_header(line: str, default_year: int = 2026) -> Optional[str]:
         if 1 <= m <= 12 and 1 <= d <= 31:
             return f"{y:04d}-{m:02d}-{d:02d}"
 
-    # 2. DD/MM/YYYY or DD-MM-YYYY or DD.MM.YYYY
-    m2 = re.match(r"^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$", clean)
-    if m2:
-        n1, n2, y = int(m2.group(1)), int(m2.group(2)), int(m2.group(3))
-        # Day/Month format preferred
+    # 2. Day/MonthName: e.g. 12/September, 12/Sep, 12-September, 12 September, 12/September/2026
+    m_dm_name = re.match(r"^(\d{1,2})(?:st|nd|rd|th)?[-/.\s]+([A-Za-z]+)(?:[-/.\s]+(\d{2,4}))?$", clean)
+    if m_dm_name:
+        d = int(m_dm_name.group(1))
+        m_name = m_dm_name.group(2).lower()
+        m = MONTH_NAMES.get(m_name)
+        if m and 1 <= d <= 31:
+            raw_y = m_dm_name.group(3)
+            if raw_y:
+                y = int(raw_y)
+                if y < 100:
+                    y += 2000
+            else:
+                y = default_year
+            return f"{y:04d}-{m:02d}-{d:02d}"
+
+    # 3. MonthName/Day: e.g. September/12, September 12, Sep 12, 2026
+    m_md_name = re.match(r"^([A-Za-z]+)[-/.\s]+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s*[-/.\s]*(\d{2,4}))?$", clean)
+    if m_md_name:
+        m_name = m_md_name.group(1).lower()
+        d = int(m_md_name.group(2))
+        m = MONTH_NAMES.get(m_name)
+        if m and 1 <= d <= 31:
+            raw_y = m_md_name.group(3)
+            if raw_y:
+                y = int(raw_y)
+                if y < 100:
+                    y += 2000
+            else:
+                y = default_year
+            return f"{y:04d}-{m:02d}-{d:02d}"
+
+    # 4. Day/Month/Year with 2-4 digit year: e.g. 12/09/2026, 12/9/26, 12-09-2026
+    m_dmy = re.match(r"^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})$", clean)
+    if m_dmy:
+        n1, n2, raw_y = int(m_dmy.group(1)), int(m_dmy.group(2)), int(m_dmy.group(3))
+        y = (2000 + raw_y) if raw_y < 100 else raw_y
+        # Strictly follow Day first, then Month: n1 = Day, n2 = Month
         if 1 <= n2 <= 12 and 1 <= n1 <= 31:
             return f"{y:04d}-{n2:02d}-{n1:02d}"
         elif 1 <= n1 <= 12 and 1 <= n2 <= 31:
             return f"{y:04d}-{n1:02d}-{n2:02d}"
 
-    # 3. DD/MM/YY (short 2-digit year)
-    m3 = re.match(r"^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2})$", clean)
-    if m3:
-        n1, n2, short_y = int(m3.group(1)), int(m3.group(2)), int(m3.group(3))
-        y = 2000 + short_y
+    # 5. Day/Month without year: e.g. 12/9, 12/09, 23/10, 15/8, 1/7
+    m_dm = re.match(r"^(\d{1,2})[-/.](\d{1,2})$", clean)
+    if m_dm:
+        n1, n2 = int(m_dm.group(1)), int(m_dm.group(2))
+        # Strictly follow Day first, then Month: n1 = Day, n2 = Month
         if 1 <= n2 <= 12 and 1 <= n1 <= 31:
-            return f"{y:04d}-{n2:02d}-{n1:02d}"
+            return f"{default_year:04d}-{n2:02d}-{n1:02d}"
         elif 1 <= n1 <= 12 and 1 <= n2 <= 31:
-            return f"{y:04d}-{n1:02d}-{n2:02d}"
-
-    # 4. Day/Month without year (e.g. 23/10, 15/8, 15/08, 1/7, 01/07)
-    m4 = re.match(r"^(\d{1,2})[-/.](\d{1,2})$", clean)
-    if m4:
-        n1, n2 = int(m4.group(1)), int(m4.group(2))
-        # Prioritize Day/Month as requested by user
-        if 1 <= n2 <= 12 and 1 <= n1 <= 31:
-            day, month = n1, n2
-            return f"{default_year:04d}-{month:02d}-{day:02d}"
-        elif 1 <= n1 <= 12 and 1 <= n2 <= 31:
-            month, day = n1, n2
-            return f"{default_year:04d}-{month:02d}-{day:02d}"
-
-    # 5. Day Month Name (e.g. 23 Oct, 23rd October 2026, 15 August)
-    m5 = re.match(r"^(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]+)(?:\s+(\d{4}))?$", clean)
-    if m5:
-        d = int(m5.group(1))
-        m_name = m5.group(2).lower()
-        y = int(m5.group(3)) if m5.group(3) else default_year
-        m = MONTH_NAMES.get(m_name)
-        if m and 1 <= d <= 31:
-            return f"{y:04d}-{m:02d}-{d:02d}"
-
-    # 6. Month Name Day (e.g. October 23, Oct 23, 2026, July 15)
-    m6 = re.match(r"^([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(\d{4}))?$", clean)
-    if m6:
-        m_name = m6.group(1).lower()
-        d = int(m6.group(2))
-        y = int(m6.group(3)) if m6.group(3) else default_year
-        m = MONTH_NAMES.get(m_name)
-        if m and 1 <= d <= 31:
-            return f"{y:04d}-{m:02d}-{d:02d}"
+            return f"{default_year:04d}-{n1:02d}-{n2:02d}"
 
     return None
 
@@ -253,8 +254,8 @@ def import_text_document(
             days_seen.add(current_date)
             continue
 
-        # Check if line has an inline date prefix before the bullet (e.g. "23/10 - groceries - 25.50" or "15/8: chipotle - 12")
-        date_pfx_m = re.match(r"^(\d{1,2}[-/.]\d{1,2}(?:[-/.]\d{2,4})?)\s*[:\-–—]\s*(.*)$", stripped)
+        # Check if line has an inline date prefix before the bullet (e.g. "12/September - groceries - 25.50" or "23/10 - coffee - 5")
+        date_pfx_m = re.match(r"^(\d{1,2}[-/.\s]+[A-Za-z0-9]+(?:[-/.\s]+\d{2,4})?)\s*[:\-–—]\s*(.*)$", stripped)
         if date_pfx_m:
             pfx_date = parse_date_header(date_pfx_m.group(1), default_year=default_year)
             if pfx_date:
