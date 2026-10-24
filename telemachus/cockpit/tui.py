@@ -404,13 +404,14 @@ class CockpitTUI:
                     pct_str = f"{goal.progress_pct:.1f}%" if not self.mask_amounts else "**%"
                     saved_str = self._fmt_money(goal.saved_cents, self.mask_amounts)
                     tgt_str = self._fmt_money(goal.target_cents, self.mask_amounts)
+                    rem_str = self._fmt_money(goal.remaining_cents, self.mask_amounts)
                     pfx = "🎯 GOALS    " if g_idx == 0 else "            "
                     bar_w = 14
                     filled = int(round((goal.progress_pct / 100.0) * bar_w))
                     filled = min(bar_w, max(0, filled))
                     bar_str = f"[{'█' * filled}{'░' * (bar_w - filled)}]"
                     status_pair = curses.color_pair(5) if goal.status == "completed" else curses.color_pair(2)
-                    goal_line = f"{pfx}{goal.name:<22} {bar_str} {pct_str:>6} ({saved_str} / {tgt_str})"
+                    goal_line = f"{pfx}{goal.name:<22} {bar_str} {pct_str:>6} ({saved_str} / {tgt_str} · Left: {rem_str})"
                     self.stdscr.addstr(gy, 2, goal_line[: max_x - 4], status_pair | curses.A_BOLD)
             else:
                 ov = self.finance_overview

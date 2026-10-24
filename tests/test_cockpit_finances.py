@@ -659,6 +659,7 @@ paycheck_plan:
         self.assertIn("2-WEEK WINDOW", combined_text)
         self.assertIn("Savings", combined_text)
         self.assertIn("Brother", combined_text)
+        self.assertIn("Left:", combined_text)
 
     def test_telemetry_lm_studio_status_parsing(self):
         """Verifies LM Studio live status indicators in telemetry banner."""
