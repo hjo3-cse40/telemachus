@@ -1142,12 +1142,14 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
                 "transactions": [t.to_dict() for t in logged],
             }, indent=2)
         else:
-            cat = arguments.get("category", "personal")
+            payee = arguments.get("payee") or "Expense"
+            amt = float(arguments.get("amount") or 0.0)
+            cat = arguments.get("category") or "personal"
             single_item = {
-                "payee": arguments.get("payee"),
-                "amount": arguments.get("amount", 0.0),
+                "payee": payee,
+                "amount": amt,
                 "category": cat,
-                "memo": arguments.get("memo", ""),
+                "memo": arguments.get("memo") or "",
                 "date": arguments.get("date"),
             }
             logged = store.log_batch_transactions([single_item])
@@ -1163,14 +1165,14 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
     elif name == "finance_monthly_overview":
         store = FinanceStore()
         month = arguments.get("month")
-        if any(k in arguments for k in ("income", "savings_target", "groceries_planned", "gas_planned", "pge", "notes")):
+        if any(arguments.get(k) is not None for k in ("income", "savings_target", "groceries_planned", "gas_planned", "pge", "notes")):
             current = store.get_monthly_overview(month)
-            inc = round(arguments.get("income", current.income_cents / 100.0) * 100)
-            sav = round(arguments.get("savings_target", current.savings_target_cents / 100.0) * 100)
-            groc_p = round(arguments.get("groceries_planned", current.groceries_planned_cents / 100.0) * 100)
-            gas_p = round(arguments.get("gas_planned", current.gas_planned_cents / 100.0) * 100)
-            pge_val = round(arguments.get("pge", current.pge_cents / 100.0) * 100)
-            notes_val = arguments.get("notes", current.notes)
+            inc = round(float(arguments["income"]) * 100) if arguments.get("income") is not None else current.income_cents
+            sav = round(float(arguments["savings_target"]) * 100) if arguments.get("savings_target") is not None else current.savings_target_cents
+            groc_p = round(float(arguments["groceries_planned"]) * 100) if arguments.get("groceries_planned") is not None else current.groceries_planned_cents
+            gas_p = round(float(arguments["gas_planned"]) * 100) if arguments.get("gas_planned") is not None else current.gas_planned_cents
+            pge_val = round(float(arguments["pge"]) * 100) if arguments.get("pge") is not None else current.pge_cents
+            notes_val = str(arguments["notes"]) if arguments.get("notes") is not None else current.notes
             overview = store.set_monthly_overview(
                 month=month or current.month,
                 income_cents=inc,
@@ -1232,7 +1234,7 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
     elif name == "finance_list_recurring":
         store = FinanceStore()
         engine = RecurringEngine(store)
-        days = int(arguments.get("days_ahead", 30))
+        days = int(arguments.get("days_ahead") or 30)
         obligations = engine.get_upcoming_obligations(days_ahead=days)
         cash_flow = engine.get_committed_cash_flow(days_ahead=days)
 
@@ -1275,7 +1277,7 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
         date = arguments.get("date")
         start_date = date or arguments.get("start_date")
         end_date = date or arguments.get("end_date")
-        limit = int(arguments.get("limit", 20))
+        limit = int(arguments.get("limit") or 20)
 
         cat_account_map = {
             "groceries": "Expenses:Food:Groceries",

@@ -361,12 +361,14 @@ def apply_setup_yaml(yaml_path: Optional[Path | str] = None, store: Optional[Fin
     }
 
     total_fixed_cents = 0
+    configured_rule_ids = set()
 
     for key, cfg in fixed_bills.items():
         if not isinstance(cfg, dict):
             continue
         rule_info = rule_map.get(key, (f"rule_{key}", f"Expenses:{key.replace('_', ' ').title()}"))
         rule_id = rule_info[0] if isinstance(rule_info, tuple) else rule_info
+        configured_rule_ids.add(rule_id)
         to_acc = rule_info[1] if isinstance(rule_info, tuple) else f"Expenses:{key.replace('_', ' ').title()}"
         due_day = int(cfg.get("due_day", 1))
         is_active = bool(cfg.get("active", True))
@@ -414,6 +416,19 @@ def apply_setup_yaml(yaml_path: Optional[Path | str] = None, store: Optional[Fin
             summary["rules_updated"] += 1
             if is_active:
                 total_fixed_cents += amount_cents
+
+    # Keep rule_pge active if pge is in fixed_bills or monthly_targets
+    if "pge" in fixed_bills or data.get("monthly_targets", {}).get("pge_estimate"):
+        configured_rule_ids.add("rule_pge")
+
+    # Deactivate any legacy rules in SQLite that are not in setup.yaml (e.g. old rule_internet)
+    with store._write_lock():
+        with store._get_connection() as conn:
+            all_db_rules = conn.execute("SELECT id FROM recurring_rules;").fetchall()
+            for r in all_db_rules:
+                if r["id"] not in configured_rule_ids:
+                    conn.execute("UPDATE recurring_rules SET is_active = 0 WHERE id = ?;", (r["id"],))
+            conn.commit()
 
     summary["fixed_bills_total_cents"] = total_fixed_cents
 

@@ -407,11 +407,145 @@ class RecurringEngine:
     # ==========================================================================
     # Obligations Watchdog & Committed Cash Flow
     # ==========================================================================
-    def get_upcoming_obligations(self, days_ahead: int = 30) -> List[Dict[str, Any]]:
-        """Returns sorted list of upcoming obligations with status and historical context."""
-        self.reconcile_with_transactions()
+    def get_upcoming_obligations(
+        self, days_ahead: int = 30, yaml_path: Optional[Path | str] = None
+    ) -> List[Dict[str, Any]]:
+        """Returns sorted list of upcoming obligations strictly within [today, today + days_ahead].
+        
+        Reads setup.yaml live as primary source of truth, matching exact due dates and amounts.
+        """
         now = datetime.now()
+        now_str = now.strftime("%Y-%m-%d")
         cutoff = (now + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
+
+        # 1. Load setup.yaml live
+        target_yaml = yaml_path or self.yaml_path or self.store.get_setup_yaml_path()
+        setup_data = None
+        if target_yaml:
+            try:
+                from telemachus.finance.setup import load_setup_yaml, _parse_cents
+                setup_data = load_setup_yaml(target_yaml)
+            except Exception:
+                pass
+        if "_parse_cents" not in locals():
+            _parse_cents = lambda x: int(round(float(x) * 100)) if x is not None else None
+
+        if setup_data and setup_data.get("fixed_bills"):
+            configured_bills = setup_data["fixed_bills"]
+            STD_BILL_METADATA = {
+                "kahram": ("Expenses:Family:Kahram", "Brother Payment", "Fixed Bill", 1),
+                "brother": ("Expenses:Family:Kahram", "Brother Payment", "Fixed Bill", 1),
+                "gym": ("Expenses:Subscriptions:Gym", "Gym Membership", "Fixed Bill", 1),
+                "apple_icloud": ("Expenses:Subscriptions:AppleCloud", "Apple iCloud", "Subscription", 11),
+                "spotify": ("Expenses:Subscriptions:Spotify", "Spotify", "Subscription", 25),
+                "wifi": ("Expenses:Utilities:WiFi", "Wi-Fi", "Fixed Bill", 28),
+                "pge": ("Expenses:Utilities:PGE", "PG&E Electric & Gas", "Utility (Variable)", 28),
+                "credit_card": ("Liabilities:CreditCard:Visa", "Credit Card (Visa)", "Card Balance", 2),
+                "rent": ("Expenses:Home:Rent", "Apartment Rent", "Fixed Bill", 1),
+            }
+
+            bill_specs = []
+            seen_keys = set()
+            for k, v in configured_bills.items():
+                if not isinstance(v, dict) or not bool(v.get("active", True)):
+                    continue
+                clean_k = k.lower().replace("-", "_").replace(" ", "_")
+                seen_keys.add(clean_k)
+                acc, def_name, def_cat, def_day = STD_BILL_METADATA.get(
+                    clean_k, (f"Expenses:{k.title()}", k.title(), "Fixed Bill", 1)
+                )
+                due_day = int(v.get("due_day", def_day))
+                amt = _parse_cents(v.get("amount", 0.0)) or 0
+                bill_specs.append({
+                    "id": f"bill_{clean_k}",
+                    "name": v.get("name") or def_name,
+                    "account_id": acc,
+                    "due_day": due_day,
+                    "amount_cents": amt,
+                    "is_active": True,
+                    "category": v.get("category") or def_cat,
+                })
+
+            if "pge" not in seen_keys:
+                pge_est = 7500
+                if setup_data.get("monthly_targets"):
+                    pval = _parse_cents(setup_data["monthly_targets"].get("pge_estimate"))
+                    if pval:
+                        pge_est = pval
+                bill_specs.append({
+                    "id": "bill_pge",
+                    "name": "PG&E Electric & Gas",
+                    "account_id": "Expenses:Utilities:PGE",
+                    "due_day": 28,
+                    "amount_cents": pge_est,
+                    "is_active": True,
+                    "category": "Utility (Variable)",
+                })
+
+            if not any(k in seen_keys for k in ("credit_card", "visa")):
+                card_bal = max(0, self.store.get_account_balance("Liabilities:CreditCard:Visa"))
+                bill_specs.append({
+                    "id": "bill_credit_card",
+                    "name": "Credit Card (Visa)",
+                    "account_id": "Liabilities:CreditCard:Visa",
+                    "due_day": 2,
+                    "amount_cents": card_bal,
+                    "is_active": True,
+                    "category": "Card Balance",
+                })
+
+            obligations = []
+            for day_offset in range(days_ahead):
+                check_date = now + timedelta(days=day_offset)
+                d_str = check_date.strftime("%Y-%m-%d")
+                m_str = check_date.strftime("%Y-%m")
+                d_day = check_date.day
+
+                for spec in bill_specs:
+                    if spec["due_day"] == d_day:
+                        if spec["id"] == "bill_credit_card":
+                            card_bal = self.store.get_account_balance("Liabilities:CreditCard:Visa")
+                            status = "paid" if card_bal <= 0 else "due"
+                            amt = max(0, card_bal)
+                        elif spec["name"] == "Brother Payment" or "brother" in spec["id"]:
+                            with self.store._get_connection() as conn:
+                                k_row = conn.execute(
+                                    """
+                                    SELECT COALESCE(SUM(p.amount_cents), 0) as total
+                                    FROM postings p
+                                    JOIN transactions t ON p.transaction_id = t.id
+                                    WHERE p.account_id IN ('Expenses:Family:Kahram', 'Expenses:Family:Brother')
+                                      AND t.date >= ? AND t.date <= ?;
+                                    """,
+                                    (f"{m_str}-01", f"{m_str}-31"),
+                                ).fetchone()
+                                paid_this_month = int(k_row["total"]) if k_row else 0
+                            amt = max(0, spec["amount_cents"] - paid_this_month)
+                            status = "paid" if amt == 0 else "due"
+                        else:
+                            is_paid = self._is_bill_paid_in_month(spec["account_id"], m_str)
+                            status = "paid" if is_paid else "due"
+                            amt = spec["amount_cents"] if not is_paid else 0
+
+                        obligations.append({
+                            "id": f"{spec['id']}_{d_str}",
+                            "rule_id": spec["id"],
+                            "name": spec["name"],
+                            "due_date": d_str,
+                            "amount_cents": amt,
+                            "hist_avg_cents": spec["amount_cents"],
+                            "status": status,
+                            "rule_type": "fixed",
+                            "is_autopay": True,
+                            "from_account": "Assets:Checking:WellsFargo",
+                            "to_account": spec["account_id"],
+                        })
+
+            obligations.sort(key=lambda x: x["due_date"])
+            return obligations
+
+        # Fallback to database rules (ensuring only future dates are returned)
+        self.reconcile_with_transactions()
         current_cycle = now.strftime("%Y-%m")
         next_cycle = (now.replace(day=28) + timedelta(days=4)).strftime("%Y-%m")
 
@@ -421,8 +555,7 @@ class RecurringEngine:
         for rule in rules:
             for cycle in [current_cycle, next_cycle]:
                 instance = self.ensure_bill_instance(rule.id, cycle)
-                if instance.due_date <= cutoff:
-                    # Calculate historical average for context
+                if now_str <= instance.due_date <= cutoff:
                     if rule.rule_type == RuleType.VARIABLE:
                         hist_cents, _ = self.compute_variable_estimate(rule.id, cycle)
                     else:

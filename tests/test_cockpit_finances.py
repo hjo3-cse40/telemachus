@@ -977,6 +977,52 @@ fixed_bills:
         self.assertEqual(cf["checking_balance_cents"], 120000)
         self.assertEqual(cf["checking_after_bills_cents"], 120000 - cf["committed_cents"])
 
+    def test_upcoming_obligations_no_past_dates_and_no_ghost_rules(self):
+        """Verifies get_upcoming_obligations strictly filters now <= due_date <= cutoff and ignores unconfigured legacy rules."""
+        yaml_path = Path(self.temp_dir.name) / "test_upcoming_yaml.yaml"
+        sample_yaml = """
+fixed_bills:
+  wifi:
+    amount: 55.74
+    due_day: 28
+  gym:
+    amount: 39.99
+    due_day: 1
+"""
+        yaml_path.write_text(sample_yaml, encoding="utf-8")
+        self.store.setup_yaml_path = yaml_path
+        apply_setup_yaml(yaml_path=yaml_path, store=self.store)
+
+        engine = RecurringEngine(self.store)
+        now_str = datetime.now().strftime("%Y-%m-%d")
+        obs = engine.get_upcoming_obligations(days_ahead=30, yaml_path=yaml_path)
+
+        # 1. No obligations before today
+        for o in obs:
+            self.assertGreaterEqual(o["due_date"], now_str)
+
+        # 2. No ghost 'Internet' rule (which was an old dummy rule on day 5)
+        names = [o["name"].lower() for o in obs]
+        self.assertNotIn("internet", names)
+
+    def test_mcp_tools_with_null_arguments(self):
+        """Verifies all finance MCP tools gracefully handle null/None arguments without crashing."""
+        from telemachus.mcp.server import handle_tool_call
+        null_calls = [
+            ("finance_monthly_overview", {"month": None, "income": None, "savings_target": None, "notes": None}),
+            ("finance_get_balance", {"as_of_date": None}),
+            ("finance_list_recurring", {"days_ahead": None}),
+            ("finance_goals_progress", {"month": None}),
+            ("finance_query_transactions", {"limit": None, "category": None, "date": None}),
+            ("finance_paycheck_plan", {"date": None}),
+            ("finance_plan_breakdown", {"date": None}),
+            ("finance_log_entry", {"payee": None, "amount": None, "category": None}),
+        ]
+        for name, args in null_calls:
+            out = handle_tool_call(name, args)
+            self.assertIsInstance(out, str)
+            self.assertTrue(len(out) > 0)
+
 
 if __name__ == "__main__":
     unittest.main()
