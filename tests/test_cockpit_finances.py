@@ -79,6 +79,57 @@ class TestImportText(unittest.TestCase):
         self.assertEqual(parse_date_header("10/23/2026"), "2026-10-23")
         self.assertIsNone(parse_date_header("just a random sentence without dates"))
 
+        # Day/Month formats
+        self.assertEqual(parse_date_header("23/10"), "2026-10-23")
+        self.assertEqual(parse_date_header("15/8"), "2026-08-15")
+        self.assertEqual(parse_date_header("15/08"), "2026-08-15")
+        self.assertEqual(parse_date_header("01/07"), "2026-07-01")
+        self.assertEqual(parse_date_header("1/7"), "2026-07-01")
+        self.assertEqual(parse_date_header("Monday 23/10"), "2026-10-23")
+        self.assertEqual(parse_date_header("## 15/08:"), "2026-08-15")
+        self.assertEqual(parse_date_header("23 Oct"), "2026-10-23")
+        self.assertEqual(parse_date_header("15th August"), "2026-08-15")
+
+    def test_import_text_document_day_month_format(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        try:
+            store = FinanceStore(root_dir=Path(temp_dir.name) / "finances")
+            doc = """
+            # Summer to Fall Finances
+            
+            15/8
+            - groceries - 40.00
+            - gas - 30.00
+            
+            23/8
+            - taqueria - 15.00
+            
+            01/09
+            payday + 1350.00
+            - rent - 0.00
+            
+            23/10
+            - dinner - 45.00
+            savings + 600.00
+            """
+            res = import_text_document(doc, store=store, default_year=2026)
+            self.assertEqual(res["total_days"], 4)
+            self.assertEqual(res["total_transactions"], 7)
+            self.assertIn("2026-08-15", res["dates"])
+            self.assertIn("2026-08-23", res["dates"])
+            self.assertIn("2026-09-01", res["dates"])
+            self.assertIn("2026-10-23", res["dates"])
+
+            # Verify sorting: dates are sorted chronologically
+            self.assertEqual(res["dates"], ["2026-08-15", "2026-08-23", "2026-09-01", "2026-10-23"])
+
+            # Test delete_all_imported_transactions
+            deleted = store.delete_all_imported_transactions()
+            self.assertEqual(deleted, 7)
+            self.assertEqual(len(store.list_transactions()), 0)
+        finally:
+            temp_dir.cleanup()
+
     def test_import_text_document(self):
         temp_dir = tempfile.TemporaryDirectory()
         try:

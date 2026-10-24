@@ -226,6 +226,8 @@ def cmd_setup(store: FinanceStore, args: argparse.Namespace) -> int:
 def cmd_import_text(store: FinanceStore, args: argparse.Namespace) -> int:
     from telemachus.finance.import_text import import_text_document
 
+    default_year = getattr(args, "year", None) or datetime.now().year
+
     if args.file:
         p = Path(args.file).expanduser().resolve()
         if not p.exists():
@@ -249,7 +251,7 @@ def cmd_import_text(store: FinanceStore, args: argparse.Namespace) -> int:
         print("📥 Reading text from stdin (paste text and press Ctrl+D when done)...")
         text = sys.stdin.read()
 
-    res = import_text_document(text, store=store)
+    res = import_text_document(text, store=store, default_year=default_year)
     print("\n✅ Successfully imported text document:")
     print(f"   • Transactions logged: {res['transactions_logged']}")
     print(f"   • Days covered:        {res['days_count']} (From {res['dates'][0] if res['dates'] else 'N/A'} to {res['dates'][-1] if res['dates'] else 'N/A'})")
@@ -260,7 +262,17 @@ def cmd_import_text(store: FinanceStore, args: argparse.Namespace) -> int:
 def cmd_clear_day(store: FinanceStore, args: argparse.Namespace) -> int:
     target_date = args.date or datetime.now().strftime("%Y-%m-%d")
     count = store.delete_day_transactions(target_date)
-    print(f"\n🗑️ Successfully deleted {count} transaction(s) for {target_date}.")
+    exporter = FinanceExporter(store)
+    exporter.export_to_beancount()
+    print(f"\n🗑️  Successfully deleted {count} transaction(s) for {target_date} (opening balances preserved).")
+    return 0
+
+
+def cmd_clear_imported(store: FinanceStore, args: argparse.Namespace) -> int:
+    count = store.delete_all_imported_transactions()
+    exporter = FinanceExporter(store)
+    exporter.export_to_beancount()
+    print(f"\n🗑️  Successfully deleted {count} transaction(s). Opening balances and setup configuration preserved.")
     return 0
 
 
@@ -430,10 +442,15 @@ def main() -> int:
     # import-text
     p_imp = subparsers.add_parser("import-text", parents=[common_parser], help="Batch import historical daily bullet notes from a text file")
     p_imp.add_argument("--file", help="Path to text document (or read from stdin)")
+    p_imp.add_argument("--year", type=int, default=datetime.now().year, help="Default year for Day/Month dates (defaults to current year)")
 
     # clear-day
     p_clear = subparsers.add_parser("clear-day", parents=[common_parser], help="Clear all transactions for a specific date")
     p_clear.add_argument("--date", help="Date to clear (defaults to today YYYY-MM-DD)")
+
+    # clear-imported / reset
+    p_clrimp = subparsers.add_parser("clear-imported", parents=[common_parser], help="Clear all imported/logged transactions, preserving setup opening balances")
+    p_reset = subparsers.add_parser("reset-transactions", parents=[common_parser], help="Alias for 'clear-imported'")
 
     # delete-tx
     p_deltx = subparsers.add_parser("delete-tx", parents=[common_parser], help="Delete a specific transaction by ID")
@@ -463,6 +480,8 @@ def main() -> int:
         return cmd_import_text(store, args)
     elif args.command == "clear-day":
         return cmd_clear_day(store, args)
+    elif args.command in ("clear-imported", "reset-transactions"):
+        return cmd_clear_imported(store, args)
     elif args.command == "delete-tx":
         return cmd_delete_tx(store, args)
     elif args.command == "deposit-savings":

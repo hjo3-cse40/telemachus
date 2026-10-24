@@ -18,18 +18,6 @@ from telemachus.finance.store import FinanceStore
 
 logger = logging.getLogger(__name__)
 
-# Regex patterns for date headers
-DATE_PATTERNS = [
-    # YYYY-MM-DD (e.g. 2026-10-23)
-    re.compile(r"^\s*#*\s*(\d{4}-\d{2}-\d{2})\b"),
-    # Month Day, Year (e.g. July 15, 2026 or Jul 15, 2026)
-    re.compile(r"^\s*#*\s*([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})\b"),
-    # Month Day without year (e.g. July 15 or Jul 15)
-    re.compile(r"^\s*#*\s*([A-Za-z]+)\s+(\d{1,2})\b"),
-    # MM/DD/YYYY (e.g. 07/15/2026)
-    re.compile(r"^\s*#*\s*(\d{1,2})/(\d{1,2})/(\d{4})\b"),
-]
-
 MONTH_NAMES = {
     "jan": 1, "january": 1,
     "feb": 2, "february": 2,
@@ -47,37 +35,90 @@ MONTH_NAMES = {
 
 
 def parse_date_header(line: str, default_year: int = 2026) -> Optional[str]:
-    """Attempts to match a date header line and returns YYYY-MM-DD or None."""
+    """Attempts to match a date header line and returns YYYY-MM-DD or None.
+    
+    Robustly supports:
+    - Day/Month format: 23/10, 15/8, 15/08, 01/07, 1/7
+    - Day/Month/Year: 23/10/2026, 15/8/26, 15-08-2026, 23.10.2026
+    - Standard ISO: 2026-10-23, 2026/10/23
+    - Day Month name: 23 Oct, 23rd October, 15 August 2026
+    - Month Day: July 15, October 23, 2026
+    - Prefixes: Day of week (Monday 23/10), markdown headers (## 15/08:), bullets, brackets
+    """
     line = line.strip()
     if not line:
         return None
 
-    # 1. YYYY-MM-DD
-    m1 = DATE_PATTERNS[0].match(line)
+    # Strip markdown headers, bullets, asterisks, brackets, quotes
+    clean = re.sub(r"^[#*•\-_–—\s\[\(]+", "", line).strip()
+    clean = re.sub(r"[:\s*\]\)]+$", "", clean).strip()
+
+    # Strip day of week prefixes: 'Monday', 'Mon', 'Monday,', 'Mon.'
+    clean = re.sub(
+        r"^(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)[.,]?\s*",
+        "",
+        clean,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    # 1. YYYY-MM-DD or YYYY/MM/DD
+    m1 = re.match(r"^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$", clean)
     if m1:
-        return m1.group(1)
+        y, m, d = int(m1.group(1)), int(m1.group(2)), int(m1.group(3))
+        if 1 <= m <= 12 and 1 <= d <= 31:
+            return f"{y:04d}-{m:02d}-{d:02d}"
 
-    # 2. Month Day, Year
-    m2 = DATE_PATTERNS[1].match(line)
+    # 2. DD/MM/YYYY or DD-MM-YYYY or DD.MM.YYYY
+    m2 = re.match(r"^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$", clean)
     if m2:
-        m_name, day, year = m2.group(1).lower(), int(m2.group(2)), int(m2.group(3))
-        m_num = MONTH_NAMES.get(m_name)
-        if m_num:
-            return f"{year:04d}-{m_num:02d}-{day:02d}"
+        n1, n2, y = int(m2.group(1)), int(m2.group(2)), int(m2.group(3))
+        # Day/Month format preferred
+        if 1 <= n2 <= 12 and 1 <= n1 <= 31:
+            return f"{y:04d}-{n2:02d}-{n1:02d}"
+        elif 1 <= n1 <= 12 and 1 <= n2 <= 31:
+            return f"{y:04d}-{n1:02d}-{n2:02d}"
 
-    # 3. Month Day (use default_year)
-    m3 = DATE_PATTERNS[2].match(line)
+    # 3. DD/MM/YY (short 2-digit year)
+    m3 = re.match(r"^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2})$", clean)
     if m3:
-        m_name, day = m3.group(1).lower(), int(m3.group(2))
-        m_num = MONTH_NAMES.get(m_name)
-        if m_num:
-            return f"{default_year:04d}-{m_num:02d}-{day:02d}"
+        n1, n2, short_y = int(m3.group(1)), int(m3.group(2)), int(m3.group(3))
+        y = 2000 + short_y
+        if 1 <= n2 <= 12 and 1 <= n1 <= 31:
+            return f"{y:04d}-{n2:02d}-{n1:02d}"
+        elif 1 <= n1 <= 12 and 1 <= n2 <= 31:
+            return f"{y:04d}-{n1:02d}-{n2:02d}"
 
-    # 4. MM/DD/YYYY
-    m4 = DATE_PATTERNS[3].match(line)
+    # 4. Day/Month without year (e.g. 23/10, 15/8, 15/08, 1/7, 01/07)
+    m4 = re.match(r"^(\d{1,2})[-/.](\d{1,2})$", clean)
     if m4:
-        m_num, day, year = int(m4.group(1)), int(m4.group(2)), int(m4.group(3))
-        return f"{year:04d}-{m_num:02d}-{day:02d}"
+        n1, n2 = int(m4.group(1)), int(m4.group(2))
+        # Prioritize Day/Month as requested by user
+        if 1 <= n2 <= 12 and 1 <= n1 <= 31:
+            day, month = n1, n2
+            return f"{default_year:04d}-{month:02d}-{day:02d}"
+        elif 1 <= n1 <= 12 and 1 <= n2 <= 31:
+            month, day = n1, n2
+            return f"{default_year:04d}-{month:02d}-{day:02d}"
+
+    # 5. Day Month Name (e.g. 23 Oct, 23rd October 2026, 15 August)
+    m5 = re.match(r"^(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]+)(?:\s+(\d{4}))?$", clean)
+    if m5:
+        d = int(m5.group(1))
+        m_name = m5.group(2).lower()
+        y = int(m5.group(3)) if m5.group(3) else default_year
+        m = MONTH_NAMES.get(m_name)
+        if m and 1 <= d <= 31:
+            return f"{y:04d}-{m:02d}-{d:02d}"
+
+    # 6. Month Name Day (e.g. October 23, Oct 23, 2026, July 15)
+    m6 = re.match(r"^([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(\d{4}))?$", clean)
+    if m6:
+        m_name = m6.group(1).lower()
+        d = int(m6.group(2))
+        y = int(m6.group(3)) if m6.group(3) else default_year
+        m = MONTH_NAMES.get(m_name)
+        if m and 1 <= d <= 31:
+            return f"{y:04d}-{m:02d}-{d:02d}"
 
     return None
 
@@ -211,6 +252,15 @@ def import_text_document(
             current_date = header_date
             days_seen.add(current_date)
             continue
+
+        # Check if line has an inline date prefix before the bullet (e.g. "23/10 - groceries - 25.50" or "15/8: chipotle - 12")
+        date_pfx_m = re.match(r"^(\d{1,2}[-/.]\d{1,2}(?:[-/.]\d{2,4})?)\s*[:\-–—]\s*(.*)$", stripped)
+        if date_pfx_m:
+            pfx_date = parse_date_header(date_pfx_m.group(1), default_year=default_year)
+            if pfx_date:
+                current_date = pfx_date
+                days_seen.add(current_date)
+                stripped = date_pfx_m.group(2).strip()
 
         # Try parsing line as bullet transaction
         item = parse_bullet_line(stripped)
