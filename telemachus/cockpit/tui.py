@@ -449,10 +449,20 @@ class CockpitTUI:
                 self.stdscr.addstr(6, right_x, header_right[:right_w], right_hdr_attr)
 
                 if right_w >= 50:
-                    tbl_hdr = f"  {'ACCOUNT':<10} {'CATEGORY':<14} {'DESCRIPTION / PAYEE':<24} {'AMOUNT':>10}"
+                    col_amt_x = right_x + right_w - 14
+                    desc_w = max(10, col_amt_x - (right_x + 28) - 1)
+
+                    self.stdscr.addstr(7, right_x + 2, f"{'ACCOUNT':<10}", curses.color_pair(2) | curses.A_BOLD)
+                    self.stdscr.addstr(7, right_x + 13, f"{'CATEGORY':<14}", curses.color_pair(2) | curses.A_BOLD)
+                    self.stdscr.addstr(7, right_x + 28, f"{'DESCRIPTION / PAYEE':<{desc_w}}"[:desc_w], curses.color_pair(2) | curses.A_BOLD)
+                    self.stdscr.addstr(7, col_amt_x, f"{'AMOUNT':>12}", curses.color_pair(2) | curses.A_BOLD)
                 else:
-                    tbl_hdr = f"  {'CATEGORY':<12} {'DESCRIPTION':<16} {'AMOUNT':>10}"
-                self.stdscr.addstr(7, right_x, tbl_hdr[:right_w], curses.color_pair(2) | curses.A_BOLD)
+                    col_amt_x = right_x + right_w - 13
+                    desc_w = max(6, col_amt_x - (right_x + 15) - 1)
+
+                    self.stdscr.addstr(7, right_x + 2, f"{'CATEGORY':<12}", curses.color_pair(2) | curses.A_BOLD)
+                    self.stdscr.addstr(7, right_x + 15, f"{'DESCRIPTION':<{desc_w}}"[:desc_w], curses.color_pair(2) | curses.A_BOLD)
+                    self.stdscr.addstr(7, col_amt_x, f"{'AMOUNT':>12}", curses.color_pair(2) | curses.A_BOLD)
 
                 items = curr["items"]
                 for i_idx, item in enumerate(items[: max(1, max_y - 10)]):
@@ -461,15 +471,15 @@ class CockpitTUI:
                         break
 
                     amt = item["amount_cents"]
-                    if item.get("is_savings"):
-                        amt_str = f"→{self._fmt_money(amt, self.mask_amounts)}"
-                        amt_pair = curses.color_pair(2)  # Purple / Magenta for savings transfers
-                    elif item.get("is_income"):
+                    if item.get("is_income"):
                         amt_str = self._fmt_money(amt, self.mask_amounts, signed=True)
-                        amt_pair = curses.color_pair(5)  # Green for inflow
+                        amt_pair = curses.color_pair(5)  # Green for inflow (+$)
+                    elif item.get("is_savings"):
+                        amt_str = self._fmt_money(-amt, self.mask_amounts, signed=True)
+                        amt_pair = curses.color_pair(2)  # Magenta for savings outflow (-$)
                     else:
-                        amt_str = self._fmt_money(amt, self.mask_amounts, signed=True)
-                        amt_pair = curses.color_pair(3)  # Red for expense
+                        amt_str = self._fmt_money(-amt, self.mask_amounts, signed=True)
+                        amt_pair = curses.color_pair(3)  # Red for expense outflow (-$)
 
                     is_item_sel = (self.finances_focus == "items" and i_idx == self.selected_item_idx)
                     row_attr = (curses.color_pair(7) | curses.A_BOLD) if is_item_sel else curses.color_pair(8)
@@ -480,17 +490,17 @@ class CockpitTUI:
                     if right_w >= 50:
                         acc_str = f"[{item['account'][:8]}]"
                         cat_str = item["category"][:13]
-                        desc_str = (item["payee"] or item["memo"] or "")[:22]
+                        desc_str = (item["payee"] or item["memo"] or "")[:desc_w]
                         self.stdscr.addstr(item_y, right_x + 2, f"{acc_str:<10}", curses.color_pair(7) if is_item_sel else curses.color_pair(6))
                         self.stdscr.addstr(item_y, right_x + 13, f"{cat_str:<14}", row_attr)
-                        self.stdscr.addstr(item_y, right_x + 28, f"{desc_str:<22}", row_attr)
-                        self.stdscr.addstr(item_y, right_x + right_w - len(amt_str) - 2, amt_str, curses.color_pair(7) | curses.A_BOLD if is_item_sel else (amt_pair | curses.A_BOLD))
+                        self.stdscr.addstr(item_y, right_x + 28, f"{desc_str:<{desc_w}}"[:desc_w], row_attr)
+                        self.stdscr.addstr(item_y, col_amt_x, f"{amt_str:>12}", curses.color_pair(7) | curses.A_BOLD if is_item_sel else (amt_pair | curses.A_BOLD))
                     else:
                         cat_str = item["category"][:11]
-                        desc_str = (item["payee"] or item["memo"] or "")[:15]
+                        desc_str = (item["payee"] or item["memo"] or "")[:desc_w]
                         self.stdscr.addstr(item_y, right_x + 2, f"{cat_str:<12}", row_attr)
-                        self.stdscr.addstr(item_y, right_x + 15, f"{desc_str:<15}", row_attr)
-                        self.stdscr.addstr(item_y, right_x + right_w - len(amt_str) - 2, amt_str, curses.color_pair(7) | curses.A_BOLD if is_item_sel else (amt_pair | curses.A_BOLD))
+                        self.stdscr.addstr(item_y, right_x + 15, f"{desc_str:<{desc_w}}"[:desc_w], row_attr)
+                        self.stdscr.addstr(item_y, col_amt_x, f"{amt_str:>12}", curses.color_pair(7) | curses.A_BOLD if is_item_sel else (amt_pair | curses.A_BOLD))
         except curses.error:
             pass
 

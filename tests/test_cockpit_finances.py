@@ -274,6 +274,33 @@ class TestCockpitTUIFinances(unittest.TestCase):
         self.assertTrue(self.mock_stdscr.addstr.called)
 
     @unittest.mock.patch("curses.color_pair", return_value=0)
+    def test_item_table_amount_signs_and_alignment(self, mock_cp):
+        # Log dinner expense, savings transfer, and payday income
+        bullets = "- dinner - 45.00\nsavings + 600.00\npayday + 1350.00"
+        self.panel.log_day_bullets("2026-10-23", bullets)
+        self.tui.refresh_data()
+        self.tui.draw_finances_view(35, 90)
+
+        # Inspect addstr calls
+        addstr_args = [call[0] for call in self.mock_stdscr.addstr.call_args_list]
+
+        # Verify expense (dinner) is formatted as -$45.00 (not +$45.00)
+        has_negative_dinner = any("-$45.00" in str(arg) for call_arg in addstr_args for arg in call_arg)
+        has_positive_dinner = any("+$45.00" in str(arg) for call_arg in addstr_args for arg in call_arg)
+        self.assertTrue(has_negative_dinner, "Expense should show negative sign: -$45.00")
+        self.assertFalse(has_positive_dinner, "Expense should NOT show positive sign")
+
+        # Verify savings transfer is formatted as -$600.00 (not arrow ->$600.00)
+        has_negative_savings = any("-$600.00" in str(arg) for call_arg in addstr_args for arg in call_arg)
+        has_arrow_savings = any("→" in str(arg) for call_arg in addstr_args for arg in call_arg)
+        self.assertTrue(has_negative_savings, "Savings should show negative sign: -$600.00")
+        self.assertFalse(has_arrow_savings, "Savings should not display arrow symbol")
+
+        # Verify income is formatted as +$1,350.00
+        has_positive_payday = any("+$1,350.00" in str(arg) for call_arg in addstr_args for arg in call_arg)
+        self.assertTrue(has_positive_payday, "Income should show positive sign: +$1,350.00")
+
+    @unittest.mock.patch("curses.color_pair", return_value=0)
     def test_draw_add_day_modal_both_stages(self, mock_cp):
         # Test stage 1: date
         self.tui.open_add_modal()
