@@ -72,6 +72,29 @@ class TestImportText(unittest.TestCase):
         self.assertEqual(item2["amount_cents"], 30000)
         self.assertEqual(item2["category"], "savings")
 
+    def test_parse_bullet_credit_card_payment(self):
+        # Format: credit card payment - 250
+        item = parse_bullet_line("credit card payment - 250")
+        self.assertIsNotNone(item)
+        self.assertEqual(item["amount_cents"], 25000)
+        self.assertEqual(item["category"], "credit_card_payment")
+        self.assertEqual(item["from_account"], "Assets:Checking:WellsFargo")
+        self.assertEqual(item["to_account"], "Liabilities:CreditCard:Visa")
+
+        # Format: - cc payment - 150
+        item2 = parse_bullet_line("- cc payment - 150")
+        self.assertIsNotNone(item2)
+        self.assertEqual(item2["amount_cents"], 15000)
+        self.assertEqual(item2["category"], "credit_card_payment")
+        self.assertEqual(item2["from_account"], "Assets:Checking:WellsFargo")
+        self.assertEqual(item2["to_account"], "Liabilities:CreditCard:Visa")
+
+        # Format: credit card 300
+        item3 = parse_bullet_line("credit card 300")
+        self.assertIsNotNone(item3)
+        self.assertEqual(item3["amount_cents"], 30000)
+        self.assertEqual(item3["category"], "credit_card_payment")
+
     def test_parse_date_headers(self):
         self.assertEqual(parse_date_header("2026-10-23"), "2026-10-23")
         self.assertEqual(parse_date_header("October 23, 2026"), "2026-10-23")
@@ -231,6 +254,40 @@ class TestFinanceTuiPanel(unittest.TestCase):
         self.assertEqual(count, 2)
         days_empty = self.panel.get_daily_ledger()
         self.assertEqual(len(days_empty), 0)
+
+    def test_all_payments_default_to_checking_and_credit_card_payment(self):
+        bullets = (
+            "- groceries - 50.00\n"
+            "- dinner - 35.00\n"
+            "- credit card payment - 200.00\n"
+            "savings + 400.00\n"
+            "payday + 1500.00"
+        )
+        self.panel.log_day_bullets("2026-10-23", bullets)
+        days = self.panel.get_daily_ledger()
+        self.assertEqual(len(days), 1)
+        day = days[0]
+        # Inflow: payday 1500
+        self.assertEqual(day["inflow_cents"], 150000)
+        # Outflow: 50 groceries + 35 dinner + 200 cc payment = 285
+        self.assertEqual(day["outflow_cents"], 28500)
+        # Savings: 400
+        self.assertEqual(day["savings_cents"], 40000)
+
+        # Verify all items show funding account as 'Checking'
+        items = day["items"]
+        for itm in items:
+            self.assertEqual(itm["account"], "Checking")
+
+        # Verify credit card payment category
+        cc_item = next(i for i in items if "Credit Card" in i["category"] or "credit card" in i["payee"].lower())
+        self.assertEqual(cc_item["amount_cents"], 20000)
+        self.assertFalse(cc_item["is_income"])
+
+        # Verify postings in store: checking balance was deducted
+        chk_bal = self.store.get_account_balance("Assets:Checking:WellsFargo")
+        # Checking: +1500 (payday) - 50 (groceries) - 35 (dinner) - 200 (cc payment) - 400 (savings) = +815
+        self.assertEqual(chk_bal, 81500)
 
 
 class TestCockpitTUIFinances(unittest.TestCase):

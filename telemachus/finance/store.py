@@ -866,33 +866,39 @@ class FinanceStore:
         today_str = default_date or datetime.now().strftime("%Y-%m-%d")
 
         CATEGORY_MAP = {
-            "groceries": ("Expenses:Food:Groceries", "Liabilities:CreditCard:Visa"),
-            "grocery": ("Expenses:Food:Groceries", "Liabilities:CreditCard:Visa"),
-            "dining": ("Expenses:Food:Dining", "Liabilities:CreditCard:Visa"),
-            "dining out": ("Expenses:Food:Dining", "Liabilities:CreditCard:Visa"),
-            "eating out": ("Expenses:Food:Dining", "Liabilities:CreditCard:Visa"),
-            "lunch": ("Expenses:Food:Dining", "Liabilities:CreditCard:Visa"),
-            "dinner": ("Expenses:Food:Dining", "Liabilities:CreditCard:Visa"),
-            "coffee": ("Expenses:Food:Dining", "Liabilities:CreditCard:Visa"),
-            "gas": ("Expenses:Transport:Gas", "Liabilities:CreditCard:Visa"),
-            "fuel": ("Expenses:Transport:Gas", "Liabilities:CreditCard:Visa"),
+            "groceries": ("Expenses:Food:Groceries", "Assets:Checking:WellsFargo"),
+            "grocery": ("Expenses:Food:Groceries", "Assets:Checking:WellsFargo"),
+            "dining": ("Expenses:Food:Dining", "Assets:Checking:WellsFargo"),
+            "dining out": ("Expenses:Food:Dining", "Assets:Checking:WellsFargo"),
+            "eating out": ("Expenses:Food:Dining", "Assets:Checking:WellsFargo"),
+            "lunch": ("Expenses:Food:Dining", "Assets:Checking:WellsFargo"),
+            "dinner": ("Expenses:Food:Dining", "Assets:Checking:WellsFargo"),
+            "coffee": ("Expenses:Food:Dining", "Assets:Checking:WellsFargo"),
+            "gas": ("Expenses:Transport:Gas", "Assets:Checking:WellsFargo"),
+            "fuel": ("Expenses:Transport:Gas", "Assets:Checking:WellsFargo"),
             "payday": ("Assets:Checking:WellsFargo", "Income:Salary"),
             "salary": ("Assets:Checking:WellsFargo", "Income:Salary"),
             "income": ("Assets:Checking:WellsFargo", "Income:Salary"),
             "kahram": ("Expenses:Family:Kahram", "Assets:Checking:WellsFargo"),
             "brother": ("Expenses:Family:Kahram", "Assets:Checking:WellsFargo"),
-            "gym": ("Expenses:Subscriptions:Gym", "Liabilities:CreditCard:Visa"),
-            "spotify": ("Expenses:Subscriptions:Spotify", "Liabilities:CreditCard:Visa"),
-            "icloud": ("Expenses:Subscriptions:AppleCloud", "Liabilities:CreditCard:Visa"),
+            "gym": ("Expenses:Subscriptions:Gym", "Assets:Checking:WellsFargo"),
+            "spotify": ("Expenses:Subscriptions:Spotify", "Assets:Checking:WellsFargo"),
+            "icloud": ("Expenses:Subscriptions:AppleCloud", "Assets:Checking:WellsFargo"),
             "wifi": ("Expenses:Utilities:WiFi", "Assets:Checking:WellsFargo"),
             "pge": ("Expenses:Utilities:PGE", "Assets:Checking:WellsFargo"),
-            "personal": ("Expenses:Personal:Discretionary", "Liabilities:CreditCard:Visa"),
+            "personal": ("Expenses:Personal:Discretionary", "Assets:Checking:WellsFargo"),
             "savings": ("Assets:Savings:CapitalOne", "Assets:Checking:WellsFargo"),
             "saving": ("Assets:Savings:CapitalOne", "Assets:Checking:WellsFargo"),
             "hysa": ("Assets:Savings:CapitalOne", "Assets:Checking:WellsFargo"),
             "capital one": ("Assets:Savings:CapitalOne", "Assets:Checking:WellsFargo"),
             "savings deposit": ("Assets:Savings:CapitalOne", "Assets:Checking:WellsFargo"),
             "savings transfer": ("Assets:Savings:CapitalOne", "Assets:Checking:WellsFargo"),
+            "credit_card_payment": ("Liabilities:CreditCard:Visa", "Assets:Checking:WellsFargo"),
+            "credit card payment": ("Liabilities:CreditCard:Visa", "Assets:Checking:WellsFargo"),
+            "credit card": ("Liabilities:CreditCard:Visa", "Assets:Checking:WellsFargo"),
+            "cc payment": ("Liabilities:CreditCard:Visa", "Assets:Checking:WellsFargo"),
+            "visa payment": ("Liabilities:CreditCard:Visa", "Assets:Checking:WellsFargo"),
+            "card payment": ("Liabilities:CreditCard:Visa", "Assets:Checking:WellsFargo"),
         }
 
         logged_txs = []
@@ -908,7 +914,7 @@ class FinanceStore:
                 target_acc, source_acc = CATEGORY_MAP[raw_cat]
             else:
                 target_acc = item.get("to_account") or "Expenses:Personal:Discretionary"
-                source_acc = item.get("from_account") or "Liabilities:CreditCard:Visa"
+                source_acc = item.get("from_account") or "Assets:Checking:WellsFargo"
 
             if item.get("from_account"):
                 source_acc = item["from_account"]

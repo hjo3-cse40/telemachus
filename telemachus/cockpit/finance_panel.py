@@ -99,7 +99,7 @@ class FinanceTuiPanel:
                 for t in txs:
                     amount_cents = 0
                     cat_name = "Personal"
-                    account_short = "Visa"
+                    account_short = "Checking"
                     is_income = False
                     is_savings_transfer = False
 
@@ -129,6 +129,8 @@ class FinanceTuiPanel:
                             is_savings_transfer = True
                         elif tgt_acc.startswith("Expenses:"):
                             cat_name = tgt_acc.split(":")[-1]
+                        elif tgt_acc.startswith("Liabilities:CreditCard") or "CreditCard" in tgt_acc or "Visa" in tgt_acc:
+                            cat_name = "Credit Card"
                         elif tgt_acc.startswith("Assets:Checking"):
                             is_income = True
                             cat_name = "Income"

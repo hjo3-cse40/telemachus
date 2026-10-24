@@ -148,6 +148,24 @@ def parse_bullet_line(line: str) -> Optional[Dict[str, Any]]:
                 "amount_cents": int(round(amount * 100)),
                 "category": "savings",
                 "account_id": "Assets:Savings:CapitalOne",
+                "to_account": "Assets:Savings:CapitalOne",
+                "from_account": "Assets:Checking:WellsFargo",
+                "memo": raw,
+            }
+
+    # Look for Credit Card payment (e.g. "credit card payment - 200", "cc payment 150", "- credit card - 500")
+    if any(k in cleaned.lower() for k in ("credit card", "cc payment", "visa payment", "card payment")):
+        num_m = re.search(r"\$?\s*([0-9]+(?:\.[0-9]{1,2})?)", cleaned)
+        if num_m:
+            amount = float(num_m.group(1))
+            desc = re.sub(r"[\+\-–—]?\s*\$?[0-9]+(?:\.[0-9]{1,2})?", "", cleaned).strip(" -:\t")
+            return {
+                "payee": desc or "Credit Card Payment",
+                "amount": amount,
+                "amount_cents": int(round(amount * 100)),
+                "category": "credit_card_payment",
+                "to_account": "Liabilities:CreditCard:Visa",
+                "from_account": "Assets:Checking:WellsFargo",
                 "memo": raw,
             }
 
@@ -203,6 +221,8 @@ def parse_bullet_line(line: str) -> Optional[Dict[str, Any]]:
         category = "icloud"
     elif any(k in cat_lower for k in ("kahram", "brother")):
         category = "kahram"
+    elif any(k in cat_lower for k in ("credit card", "credit card payment", "cc payment", "visa payment", "card payment")):
+        category = "credit_card_payment"
     else:
         category = "personal"
 
@@ -211,6 +231,7 @@ def parse_bullet_line(line: str) -> Optional[Dict[str, Any]]:
         "amount": amount,
         "amount_cents": int(round(amount * 100)),
         "category": category,
+        "from_account": "Assets:Checking:WellsFargo",
         "memo": raw,
     }
 
