@@ -79,25 +79,29 @@ class TestImportText(unittest.TestCase):
         self.assertEqual(parse_date_header("10/23/2026"), "2026-10-23")
         self.assertIsNone(parse_date_header("just a random sentence without dates"))
 
-        # Day/Month formats
-        self.assertEqual(parse_date_header("23/10"), "2026-10-23")
-        self.assertEqual(parse_date_header("15/8"), "2026-08-15")
-        self.assertEqual(parse_date_header("15/08"), "2026-08-15")
-        self.assertEqual(parse_date_header("01/07"), "2026-07-01")
-        self.assertEqual(parse_date_header("1/7"), "2026-07-01")
-        self.assertEqual(parse_date_header("Monday 23/10"), "2026-10-23")
-        self.assertEqual(parse_date_header("## 15/08:"), "2026-08-15")
+        # MM/DD formats (standard 7/30 to 10/23)
+        self.assertEqual(parse_date_header("7/30"), "2026-07-30")
+        self.assertEqual(parse_date_header("8/1"), "2026-08-01")
+        self.assertEqual(parse_date_header("08/01"), "2026-08-01")
+        self.assertEqual(parse_date_header("8/15"), "2026-08-15")
+        self.assertEqual(parse_date_header("9/12"), "2026-09-12")
+        self.assertEqual(parse_date_header("09/12"), "2026-09-12")
+        self.assertEqual(parse_date_header("10/12"), "2026-10-12")
+        self.assertEqual(parse_date_header("10/23"), "2026-10-23")
+        self.assertEqual(parse_date_header("Monday 10/23"), "2026-10-23")
+        self.assertEqual(parse_date_header("## 8/15:"), "2026-08-15")
         self.assertEqual(parse_date_header("23 Oct"), "2026-10-23")
         self.assertEqual(parse_date_header("15th August"), "2026-08-15")
 
-        # 12/September variations strictly follow Day first, then Month -> 2026-09-12
+        # 12/September variations
         self.assertEqual(parse_date_header("12/September"), "2026-09-12")
+        self.assertEqual(parse_date_header("September 12"), "2026-09-12")
+        self.assertEqual(parse_date_header("September/12"), "2026-09-12")
         self.assertEqual(parse_date_header("12/Sep"), "2026-09-12")
         self.assertEqual(parse_date_header("12/Sept"), "2026-09-12")
         self.assertEqual(parse_date_header("12-September"), "2026-09-12")
-        self.assertEqual(parse_date_header("12/9"), "2026-09-12")
-        self.assertEqual(parse_date_header("12/09"), "2026-09-12")
-        self.assertEqual(parse_date_header("12/09/2026"), "2026-09-12")
+        self.assertEqual(parse_date_header("9/12/2026"), "2026-09-12")
+        self.assertEqual(parse_date_header("7/30/2026"), "2026-07-30")
 
     def test_import_text_document_day_month_format(self):
         temp_dir = tempfile.TemporaryDirectory()
@@ -106,31 +110,31 @@ class TestImportText(unittest.TestCase):
             doc = """
             # Summer to Fall Finances
             
-            15/8
+            7/30
             - groceries - 40.00
             - gas - 30.00
             
-            23/8
+            8/15
             - taqueria - 15.00
             
-            01/09
+            9/12
             payday + 1350.00
             - rent - 0.00
             
-            23/10
+            10/23
             - dinner - 45.00
             savings + 600.00
             """
             res = import_text_document(doc, store=store, default_year=2026)
             self.assertEqual(res["total_days"], 4)
             self.assertEqual(res["total_transactions"], 7)
+            self.assertIn("2026-07-30", res["dates"])
             self.assertIn("2026-08-15", res["dates"])
-            self.assertIn("2026-08-23", res["dates"])
-            self.assertIn("2026-09-01", res["dates"])
+            self.assertIn("2026-09-12", res["dates"])
             self.assertIn("2026-10-23", res["dates"])
 
             # Verify sorting: dates are sorted chronologically
-            self.assertEqual(res["dates"], ["2026-08-15", "2026-08-23", "2026-09-01", "2026-10-23"])
+            self.assertEqual(res["dates"], ["2026-07-30", "2026-08-15", "2026-09-12", "2026-10-23"])
 
             # Test delete_all_imported_transactions
             deleted = store.delete_all_imported_transactions()

@@ -68,58 +68,50 @@ def parse_date_header(line: str, default_year: int = 2026) -> Optional[str]:
         if 1 <= m <= 12 and 1 <= d <= 31:
             return f"{y:04d}-{m:02d}-{d:02d}"
 
-    # 2. Day/MonthName: e.g. 12/September, 12/Sep, 12-September, 12 September, 12/September/2026
-    m_dm_name = re.match(r"^(\d{1,2})(?:st|nd|rd|th)?[-/.\s]+([A-Za-z]+)(?:[-/.\s]+(\d{2,4}))?$", clean)
-    if m_dm_name:
-        d = int(m_dm_name.group(1))
-        m_name = m_dm_name.group(2).lower()
+    # 2. MonthName with Day or Day with MonthName (e.g. September 12, 12/September, Sep 12, 12 Sep)
+    # Case A: MonthName first (e.g. September/12, September 12, Sep 12, 2026)
+    m_md = re.match(r"^([A-Za-z]+)[-/.\s]+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s*[-/.\s]*(\d{2,4}))?$", clean)
+    if m_md:
+        m_name = m_md.group(1).lower()
+        d = int(m_md.group(2))
         m = MONTH_NAMES.get(m_name)
         if m and 1 <= d <= 31:
-            raw_y = m_dm_name.group(3)
-            if raw_y:
-                y = int(raw_y)
-                if y < 100:
-                    y += 2000
-            else:
-                y = default_year
+            raw_y = m_md.group(3)
+            y = (int(raw_y) + 2000 if int(raw_y) < 100 else int(raw_y)) if raw_y else default_year
             return f"{y:04d}-{m:02d}-{d:02d}"
 
-    # 3. MonthName/Day: e.g. September/12, September 12, Sep 12, 2026
-    m_md_name = re.match(r"^([A-Za-z]+)[-/.\s]+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s*[-/.\s]*(\d{2,4}))?$", clean)
-    if m_md_name:
-        m_name = m_md_name.group(1).lower()
-        d = int(m_md_name.group(2))
-        m = MONTH_NAMES.get(m_name)
-        if m and 1 <= d <= 31:
-            raw_y = m_md_name.group(3)
-            if raw_y:
-                y = int(raw_y)
-                if y < 100:
-                    y += 2000
-            else:
-                y = default_year
-            return f"{y:04d}-{m:02d}-{d:02d}"
-
-    # 4. Day/Month/Year with 2-4 digit year: e.g. 12/09/2026, 12/9/26, 12-09-2026
-    m_dmy = re.match(r"^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})$", clean)
-    if m_dmy:
-        n1, n2, raw_y = int(m_dmy.group(1)), int(m_dmy.group(2)), int(m_dmy.group(3))
-        y = (2000 + raw_y) if raw_y < 100 else raw_y
-        # Strictly follow Day first, then Month: n1 = Day, n2 = Month
-        if 1 <= n2 <= 12 and 1 <= n1 <= 31:
-            return f"{y:04d}-{n2:02d}-{n1:02d}"
-        elif 1 <= n1 <= 12 and 1 <= n2 <= 31:
-            return f"{y:04d}-{n1:02d}-{n2:02d}"
-
-    # 5. Day/Month without year: e.g. 12/9, 12/09, 23/10, 15/8, 1/7
-    m_dm = re.match(r"^(\d{1,2})[-/.](\d{1,2})$", clean)
+    # Case B: Day first with MonthName (e.g. 12/September, 12 Sep, 12-September, 12th August 2026)
+    m_dm = re.match(r"^(\d{1,2})(?:st|nd|rd|th)?[-/.\s]+([A-Za-z]+)(?:[-/.\s]+(\d{2,4}))?$", clean)
     if m_dm:
-        n1, n2 = int(m_dm.group(1)), int(m_dm.group(2))
-        # Strictly follow Day first, then Month: n1 = Day, n2 = Month
-        if 1 <= n2 <= 12 and 1 <= n1 <= 31:
-            return f"{default_year:04d}-{n2:02d}-{n1:02d}"
-        elif 1 <= n1 <= 12 and 1 <= n2 <= 31:
+        d = int(m_dm.group(1))
+        m_name = m_dm.group(2).lower()
+        m = MONTH_NAMES.get(m_name)
+        if m and 1 <= d <= 31:
+            raw_y = m_dm.group(3)
+            y = (int(raw_y) + 2000 if int(raw_y) < 100 else int(raw_y)) if raw_y else default_year
+            return f"{y:04d}-{m:02d}-{d:02d}"
+
+    # 3. Numeric dates with year: e.g. 7/30/2026, 09/12/2026, 10/23/26
+    m_y = re.match(r"^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})$", clean)
+    if m_y:
+        n1, n2, raw_y = int(m_y.group(1)), int(m_y.group(2)), int(m_y.group(3))
+        y = (2000 + raw_y) if raw_y < 100 else raw_y
+        # MM/DD/YYYY format (standard for 7/30 to 10/23 range)
+        if 1 <= n1 <= 12 and 1 <= n2 <= 31:
+            return f"{y:04d}-{n1:02d}-{n2:02d}"
+        elif 1 <= n2 <= 12 and 1 <= n1 <= 31:
+            return f"{y:04d}-{n2:02d}-{n1:02d}"
+
+    # 4. Numeric Month/Day without year: e.g. 7/30, 8/1, 9/12, 10/12, 10/23
+    m_num = re.match(r"^(\d{1,2})[-/.](\d{1,2})$", clean)
+    if m_num:
+        n1, n2 = int(m_num.group(1)), int(m_num.group(2))
+        # MM/DD format: n1 is Month (7, 8, 9, 10), n2 is Day (1 to 31)
+        if 1 <= n1 <= 12 and 1 <= n2 <= 31:
             return f"{default_year:04d}-{n1:02d}-{n2:02d}"
+        elif 1 <= n2 <= 12 and 1 <= n1 <= 31:
+            # If n1 > 12, then n1 was day and n2 was month (e.g. 30/7)
+            return f"{default_year:04d}-{n2:02d}-{n1:02d}"
 
     return None
 
