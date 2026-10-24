@@ -83,7 +83,7 @@ class FinanceStore:
         sibling_yaml = self.root_dir / "setup.yaml"
         if sibling_yaml.exists():
             return sibling_yaml
-        if self.root_dir == get_finance_root():
+        if self.root_dir.resolve() == get_finance_root().resolve():
             default_p = get_finance_root() / "setup.yaml"
             if default_p.exists():
                 return default_p
@@ -691,7 +691,9 @@ class FinanceStore:
                 conn.commit()
         return self.get_monthly_overview(month)
 
-    def get_monthly_overview(self, month: Optional[str] = None) -> MonthlyOverview:
+    def get_monthly_overview(
+        self, month: Optional[str] = None, yaml_path: Optional[Path | str] = None
+    ) -> MonthlyOverview:
         """Fetches monthly overview with actuals dynamically calculated from postings."""
         if not month:
             from datetime import datetime
@@ -702,6 +704,103 @@ class FinanceStore:
         y, m = map(int, month.split("-"))
         _, last_day = calendar.monthrange(y, m)
         end_date = f"{month}-{last_day:02d}"
+
+        # 1. Load setup.yaml live as the primary source of truth for targets and bills!
+        setup_data = None
+        yaml_p = yaml_path or self.get_setup_yaml_path()
+        if yaml_p:
+            try:
+                from telemachus.finance.setup import load_setup_yaml, _parse_cents
+                setup_data = load_setup_yaml(yaml_p)
+            except Exception:
+                pass
+        if "_parse_cents" not in locals():
+            _parse_cents = lambda x: int(round(float(x) * 100)) if x is not None else None
+
+        yaml_income = None
+        yaml_savings = None
+        yaml_groceries = None
+        yaml_dining = None
+        yaml_gas = None
+        yaml_pge = None
+        yaml_fixed = None
+        yaml_notes = None
+
+        if setup_data:
+            # Check monthly_targets (e.g. monthly_targets: savings_target: 1000.00)
+            mt = setup_data.get("monthly_targets")
+            if isinstance(mt, dict):
+                # Savings target
+                if mt.get("savings_target") is not None:
+                    yaml_savings = _parse_cents(mt["savings_target"])
+                elif mt.get("savings") is not None:
+                    yaml_savings = _parse_cents(mt["savings"])
+                elif mt.get("monthly_savings") is not None:
+                    yaml_savings = _parse_cents(mt["monthly_savings"])
+
+                # Income
+                if mt.get("monthly_income") is not None:
+                    yaml_income = _parse_cents(mt["monthly_income"])
+                elif mt.get("income") is not None:
+                    yaml_income = _parse_cents(mt["income"])
+
+                # Groceries
+                if mt.get("groceries_planned") is not None:
+                    yaml_groceries = _parse_cents(mt["groceries_planned"])
+                elif mt.get("groceries") is not None:
+                    yaml_groceries = _parse_cents(mt["groceries"])
+
+                # Dining
+                if mt.get("dining_planned") is not None:
+                    yaml_dining = _parse_cents(mt["dining_planned"])
+                elif mt.get("dining") is not None:
+                    yaml_dining = _parse_cents(mt["dining"])
+
+                # Gas
+                if mt.get("gas_planned") is not None:
+                    yaml_gas = _parse_cents(mt["gas_planned"])
+                elif mt.get("gas") is not None:
+                    yaml_gas = _parse_cents(mt["gas"])
+
+                # PGE
+                if mt.get("pge_estimate") is not None:
+                    yaml_pge = _parse_cents(mt["pge_estimate"])
+                elif mt.get("pge") is not None:
+                    yaml_pge = _parse_cents(mt["pge"])
+
+                if mt.get("notes"):
+                    yaml_notes = str(mt["notes"])
+
+            # Also check top-level keys in setup.yaml
+            if yaml_savings is None:
+                if setup_data.get("savings_target") is not None:
+                    yaml_savings = _parse_cents(setup_data["savings_target"])
+                elif setup_data.get("savings") is not None:
+                    yaml_savings = _parse_cents(setup_data["savings"])
+                elif setup_data.get("goals") and isinstance(setup_data["goals"], dict):
+                    sg = setup_data["goals"].get("savings") or setup_data["goals"].get("saving") or {}
+                    if isinstance(sg, dict) and sg.get("target") is not None:
+                        yaml_savings = _parse_cents(sg["target"])
+                    elif isinstance(sg, (int, float, str)):
+                        yaml_savings = _parse_cents(sg)
+
+            if yaml_income is None:
+                if setup_data.get("monthly_income") is not None:
+                    yaml_income = _parse_cents(setup_data["monthly_income"])
+                elif setup_data.get("income") is not None:
+                    yaml_income = _parse_cents(setup_data["income"])
+
+            # Fixed bills total from fixed_bills in setup.yaml
+            fb = setup_data.get("fixed_bills")
+            if isinstance(fb, dict):
+                tot_f = 0
+                for k, v in fb.items():
+                    if isinstance(v, dict) and bool(v.get("active", True)):
+                        amt = _parse_cents(v.get("amount", 0.0))
+                        if amt:
+                            tot_f += amt
+                if tot_f > 0:
+                    yaml_fixed = tot_f
 
         with self._get_connection() as conn:
             row = conn.execute("SELECT * FROM monthly_overview WHERE month = ?;", (month,)).fetchone()
@@ -768,53 +867,70 @@ class FinanceStore:
             pge_actual = int(pge_row["total"])
 
             if row:
-                income = row["income_cents"] or actual_income
-                pge = row["pge_cents"] or pge_actual
-                dining_planned = row["dining_planned_cents"] if "dining_planned_cents" in row.keys() else 0
+                income = yaml_income if yaml_income is not None else (row["income_cents"] or actual_income)
+                savings = yaml_savings if yaml_savings is not None else row["savings_target_cents"]
+                fixed = yaml_fixed if yaml_fixed is not None else row["fixed_bills_cents"]
+                pge = yaml_pge if yaml_pge is not None else (row["pge_cents"] or pge_actual)
+                groceries_planned = yaml_groceries if yaml_groceries is not None else row["groceries_planned_cents"]
+                dining_planned = yaml_dining if yaml_dining is not None else (row["dining_planned_cents"] if "dining_planned_cents" in row.keys() else 0)
+                gas_planned = yaml_gas if yaml_gas is not None else row["gas_planned_cents"]
+                notes = yaml_notes if yaml_notes is not None else (row["notes"] or "")
+
                 return MonthlyOverview(
                     month=row["month"],
                     status=row["status"],
                     income_cents=income,
-                    savings_target_cents=row["savings_target_cents"],
-                    fixed_bills_cents=row["fixed_bills_cents"],
+                    savings_target_cents=savings,
+                    fixed_bills_cents=fixed,
                     pge_cents=pge,
-                    groceries_planned_cents=row["groceries_planned_cents"],
+                    groceries_planned_cents=groceries_planned,
                     groceries_actual_cents=groceries_actual,
                     dining_planned_cents=dining_planned,
                     dining_actual_cents=dining_actual,
-                    gas_planned_cents=row["gas_planned_cents"],
+                    gas_planned_cents=gas_planned,
                     gas_actual_cents=gas_actual,
-                    notes=row["notes"] or "",
+                    notes=notes,
                     updated_at=row["updated_at"],
                 )
             else:
+                income = yaml_income if yaml_income is not None else actual_income
+                savings = yaml_savings if yaml_savings is not None else 0
+                fixed = yaml_fixed if yaml_fixed is not None else 26071
+                pge = yaml_pge if yaml_pge is not None else pge_actual
+                groceries_planned = yaml_groceries if yaml_groceries is not None else 0
+                dining_planned = yaml_dining if yaml_dining is not None else 0
+                gas_planned = yaml_gas if yaml_gas is not None else 0
+                notes = yaml_notes if yaml_notes is not None else ""
+
                 return MonthlyOverview(
                     month=month,
                     status="open",
-                    income_cents=actual_income,
-                    savings_target_cents=0,
-                    fixed_bills_cents=26071,
-                    pge_cents=pge_actual,
-                    groceries_planned_cents=0,
+                    income_cents=income,
+                    savings_target_cents=savings,
+                    fixed_bills_cents=fixed,
+                    pge_cents=pge,
+                    groceries_planned_cents=groceries_planned,
                     groceries_actual_cents=groceries_actual,
-                    dining_planned_cents=0,
+                    dining_planned_cents=dining_planned,
                     dining_actual_cents=dining_actual,
-                    gas_planned_cents=0,
+                    gas_planned_cents=gas_planned,
                     gas_actual_cents=gas_actual,
-                    notes="",
+                    notes=notes,
                     updated_at=int(time.time()),
                 )
 
     # ==========================================================================
     # Goals Progress Tracker (Screenshot 4)
     # ==========================================================================
-    def get_goals_progress(self, month: Optional[str] = None) -> List[GoalProgress]:
+    def get_goals_progress(
+        self, month: Optional[str] = None, yaml_path: Optional[Path | str] = None
+    ) -> List[GoalProgress]:
         """Calculates progress toward monthly Savings and Kahram payment targets."""
         if not month:
             from datetime import datetime
             month = datetime.now().strftime("%Y-%m")
 
-        overview = self.get_monthly_overview(month)
+        overview = self.get_monthly_overview(month, yaml_path=yaml_path)
         start_date = f"{month}-01"
         import calendar
         y, m = map(int, month.split("-"))
@@ -825,7 +941,7 @@ class FinanceStore:
 
         # Read setup.yaml for live targets and baseline already_paid amounts
         setup_data = None
-        yaml_p = self.get_setup_yaml_path()
+        yaml_p = yaml_path or self.get_setup_yaml_path()
         if yaml_p:
             try:
                 from telemachus.finance.setup import load_setup_yaml, _parse_cents
@@ -849,7 +965,28 @@ class FinanceStore:
                             savings_baseline = val
                             break
 
-            # B. Check goals.savings
+            # B. Check monthly_targets for savings_target (as requested: "in my setup yaml, there is a monthly_targets and a savings_target")
+            mt = setup_data.get("monthly_targets") or {}
+            if isinstance(mt, dict):
+                t = _parse_cents(mt.get("savings_target") or mt.get("savings") or mt.get("monthly_savings"))
+                if t is not None:
+                    savings_target = t
+                if savings_baseline is None:
+                    b = _parse_cents(
+                        mt.get("already_saved")
+                        or mt.get("savings_saved")
+                        or mt.get("savings_actual")
+                    )
+                    if b is not None:
+                        savings_baseline = b
+
+            # C. Check top-level setup_data.get("savings_target")
+            if setup_data.get("savings_target") is not None:
+                t = _parse_cents(setup_data["savings_target"])
+                if t is not None:
+                    savings_target = t
+
+            # D. Check goals.savings
             goals_cfg = setup_data.get("goals") or {}
             sav_cfg = goals_cfg.get("savings") or goals_cfg.get("saving") or {}
             if isinstance(sav_cfg, dict):
@@ -872,11 +1009,11 @@ class FinanceStore:
                 if t is not None:
                     savings_target = t
 
-            # C. Check top-level setup_data.get("savings") or setup_data.get("savings_goal")
+            # E. Check top-level setup_data.get("savings") or setup_data.get("savings_goal")
             top_sav = setup_data.get("savings") or setup_data.get("savings_goal") or {}
             if isinstance(top_sav, dict):
                 t = _parse_cents(top_sav.get("target") or top_sav.get("amount"))
-                if t is not None and savings_target == 0:
+                if t is not None:
                     savings_target = t
                 if savings_baseline is None:
                     b = _parse_cents(
@@ -886,22 +1023,6 @@ class FinanceStore:
                         or top_sav.get("already_paid")
                         or top_sav.get("paid")
                         or top_sav.get("actual")
-                    )
-                    if b is not None:
-                        savings_baseline = b
-
-            # D. Check monthly_targets for savings_target / already_saved
-            mt = setup_data.get("monthly_targets") or {}
-            if isinstance(mt, dict):
-                if savings_target == 0:
-                    t = _parse_cents(mt.get("savings_target") or mt.get("savings"))
-                    if t is not None:
-                        savings_target = t
-                if savings_baseline is None:
-                    b = _parse_cents(
-                        mt.get("already_saved")
-                        or mt.get("savings_saved")
-                        or mt.get("savings_actual")
                     )
                     if b is not None:
                         savings_baseline = b

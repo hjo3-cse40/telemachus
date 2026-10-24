@@ -871,6 +871,40 @@ fixed_bills:
         self.assertIn("Remaining Cushion", combined_bills)
         self.assertIn("Fixed Bills", combined_bills)
 
+    def test_savings_target_read_from_monthly_targets_in_setup_yaml(self):
+        """Verifies get_monthly_overview and get_goals_progress directly read monthly_targets.savings_target."""
+        yaml_path = Path(self.temp_dir.name) / "custom_setup.yaml"
+        # User configures a custom monthly savings target of $850.00
+        sample_yaml = """
+monthly_targets:
+  monthly_income: 2800.00
+  savings_target: 850.00
+  groceries: 350.00
+  gas: 150.00
+  pge_estimate: 80.00
+
+starting_balances:
+  capitol_one_saving: 425.00
+"""
+        yaml_path.write_text(sample_yaml, encoding="utf-8")
+        self.store.setup_yaml_path = yaml_path
+
+        # 1. Verify get_monthly_overview reads savings_target = $850.00 (85000 cents)
+        overview = self.store.get_monthly_overview("2026-10", yaml_path=yaml_path)
+        self.assertEqual(overview.savings_target_cents, 85000)
+        self.assertEqual(overview.income_cents, 280000)
+        self.assertEqual(overview.groceries_planned_cents, 35000)
+        self.assertEqual(overview.gas_planned_cents, 15000)
+        self.assertEqual(overview.pge_cents, 8000)
+
+        # 2. Verify get_goals_progress reflects target_cents = $850.00
+        goals = self.store.get_goals_progress("2026-10", yaml_path=yaml_path)
+        sav_goal = next(g for g in goals if "Savings" in g.name)
+        self.assertEqual(sav_goal.target_cents, 85000)
+        self.assertEqual(sav_goal.saved_cents, 42500)
+        self.assertEqual(sav_goal.progress_pct, 50.0)
+        self.assertEqual(sav_goal.remaining_cents, 42500)
+
 
 if __name__ == "__main__":
     unittest.main()

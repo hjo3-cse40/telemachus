@@ -979,7 +979,7 @@ class RecurringEngine:
             if b["is_active"] and not b["is_variable"] and b["key"] != "credit_card"
         )
 
-        overview = self.store.get_monthly_overview(month)
+        overview = self.store.get_monthly_overview(month, yaml_path=target_yaml)
 
         return {
             "month": month,
