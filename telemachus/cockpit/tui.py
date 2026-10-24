@@ -105,6 +105,23 @@ class CockpitTUI:
             curses.init_pair(7, curses.COLOR_BLACK, curses.COLOR_CYAN) # Inverted Cyan (Selection)
             curses.init_pair(8, curses.COLOR_WHITE, -1)    # Muted White / Body
             curses.init_pair(9, curses.COLOR_BLACK, curses.COLOR_MAGENTA) # Inverted Purple
+            curses.init_pair(10, curses.COLOR_BLACK, curses.COLOR_WHITE)  # Inverted White / Modal Card
+            curses.init_pair(11, curses.COLOR_YELLOW, -1)  # Amber / Warning / Due Soon
+
+    def _draw_line_padded(self, y: int, x: int, width: int, text: str, attr: int = 0) -> None:
+        """Writes text clamped to width, padding trailing space to eliminate ghosting."""
+        if width <= 0 or y < 0:
+            return
+        try:
+            max_y, max_x = self.stdscr.getmaxyx()
+            if y >= max_y:
+                return
+            # Ensure we never write into the final terminal column to prevent curses auto-wrap
+            safe_w = min(width, max(1, max_x - x - 1))
+            padded = f"{text:<{safe_w}}"[:safe_w]
+            self.stdscr.addstr(y, x, padded, attr)
+        except curses.error:
+            pass
 
     def refresh_data(self) -> None:
         """Reloads latest state from SQLite, memory vault, and system."""
@@ -158,12 +175,7 @@ class CockpitTUI:
         else:
             color_attr = curses.color_pair(1) | curses.A_BOLD
 
-        try:
-            self.stdscr.attron(color_attr)
-            self.stdscr.addstr(0, 1, header[: max_x - 2])
-            self.stdscr.attroff(color_attr)
-        except curses.error:
-            pass
+        self._draw_line_padded(0, 0, max_x - 1, " " + header, color_attr)
 
     def draw_tabs(self, max_x: int) -> None:
         tab1_attr = curses.color_pair(7) | curses.A_BOLD if self.current_tab == 1 else curses.color_pair(1)
@@ -172,6 +184,8 @@ class CockpitTUI:
         tab4_attr = curses.color_pair(7) | curses.A_BOLD if self.current_tab == 4 else curses.color_pair(1)
 
         try:
+            # Wipe line 1 completely across max_x to prevent any leftover text from bleeding
+            self.stdscr.addstr(1, 0, " " * max(1, max_x - 1), curses.color_pair(8))
             self.stdscr.addstr(1, 1, "[1: Daily Ops]", tab1_attr)
             self.stdscr.addstr(1, 17, "[2: Memory Vault]", tab2_attr)
             self.stdscr.addstr(1, 36, "[3: Safety Guard]", tab3_attr)
@@ -342,7 +356,7 @@ class CockpitTUI:
 
     def draw_finances_view(self, max_y: int, max_x: int) -> None:
         try:
-            # 1. Top Balances Banner (Checking, HYSA Savings, Outstanding Visa, Net Worth)
+            # 1. Top Balances Deck (Checking, HYSA Savings, Outstanding Visa, Net Worth)
             acc_bals = self.finance_balances.get("account_balances", {})
             chk_cents = acc_bals.get("Assets:Checking:WellsFargo")
             if chk_cents is None:
@@ -357,7 +371,9 @@ class CockpitTUI:
                 visa_cents = next((v for k, v in acc_bals.items() if "visa" in k.lower() or "credit" in k.lower() or "card" in k.lower()), 0)
 
             nw_cents = self.finance_balances.get("net_worth_cents", 0)
-            chk_post_cents = chk_cents - (self.finance_paycheck.bills_due_cents if self.finance_paycheck else 0)
+            pc = self.finance_paycheck
+            bills_due_cents = pc.bills_due_cents if pc else 0
+            chk_post_cents = chk_cents - bills_due_cents
 
             chk_str = self._fmt_money(chk_cents, self.mask_amounts)
             chk_post_str = self._fmt_money(chk_post_cents, self.mask_amounts)
@@ -365,45 +381,49 @@ class CockpitTUI:
             visa_str = self._fmt_money(visa_cents, self.mask_amounts)
             nw_str = self._fmt_money(nw_cents, self.mask_amounts)
 
-            bals_line = f"💰 CASH POSITION: Checking: {chk_str} │ After Bills: {chk_post_str} │ Visa: {visa_str} │ Net Worth: {nw_str}"
+            # Row 2: Balance Sheet (Checking, HYSA, Visa, Net Worth)
             if max_x >= 90:
-                self.stdscr.addstr(2, 2, "💰 CASH POSITION ", curses.color_pair(1) | curses.A_BOLD)
-                self.stdscr.addstr(2, 19, "Checking: ", curses.color_pair(8))
-                self.stdscr.addstr(2, 29, f"{chk_str}  ", curses.color_pair(5) | curses.A_BOLD)
-                p_x = 31 + len(chk_str)
-                self.stdscr.addstr(2, p_x, "│ After Bills: ", curses.color_pair(8))
-                self.stdscr.addstr(2, p_x + 15, f"{chk_post_str}  ", curses.color_pair(5) | curses.A_BOLD)
-                v_x = p_x + 17 + len(chk_post_str)
-                self.stdscr.addstr(2, v_x, "│ Visa: ", curses.color_pair(8))
-                vis_pair = curses.color_pair(4) if visa_cents > 0 else curses.color_pair(5)
-                self.stdscr.addstr(2, v_x + 8, f"{visa_str}  ", vis_pair | curses.A_BOLD)
-                nw_x = v_x + 10 + len(visa_str)
-                self.stdscr.addstr(2, nw_x, "│ Net Worth: ", curses.color_pair(8))
-                self.stdscr.addstr(2, nw_x + 13, f"{nw_str}", curses.color_pair(5) | curses.A_BOLD)
+                vis_label = "Visa: "
+                vis_pair = curses.color_pair(5) if visa_cents <= 0 else curses.color_pair(4)
+                line_bal = (
+                    f" 🏛️ BALANCES   Checking: {chk_str}  │  HYSA: {sav_str}  │  "
+                    f"{vis_label}{visa_str}  │  Net Worth: {nw_str}"
+                )
             else:
-                self.stdscr.addstr(2, 2, bals_line[: max_x - 4], curses.color_pair(1) | curses.A_BOLD)
+                line_bal = f" 💰 BALANCES: Chk: {chk_str} │ HYSA: {sav_str} │ Visa: {visa_str} │ NW: {nw_str}"
+            self._draw_line_padded(2, 1, max_x - 2, line_bal, curses.color_pair(1) | curses.A_BOLD)
 
-            # 2. 2-Week Paycheck Allocation Card (Line 3)
-            pc = self.finance_paycheck
+            # Row 3: 2-Week Window & Paycheck Runway (Zero duplicate checking balance)
             if pc:
                 safe_spend_cents = pc.safe_to_spend_cents
                 burn_cents = safe_spend_cents // max(1, pc.days_in_cycle)
                 safe_str = self._fmt_money(safe_spend_cents, self.mask_amounts)
                 burn_str = self._fmt_money(burn_cents, self.mask_amounts)
-                bills_str = self._fmt_money(pc.bills_due_cents, self.mask_amounts)
-                pay_str = self._fmt_money(pc.paycheck_amount_cents, self.mask_amounts)
-                sav_xfer_str = self._fmt_money(pc.savings_transfer_cents, self.mask_amounts)
+                bills_str = self._fmt_money(bills_due_cents, self.mask_amounts)
                 w_start = pc.paycheck_date[5:] if len(pc.paycheck_date) >= 10 else pc.paycheck_date
-                w_end = pc.next_paycheck_date[5:] if len(pc.next_paycheck_date) >= 10 else pc.next_paycheck_date
+                w_end = pc.next_paycheck_date
+
+                # Compute days until next check
+                try:
+                    dt_next = datetime.strptime(w_end, "%Y-%m-%d")
+                    dt_now = datetime.now()
+                    days_left = max(0, (dt_next.date() - dt_now.date()).days)
+                    days_label = f"in {days_left}d" if days_left > 0 else "TODAY"
+                except Exception:
+                    days_label = "active"
+
+                cushion_pair_flag = "🛡️" if chk_post_cents >= 30000 else ("⚠️" if chk_post_cents >= 0 else "🚨")
                 line_2w = (
-                    f"💵 2-WEEK WINDOW ({w_start} ➔ {w_end}) │ Checking: {chk_str} ➔ After Bills: {chk_post_str} │ "
-                    f"Bills Due: -{bills_str} │ 🛡️ SAFE-TO-SPEND: {safe_str} ({burn_str}/d)"
+                    f" 💵 2-WEEK WINDOW (Next Paycheck: {w_end} · {days_label}) │ "
+                    f"Bills Due: -{bills_str} │ Cushion: {chk_post_str} │ {cushion_pair_flag} Safe-to-Spend: {safe_str} ({burn_str}/d)"
                 )
             else:
-                line_2w = "💵 2-WEEK WINDOW │ 14-day allocation active"
-            self.stdscr.addstr(3, 2, line_2w[: max_x - 4], curses.color_pair(4) | curses.A_BOLD)
+                line_2w = " 💵 2-WEEK WINDOW │ 14-day allocation active"
+            
+            cush_attr = curses.color_pair(5) if chk_post_cents >= 0 else curses.color_pair(3)
+            self._draw_line_padded(3, 1, max_x - 2, line_2w, curses.color_pair(4) | curses.A_BOLD)
 
-            # 3. Monthly Goal Progress Bars (Lines 4 & 5)
+            # Rows 4 & 5: Milestone Goal Progress Gauges (Unclipped, dynamically sized)
             goals = getattr(self, "finance_goals", []) or []
             if goals:
                 for g_idx, goal in enumerate(goals[:2]):
@@ -412,28 +432,33 @@ class CockpitTUI:
                     saved_str = self._fmt_money(goal.saved_cents, self.mask_amounts)
                     tgt_str = self._fmt_money(goal.target_cents, self.mask_amounts)
                     rem_str = self._fmt_money(goal.remaining_cents, self.mask_amounts)
-                    pfx = "🎯 GOALS    " if g_idx == 0 else "            "
-                    bar_w = 14
+                    pfx = " 🎯 GOALS   " if g_idx == 0 else "            "
+                    
+                    # Dynamically calculate name and bar width to prevent any overflow/wrap
+                    name_w = min(18, max(12, max_x - 76))
+                    bar_w = min(10, max(4, max_x - 78))
                     filled = int(round((goal.progress_pct / 100.0) * bar_w))
                     filled = min(bar_w, max(0, filled))
                     bar_str = f"[{'█' * filled}{'░' * (bar_w - filled)}]"
                     status_pair = curses.color_pair(5) if goal.status == "completed" else curses.color_pair(2)
-                    goal_line = f"{pfx}{goal.name:<22} {bar_str} {pct_str:>6} ({saved_str} / {tgt_str} · Left: {rem_str})"
-                    self.stdscr.addstr(gy, 2, goal_line[: max_x - 4], status_pair | curses.A_BOLD)
+                    goal_line = f"{pfx}{goal.name[:name_w]:<{name_w}} {bar_str} {pct_str:>5} ({saved_str} / {tgt_str} · Left: {rem_str})"
+                    self._draw_line_padded(gy, 1, max_x - 2, goal_line, status_pair | curses.A_BOLD)
             else:
                 ov = self.finance_overview
                 sav_goal = ov.savings_target_cents if ov else 0
                 sav_goal_str = self._fmt_money(sav_goal, self.mask_amounts)
                 cushion_cents = ov.remaining_cushion_cents if ov else 0
                 cushion_str = self._fmt_money(cushion_cents, self.mask_amounts)
-                self.stdscr.addstr(4, 2, f"🎯 TARGETS:   Savings Goal: {sav_goal_str}/mo │ Cushion Left: {cushion_str}"[:max_x - 4], curses.color_pair(2) | curses.A_BOLD)
-                cf = getattr(self, "finance_cashflow", None)
+                self._draw_line_padded(4, 1, max_x - 2, f" 🎯 TARGETS:   Savings Goal: {sav_goal_str}/mo │ Cushion Left: {cushion_str}", curses.color_pair(2) | curses.A_BOLD)
                 month_label = ov.month if ov else datetime.now().strftime("%Y-%m")
-                cf_line = f"📊 CASH FLOW ({month_label}): Inflow active"
-                self.stdscr.addstr(5, 2, cf_line[:max_x - 4], curses.color_pair(4) | curses.A_BOLD)
+                self._draw_line_padded(5, 1, max_x - 2, f" 📊 CASH FLOW ({month_label}): Inflow active", curses.color_pair(4) | curses.A_BOLD)
 
-            # Horizontal Separator at Line 6
-            self.stdscr.addstr(6, 1, "─" * max(1, max_x - 2), curses.color_pair(8))
+            # Row 6: Interactive Mode Switcher Divider
+            mode_a_badge = "[1: Daily Ledger (ACTIVE)]" if getattr(self, "finances_view_mode", "daily") == "daily" else "1: Daily Ledger"
+            mode_b_badge = "[2: Recurring Bills & Budget (ACTIVE)]" if getattr(self, "finances_view_mode", "daily") == "bills" else "2: Recurring Bills & Budget"
+            div_left = f"── [v] View: {mode_a_badge}  {mode_b_badge} "
+            divider_line = div_left + "─" * max(0, (max_x - 2) - len(div_left))
+            self._draw_line_padded(6, 1, max_x - 2, divider_line, curses.color_pair(8))
 
             # 4. View Switcher Mode: Bills View vs Daily Ledger View
             if getattr(self, "finances_view_mode", "daily") == "bills":
@@ -445,26 +470,30 @@ class CockpitTUI:
 
             # Left Column Header (Line 7)
             left_focus_prefix = "▶ " if self.finances_focus == "days" else "  "
-            left_hdr_attr = (curses.color_pair(7) | curses.A_BOLD) if self.finances_focus == "days" else (curses.color_pair(4) | curses.A_BOLD)
-            self.stdscr.addstr(7, 2, f"{left_focus_prefix + '[v] DAY NAVIGATOR':<18} {'NET':>8}"[:split_x - 2], left_hdr_attr)
-            self.stdscr.addstr(8, 1, "─" * (split_x - 1), curses.color_pair(8))
+            left_hdr_attr = (curses.color_pair(7) | curses.A_BOLD) if self.finances_focus == "days" else (curses.color_pair(1) | curses.A_BOLD)
+            left_title = f"{left_focus_prefix}[v] DAY NAVIGATOR"
+            hdr_left_str = f"{left_title:<18} {'NET':>8}"
+            self._draw_line_padded(7, 1, split_x - 1, hdr_left_str, left_hdr_attr)
+            self._draw_line_padded(8, 1, split_x - 1, "─" * (split_x - 1), curses.color_pair(8))
 
-            # Right Column Header & Divider
-            right_x = split_x + 2
-            right_w = max(10, max_x - right_x - 1)
-
+            # Vertical divider between Left and Right columns
             for y in range(7, max_y - 2):
-                self.stdscr.addstr(y, split_x, "│", curses.color_pair(8))
+                try:
+                    self.stdscr.addstr(y, split_x, "│", curses.color_pair(8))
+                except curses.error:
+                    pass
 
             avail_day_rows = max(1, max_y - 11)
             visible_days = self.finance_days[self.day_scroll_offset : self.day_scroll_offset + avail_day_rows]
 
             if not self.finance_days:
-                self.stdscr.addstr(9, 2, "(No days logged yet)", curses.color_pair(8))
-                self.stdscr.addstr(7, right_x, "DAY DETAILS", curses.color_pair(1) | curses.A_BOLD)
-                self.stdscr.addstr(9, right_x, "No transactions logged.", curses.color_pair(8))
-                self.stdscr.addstr(10, right_x, "Press [a] to log a new day with Notion bullet format,", curses.color_pair(4))
-                self.stdscr.addstr(11, right_x, "or run 'python3 -m telemachus.finance import-text --file <path>' to bulk ingest.", curses.color_pair(4))
+                self._draw_line_padded(9, 1, split_x - 1, " (No days logged yet)", curses.color_pair(8))
+                right_x = split_x + 2
+                right_w = max(10, max_x - right_x - 1)
+                self._draw_line_padded(7, right_x, right_w, "DAY DETAILS", curses.color_pair(1) | curses.A_BOLD)
+                self._draw_line_padded(9, right_x, right_w, "No transactions logged.", curses.color_pair(8))
+                self._draw_line_padded(10, right_x, right_w, "Press [a] to log a new day with Notion bullet format,", curses.color_pair(4))
+                self._draw_line_padded(11, right_x, right_w, "or run 'python3 -m telemachus.finance import-text --file <path>'.", curses.color_pair(4))
                 return
 
             for idx, d in enumerate(visible_days):
@@ -480,15 +509,20 @@ class CockpitTUI:
                 net_str = self._fmt_money(net_c, self.mask_amounts, signed=True)
                 title_col = d["day_title"][:16]
 
-                self.stdscr.addstr(row_y, 1, " " * (split_x - 1), attr)
-                self.stdscr.addstr(row_y, 2, f"{title_col:<16}", attr)
-
+                day_row_text = f" {title_col:<16} {net_str:>8}"
                 net_pair = curses.color_pair(7) if is_selected else (
                     curses.color_pair(5) if net_c >= 0 else curses.color_pair(3)
                 )
-                self.stdscr.addstr(row_y, split_x - len(net_str) - 2, net_str, net_pair | (curses.A_BOLD if is_selected else 0))
+                self._draw_line_padded(row_y, 1, split_x - 1, day_row_text, net_pair | (curses.A_BOLD if is_selected else 0))
 
-            # Right Column: Details for selected day
+            # Right Column: Split Vertically (Card 1: Day Items, Card 2: Upcoming Paycheck Obligations)
+            right_x = split_x + 2
+            right_w = max(10, max_x - right_x - 1)
+            split_y = max(13, int(max_y * 0.48))
+
+            # -------------------------------------------------------------
+            # CARD 1: Selected Day Transactions (Rows 7 to split_y - 1)
+            # -------------------------------------------------------------
             if 0 <= self.selected_day_idx < len(self.finance_days):
                 curr = self.finance_days[self.selected_day_idx]
                 day_out = self._fmt_money(curr["outflow_cents"], self.mask_amounts)
@@ -501,28 +535,19 @@ class CockpitTUI:
                     day_sav = self._fmt_money(curr["savings_cents"], self.mask_amounts)
                     header_right += f" · Savings: {day_sav}"
 
-                self.stdscr.addstr(7, right_x, header_right[:right_w], right_hdr_attr)
+                self._draw_line_padded(7, right_x, right_w, header_right, right_hdr_attr)
 
-                if right_w >= 50:
-                    col_amt_x = right_x + right_w - 14
-                    desc_w = max(10, col_amt_x - (right_x + 28) - 1)
-
-                    self.stdscr.addstr(8, right_x + 2, f"{'ACCOUNT':<10}", curses.color_pair(2) | curses.A_BOLD)
-                    self.stdscr.addstr(8, right_x + 13, f"{'CATEGORY':<14}", curses.color_pair(2) | curses.A_BOLD)
-                    self.stdscr.addstr(8, right_x + 28, f"{'DESCRIPTION / PAYEE':<{desc_w}}"[:desc_w], curses.color_pair(2) | curses.A_BOLD)
-                    self.stdscr.addstr(8, col_amt_x, f"{'AMOUNT':>12}", curses.color_pair(2) | curses.A_BOLD)
-                else:
-                    col_amt_x = right_x + right_w - 13
-                    desc_w = max(6, col_amt_x - (right_x + 15) - 1)
-
-                    self.stdscr.addstr(8, right_x + 2, f"{'CATEGORY':<12}", curses.color_pair(2) | curses.A_BOLD)
-                    self.stdscr.addstr(8, right_x + 15, f"{'DESCRIPTION':<{desc_w}}"[:desc_w], curses.color_pair(2) | curses.A_BOLD)
-                    self.stdscr.addstr(8, col_amt_x, f"{'AMOUNT':>12}", curses.color_pair(2) | curses.A_BOLD)
+                # Column headers for Card 1
+                col_amt_x = right_x + right_w - 14
+                desc_w = max(8, col_amt_x - (right_x + 28) - 1)
+                hdr_cols = f"  {'ACCOUNT':<10} {'CATEGORY':<14} {'DESCRIPTION / PAYEE':<{desc_w}} {'AMOUNT':>12}"
+                self._draw_line_padded(8, right_x, right_w, hdr_cols, curses.color_pair(2) | curses.A_BOLD)
 
                 items = curr["items"]
-                for i_idx, item in enumerate(items[: max(1, max_y - 11)]):
+                max_items_shown = max(1, split_y - 10)
+                for i_idx, item in enumerate(items[:max_items_shown]):
                     item_y = 9 + i_idx
-                    if item_y >= max_y - 2:
+                    if item_y >= split_y - 1:
                         break
 
                     amt = item["amount_cents"]
@@ -539,23 +564,63 @@ class CockpitTUI:
                     is_item_sel = (self.finances_focus == "items" and i_idx == self.selected_item_idx)
                     row_attr = (curses.color_pair(7) | curses.A_BOLD) if is_item_sel else curses.color_pair(8)
 
-                    if is_item_sel:
-                        self.stdscr.addstr(item_y, right_x, " " * (right_w), row_attr)
+                    acc_str = f"[{item['account'][:8]}]"
+                    cat_str = item["category"][:13]
+                    desc_str = (item["payee"] or item["memo"] or "")[:desc_w]
 
-                    if right_w >= 50:
-                        acc_str = f"[{item['account'][:8]}]"
-                        cat_str = item["category"][:13]
-                        desc_str = (item["payee"] or item["memo"] or "")[:desc_w]
-                        self.stdscr.addstr(item_y, right_x + 2, f"{acc_str:<10}", curses.color_pair(7) if is_item_sel else curses.color_pair(6))
-                        self.stdscr.addstr(item_y, right_x + 13, f"{cat_str:<14}", row_attr)
-                        self.stdscr.addstr(item_y, right_x + 28, f"{desc_str:<{desc_w}}"[:desc_w], row_attr)
-                        self.stdscr.addstr(item_y, col_amt_x, f"{amt_str:>12}", curses.color_pair(7) | curses.A_BOLD if is_item_sel else (amt_pair | curses.A_BOLD))
+                    row_text = f"  {acc_str:<10} {cat_str:<14} {desc_str:<{desc_w}} {amt_str:>12}"
+                    if is_item_sel:
+                        self._draw_line_padded(item_y, right_x, right_w, row_text, curses.color_pair(7) | curses.A_BOLD)
                     else:
-                        cat_str = item["category"][:11]
-                        desc_str = (item["payee"] or item["memo"] or "")[:desc_w]
-                        self.stdscr.addstr(item_y, right_x + 2, f"{cat_str:<12}", row_attr)
-                        self.stdscr.addstr(item_y, right_x + 15, f"{desc_str:<{desc_w}}"[:desc_w], row_attr)
-                        self.stdscr.addstr(item_y, col_amt_x, f"{amt_str:>12}", curses.color_pair(7) | curses.A_BOLD if is_item_sel else (amt_pair | curses.A_BOLD))
+                        self._draw_line_padded(item_y, right_x, right_w, row_text, row_attr)
+
+                # Clear remaining rows of Card 1 if day has few items
+                for empty_y in range(9 + len(items[:max_items_shown]), split_y - 1):
+                    self._draw_line_padded(empty_y, right_x, right_w, "", curses.color_pair(8))
+
+            # Divider between Card 1 and Card 2
+            card_div = "── ⏳ BILLS DUE BEFORE NEXT PAYCHECK "
+            div_card_str = card_div + "─" * max(0, right_w - len(card_div))
+            self._draw_line_padded(split_y - 1, right_x, right_w, div_card_str, curses.color_pair(4) | curses.A_BOLD)
+
+            # -------------------------------------------------------------
+            # CARD 2: Obligations Horizon Due Before Next Paycheck (Rows split_y to max_y - 2)
+            # -------------------------------------------------------------
+            if pc and pc.bills:
+                name_max = max(10, right_w - 38)
+                b_cols = f"  {'DUE':<6} {'OBLIGATION':<{name_max}} {'STATUS':<7} {'AMOUNT':>8}  {'RUNNING':>9}"
+                self._draw_line_padded(split_y, right_x, right_w, b_cols, curses.color_pair(2) | curses.A_BOLD)
+
+                running_chk = chk_cents
+                for b_idx, b in enumerate(pc.bills):
+                    b_y = split_y + 1 + b_idx
+                    if b_y >= max_y - 2:
+                        break
+
+                    b_amt = b["amount_cents"]
+                    if b.get("status") == "due":
+                        running_chk -= b_amt
+                    
+                    b_amt_str = self._fmt_money(b_amt, self.mask_amounts)
+                    chk_run_str = self._fmt_money(running_chk, self.mask_amounts)
+                    stat_badge = "✅ Paid" if b.get("status") == "paid" else "⏳ Due "
+                    stat_pair = curses.color_pair(5) if b.get("status") == "paid" else curses.color_pair(4)
+                    
+                    b_name = b["name"][:name_max]
+                    b_date = b["due_date"][5:] if len(b.get("due_date", "")) >= 10 else b.get("due_date", "")
+                    row_bill_text = f"  {b_date:<6} {b_name:<{name_max}} {stat_badge:<7} {b_amt_str:>8}  {chk_run_str:>9}"
+                    self._draw_line_padded(b_y, right_x, right_w, row_bill_text, stat_pair | curses.A_BOLD)
+
+                # Clear remaining bottom rows in Card 2
+                for empty_by in range(split_y + 1 + len(pc.bills), max_y - 2):
+                    self._draw_line_padded(empty_by, right_x, right_w, "", curses.color_pair(8))
+            else:
+                self._draw_line_padded(split_y, right_x, right_w, "  No bills scheduled before next paycheck.", curses.color_pair(5))
+                for empty_by in range(split_y + 1, max_y - 2):
+                    self._draw_line_padded(empty_by, right_x, right_w, "", curses.color_pair(8))
+
+        except curses.error:
+            pass
         except curses.error:
             pass
 
@@ -565,32 +630,33 @@ class CockpitTUI:
         bills = bb.get("bills", [])
         fixed_sum_cents = bb.get("fixed_bills_total_cents", 0)
         overview = bb.get("overview") or self.finance_overview
+        pc = self.finance_paycheck
 
         # Dimensions: Dual column layout
-        split_x = min(58, max(38, int(max_x * 0.52)))
+        split_x = min(54, max(36, int(max_x * 0.48)))
         right_x = split_x + 2
         right_w = max(10, max_x - right_x - 1)
 
         try:
             # Vertical divider between tables
             for y in range(7, max_y - 2):
-                self.stdscr.addstr(y, split_x, "│", curses.color_pair(8))
+                try:
+                    self.stdscr.addstr(y, split_x, "│", curses.color_pair(8))
+                except curses.error:
+                    pass
 
             # -------------------------------------------------------------
             # Left Column: Recurring Bills Table (Sorted by Due Date 1-31)
             # -------------------------------------------------------------
             left_hdr = " [v] RECURRING BILLS (By Due Date) "
-            self.stdscr.addstr(7, 2, left_hdr[:split_x - 3], curses.color_pair(7) | curses.A_BOLD)
+            self._draw_line_padded(7, 1, split_x - 1, left_hdr, curses.color_pair(7) | curses.A_BOLD)
 
             # Table subheader at Line 8
-            if split_x >= 52:
-                self.stdscr.addstr(8, 2, "DUE", curses.color_pair(2) | curses.A_BOLD)
-                self.stdscr.addstr(8, 7, f"{'BILL / OBLIGATION':<18}", curses.color_pair(2) | curses.A_BOLD)
-                self.stdscr.addstr(8, 26, f"{'CATEGORY':<12}", curses.color_pair(2) | curses.A_BOLD)
-                self.stdscr.addstr(8, 39, f"{'STATUS':<8}", curses.color_pair(2) | curses.A_BOLD)
-                self.stdscr.addstr(8, 48, f"{'AMOUNT':>8}", curses.color_pair(2) | curses.A_BOLD)
+            if split_x >= 50:
+                hdr_text = f"  {'DUE':<4} {'BILL / OBLIGATION':<18} {'CATEGORY':<11} {'STATUS':<7} {'AMOUNT':>7}"
             else:
-                self.stdscr.addstr(8, 2, f"{'DUE':<4} {'BILL':<16} {'STATUS':<8} {'AMOUNT':>7}"[:split_x - 3], curses.color_pair(2) | curses.A_BOLD)
+                hdr_text = f"  {'DUE':<4} {'BILL':<14} {'STATUS':<7} {'AMOUNT':>7}"
+            self._draw_line_padded(8, 1, split_x - 1, hdr_text, curses.color_pair(2) | curses.A_BOLD)
 
             # Available rows for bills list
             avail_rows = max(1, max_y - 12)
@@ -603,42 +669,37 @@ class CockpitTUI:
                     break
 
                 is_sel = (actual_idx == self.selected_bill_idx)
-                row_attr = (curses.color_pair(7) | curses.A_BOLD) if is_sel else curses.color_pair(8)
-
                 due_day_str = f"{b['due_day']:02d}"
                 name_str = b["name"][:18]
                 cat_str = b["category"][:11]
-                stat_text = b["status_text"][:9]
+                stat_text = b["status_text"][:7]
                 amt_str = self._fmt_money(b["amount_cents"], self.mask_amounts)
 
-                if is_sel:
-                    self.stdscr.addstr(row_y, 1, " " * (split_x - 1), row_attr)
-
-                if split_x >= 52:
-                    self.stdscr.addstr(row_y, 2, due_day_str, curses.color_pair(4) | (curses.A_BOLD if is_sel else 0))
-                    self.stdscr.addstr(row_y, 7, f"{name_str:<18}", row_attr)
-                    self.stdscr.addstr(row_y, 26, f"{cat_str:<12}", curses.color_pair(6) if is_sel else curses.color_pair(8))
-                    stat_pair = curses.color_pair(5) if b["status"] == "paid" else curses.color_pair(3)
-                    self.stdscr.addstr(row_y, 39, f"{stat_text:<8}", stat_pair | curses.A_BOLD)
-                    self.stdscr.addstr(row_y, 48, f"{amt_str:>8}", curses.color_pair(1) | curses.A_BOLD if is_sel else curses.color_pair(8))
+                if split_x >= 50:
+                    row_line = f"  {due_day_str:<4} {name_str:<18} {cat_str:<11} {stat_text:<7} {amt_str:>7}"
                 else:
-                    self.stdscr.addstr(row_y, 2, due_day_str, curses.color_pair(4) | curses.A_BOLD)
-                    self.stdscr.addstr(row_y, 7, f"{name_str[:15]:<16}", row_attr)
-                    stat_pair = curses.color_pair(5) if b["status"] == "paid" else curses.color_pair(3)
-                    self.stdscr.addstr(row_y, 24, f"{stat_text[:7]:<8}", stat_pair | curses.A_BOLD)
-                    self.stdscr.addstr(row_y, split_x - len(amt_str) - 2, amt_str, row_attr)
+                    row_line = f"  {due_day_str:<4} {name_str[:14]:<14} {stat_text[:7]:<7} {amt_str:>7}"
+
+                if is_sel:
+                    self._draw_line_padded(row_y, 1, split_x - 1, row_line, curses.color_pair(7) | curses.A_BOLD)
+                else:
+                    self._draw_line_padded(row_y, 1, split_x - 1, row_line, curses.color_pair(8))
+
+            # Blank out empty rows in left column down to max_y - 3
+            for ey in range(9 + len(visible_bills), max_y - 3):
+                self._draw_line_padded(ey, 1, split_x - 1, "", curses.color_pair(8))
 
             # Left column bottom sum (Line max_y - 2)
-            self.stdscr.addstr(max_y - 3, 1, "─" * (split_x - 1), curses.color_pair(8))
+            self._draw_line_padded(max_y - 3, 1, split_x - 1, "─" * (split_x - 1), curses.color_pair(8))
             sum_str = self._fmt_money(fixed_sum_cents, self.mask_amounts)
-            sum_line = f" SUM: {sum_str} Fixed Bills (Excl. PG&E)"
-            self.stdscr.addstr(max_y - 2, 1, sum_line[:split_x - 2], curses.color_pair(5) | curses.A_BOLD)
+            sum_line = f"  SUM: {sum_str} Fixed Bills (Excl. PG&E)"
+            self._draw_line_padded(max_y - 2, 1, split_x - 1, sum_line, curses.color_pair(5) | curses.A_BOLD)
 
             # -------------------------------------------------------------
             # Right Column: Monthly Overview & Notion Formulas
             # -------------------------------------------------------------
-            self.stdscr.addstr(7, right_x, "📊 MONTHLY OVERVIEW & FORMULAS (Notion)"[:right_w], curses.color_pair(1) | curses.A_BOLD)
-            self.stdscr.addstr(8, right_x, "─" * right_w, curses.color_pair(8))
+            self._draw_line_padded(7, right_x, right_w, "📊 MONTHLY OVERVIEW & FORMULAS (Notion)", curses.color_pair(1) | curses.A_BOLD)
+            self._draw_line_padded(8, right_x, right_w, "─" * right_w, curses.color_pair(8))
 
             if overview:
                 m_label = overview.month
@@ -661,32 +722,67 @@ class CockpitTUI:
                 var_str = self._fmt_money(overview.variable_variance_cents, self.mask_amounts, signed=True)
                 cush_str = self._fmt_money(overview.remaining_cushion_cents, self.mask_amounts, signed=True)
 
-                # Line 9: Month & Status
-                self.stdscr.addstr(9, right_x, f"📅 Month: {m_label} │ Status: [{st_label}]"[:right_w], curses.color_pair(2) | curses.A_BOLD)
+                # Row 9: Month & Status
+                self._draw_line_padded(9, right_x, right_w, f"📅 Month: {m_label} │ Status: [{st_label}]", curses.color_pair(2) | curses.A_BOLD)
 
-                # Inflow & Macro Deductions (Lines 10-14)
-                self.stdscr.addstr(10, right_x, f"  💵 Monthly Income:          {inc_str:>12}"[:right_w], curses.color_pair(5))
-                self.stdscr.addstr(11, right_x, f"  🎯 Savings Target:         -{sav_str:>12}"[:right_w], curses.color_pair(2))
-                self.stdscr.addstr(12, right_x, f"  📌 Fixed Bills Total:       -{fix_str:>12}"[:right_w], curses.color_pair(3))
-                self.stdscr.addstr(13, right_x, f"  ⚡ PG&E (Estimate/Actual):  -{pge_str:>12}"[:right_w], curses.color_pair(4))
-                self.stdscr.addstr(14, right_x, f"  🏷️ All Bills (Fixed + PG&E): {all_b_str:>12}"[:right_w], curses.color_pair(8) | curses.A_BOLD)
+                # Inflow & Macro Deductions (Rows 10-14)
+                self._draw_line_padded(10, right_x, right_w, f"  💵 Monthly Income:          {inc_str:>12}", curses.color_pair(5))
+                self._draw_line_padded(11, right_x, right_w, f"  🎯 Savings Target:         -{sav_str:>12}", curses.color_pair(2))
+                self._draw_line_padded(12, right_x, right_w, f"  📌 Fixed Bills Total:       -{fix_str:>12}", curses.color_pair(3))
+                self._draw_line_padded(13, right_x, right_w, f"  ⚡ PG&E (Estimate/Actual):  -{pge_str:>12}", curses.color_pair(4))
+                self._draw_line_padded(14, right_x, right_w, f"  🏷️ All Bills (Fixed + PG&E): {all_b_str:>12}", curses.color_pair(8) | curses.A_BOLD)
 
-                # Variable Expenses Section (Lines 15-18)
+                # Variable Expenses Section (Rows 15-20)
                 if max_y >= 22:
-                    self.stdscr.addstr(15, right_x, "  " + "─" * max(1, right_w - 4), curses.color_pair(8))
-                    self.stdscr.addstr(16, right_x, f"  🛒 Groceries: {g_act_str} (Plan: {g_plan_str} · Left: {g_left_str})"[:right_w], curses.color_pair(8))
-                    self.stdscr.addstr(17, right_x, f"  ⛽ Gas:       {gas_act_str} (Plan: {gas_plan_str} · Left: {gas_left_str})"[:right_w], curses.color_pair(8))
-                    self.stdscr.addstr(18, right_x, "  " + "─" * max(1, right_w - 4), curses.color_pair(8))
+                    self._draw_line_padded(15, right_x, right_w, "  " + "─" * max(1, right_w - 4), curses.color_pair(8))
+                    
+                    # Helper for mini gauges
+                    def _mini_gauge(actual_c: int, planned_c: int, w: int = 8) -> str:
+                        if planned_c <= 0:
+                            return "[" + "░" * w + "]"
+                        f = min(w, max(0, int(round((actual_c / planned_c) * w))))
+                        return f"[{'█' * f}{'░' * (w - f)}]"
 
-                    # Notion Formula Outputs (Lines 19-21)
-                    self.stdscr.addstr(19, right_x, f"  👤 Planned Total Personal:  {pers_str:>12}"[:right_w], curses.color_pair(1) | curses.A_BOLD)
+                    g_gauge = _mini_gauge(overview.groceries_actual_cents, overview.groceries_planned_cents)
+                    gas_gauge = _mini_gauge(overview.gas_actual_cents, overview.gas_planned_cents)
+
+                    self._draw_line_padded(16, right_x, right_w, f"  🛒 Groceries: {g_gauge} {g_act_str} / {g_plan_str} (Left: {g_left_str})", curses.color_pair(8))
+                    self._draw_line_padded(17, right_x, right_w, f"  ⛽ Gas/Fuel:  {gas_gauge} {gas_act_str} / {gas_plan_str} (Left: {gas_left_str})", curses.color_pair(8))
+                    self._draw_line_padded(18, right_x, right_w, "  " + "─" * max(1, right_w - 4), curses.color_pair(8))
+
+                    # Notion Formula Outputs (Rows 19-21)
+                    self._draw_line_padded(19, right_x, right_w, f"  👤 Planned Total Personal:  {pers_str:>12}", curses.color_pair(1) | curses.A_BOLD)
                     var_pair = curses.color_pair(5) if overview.variable_variance_cents >= 0 else curses.color_pair(3)
-                    self.stdscr.addstr(20, right_x, f"  📈 Variable Variance:       {var_str:>12}"[:right_w], var_pair | curses.A_BOLD)
+                    self._draw_line_padded(20, right_x, right_w, f"  📈 Variable Variance:       {var_str:>12}", var_pair | curses.A_BOLD)
                     cush_pair = curses.color_pair(5) if overview.remaining_cushion_cents >= 0 else curses.color_pair(3)
-                    self.stdscr.addstr(21, right_x, f"  🛡️ Remaining Cushion:       {cush_str:>12}"[:right_w], cush_pair | curses.A_BOLD)
+                    self._draw_line_padded(21, right_x, right_w, f"  🛡️ Remaining Cushion:       {cush_str:>12}", cush_pair | curses.A_BOLD)
 
-                    if overview.notes and max_y >= 24:
-                        self.stdscr.addstr(23, right_x, f"  📝 Notes: {overview.notes}"[:right_w], curses.color_pair(4))
+                    # Section 4: Upcoming 7-Day Cash Call Warning (Rows 22+)
+                    curr_y = 22
+                    if pc and pc.bills and max_y >= 26:
+                        self._draw_line_padded(curr_y, right_x, right_w, "  " + "─" * max(1, right_w - 4), curses.color_pair(8))
+                        curr_y += 1
+                        self._draw_line_padded(curr_y, right_x, right_w, f"  🚨 Cycle Action: Bills Due Before Paycheck ({pc.next_paycheck_date}):", curses.color_pair(4) | curses.A_BOLD)
+                        curr_y += 1
+                        for wb in pc.bills[:max(1, max_y - curr_y - 2)]:
+                            if curr_y >= max_y - 2:
+                                break
+                            wb_st = "✅" if wb.get("status") == "paid" else "⏳"
+                            wb_amt = self._fmt_money(wb["amount_cents"], self.mask_amounts)
+                            wb_line = f"   • {wb['due_date']} {wb['name'][:18]:<18} {wb_st} {wb_amt}"
+                            self._draw_line_padded(curr_y, right_x, right_w, wb_line, curses.color_pair(8))
+                            curr_y += 1
+
+                    if overview.notes and curr_y < max_y - 2:
+                        self._draw_line_padded(curr_y, right_x, right_w, f"  📝 Notes: {overview.notes}", curses.color_pair(4))
+                        curr_y += 1
+
+                    # Wipe any remaining rows down to max_y - 2
+                    for ey in range(curr_y, max_y - 2):
+                        self._draw_line_padded(ey, right_x, right_w, "", curses.color_pair(8))
+
+        except curses.error:
+            pass
         except curses.error:
             pass
 
@@ -1116,9 +1212,20 @@ class CockpitTUI:
     def run(self) -> None:
         """Main rendering and event loop."""
         last_refresh = time.time()
+        prev_tab = self.current_tab
+        prev_view_mode = getattr(self, "finances_view_mode", "daily")
 
         while True:
-            self.stdscr.erase()
+            # Atomic physical clear if tab or sub-view changed to eradicate ghosting
+            curr_mode = getattr(self, "finances_view_mode", "daily")
+            if self.current_tab != prev_tab or curr_mode != prev_view_mode:
+                self.stdscr.clearok(True)
+                self.stdscr.clear()
+                prev_tab = self.current_tab
+                prev_view_mode = curr_mode
+            else:
+                self.stdscr.erase()
+
             max_y, max_x = self.stdscr.getmaxyx()
 
             if max_y < 8 or max_x < 24:
@@ -1162,6 +1269,15 @@ class CockpitTUI:
 
             if ch == -1:
                 time.sleep(0.04)
+                continue
+
+            if ch == curses.KEY_RESIZE:
+                try:
+                    curses.resizeterm(*self.stdscr.getmaxyx())
+                except Exception:
+                    pass
+                self.stdscr.clearok(True)
+                self.stdscr.clear()
                 continue
 
             if self.is_adding_finances:

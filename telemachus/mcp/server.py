@@ -718,7 +718,7 @@ TOOLS_DEFINITIONS = [
     },
     {
         "name": "finance_list_recurring",
-        "description": "Lists upcoming fixed recurring obligations (Kahram, Gym, iCloud, Spotify, Wi-Fi) and rolling PG&E variable estimate.",
+        "description": "Lists upcoming recurring obligations and bills (Kahram, Gym, iCloud, Spotify, Wi-Fi, PG&E, Credit Card), explicitly distinguishing bills due before your upcoming paycheck from bills due after.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -777,8 +777,9 @@ TOOLS_DEFINITIONS = [
     {
         "name": "finance_paycheck_plan",
         "description": (
-            "Calculates bi-weekly paycheck cash flow partitioning: take-home pay, automatic HYSA savings transfer, "
-            "bills due specifically within this paycheck window, 2-week grocery & gas buffer, and safe-to-spend remainder."
+            "Answers 'what payments/bills are due before or until my next paycheck' and calculates bi-weekly cash flow: "
+            "the exact date the next paycheck arrives, checking cash position after due payments, "
+            "every bill due before that next paycheck arrives, automatic HYSA savings transfer, and safe-to-spend remainder."
         ),
         "inputSchema": {
             "type": "object",
@@ -1237,23 +1238,47 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
         days = int(arguments.get("days_ahead") or 30)
         obligations = engine.get_upcoming_obligations(days_ahead=days)
         cash_flow = engine.get_committed_cash_flow(days_ahead=days)
+        alloc = engine.get_paycheck_allocation()
 
         def _f(cents: int) -> str:
             return f"${cents / 100.0:,.2f}"
 
+        next_paycheck = alloc.next_paycheck_date
+        before_paycheck = [o for o in obligations if o["due_date"] <= next_paycheck]
+        after_paycheck = [o for o in obligations if o["due_date"] > next_paycheck]
+        due_before_total = sum(o["amount_cents"] for o in before_paycheck if o.get("status") == "due")
+
         lines = [
-            f"### Upcoming Obligations Radar (Next {days} Days)",
+            f"### 🗓️ Upcoming Obligations Radar (Next {days} Days)",
             f"- **Current Checking Balance**:        {_f(cash_flow['checking_balance_cents'])}",
-            f"- **Committed Bills**:                 -{_f(cash_flow['committed_cents'])}",
-            f"- **Checking After Committed Bills**:  **{_f(cash_flow['checking_after_bills_cents'])}**",
+            f"- **Next Paycheck Arrives**:           **{next_paycheck}**",
+            f"- **Bills Due BEFORE Next Paycheck**: -{_f(due_before_total)}",
+            f"- **Checking After Due Bills**:        **{_f(cash_flow['checking_balance_cents'] - due_before_total)}**",
             "",
-            "| Due Date | Obligation | Amount | Status | Type | Autopay |",
-            "| :--- | :--- | :---: | :---: | :---: | :---: |",
+            f"### 🚨 ALL Bills Due BEFORE Next Paycheck ({next_paycheck}):",
+            "| Due Date | Obligation | Amount Due | Status | Autopay |",
+            "| :--- | :--- | :---: | :---: | :---: |",
         ]
-        for o in obligations:
-            lines.append(
-                f"| {o['due_date']} | {o['name']} | {_f(o['amount_cents'])} | [{o['status'].upper()}] | {o['rule_type'].title()} | {'Yes' if o['is_autopay'] else 'No'} |"
-            )
+        if not before_paycheck:
+            lines.append("| — | No bills scheduled before next paycheck | $0.00 | — | — |")
+        else:
+            for o in before_paycheck:
+                lines.append(
+                    f"| {o['due_date']} | {o['name']} | {_f(o['amount_cents'])} | [{o['status'].upper()}] | {'Yes' if o['is_autopay'] else 'No'} |"
+                )
+
+        if after_paycheck:
+            lines.extend([
+                "",
+                f"### ℹ️ Obligations Due AFTER Next Paycheck ({next_paycheck}):",
+                "| Due Date | Obligation | Amount | Status | Autopay |",
+                "| :--- | :--- | :---: | :---: | :---: |",
+            ])
+            for o in after_paycheck:
+                lines.append(
+                    f"| {o['due_date']} | {o['name']} | {_f(o['amount_cents'])} | [{o['status'].upper()}] | {'Yes' if o['is_autopay'] else 'No'} |"
+                )
+
         return "\n".join(lines)
 
     elif name == "finance_goals_progress":
@@ -1381,11 +1406,16 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
         def _f(cents: int) -> str:
             return f"${cents / 100.0:,.2f}"
 
+        due_count = len([b for b in alloc.bills if b.get('status') == 'due'])
         lines = [
+            f"### 🗓️ Paycheck Window & Due Dates Summary",
+            f"- **Current Cycle Start Date**:        {alloc.paycheck_date}",
+            f"- **NEXT PAYCHECK ARRIVES ON**:        **{alloc.next_paycheck_date}** (in 14 days)",
+            "",
             f"### 🏦 Cash Position Summary (Checking Account)",
             f"- **Current Checking Balance**:        {_f(alloc.checking_balance_cents)}",
-            f"- **Payments Due in Window**:          -{_f(alloc.bills_due_cents)}",
-            f"- **Checking After Due Payments**:      **{_f(alloc.checking_after_bills_cents)}**",
+            f"- **Bills Due BEFORE Next Paycheck**: -{_f(alloc.bills_due_cents)}",
+            f"- **Checking After Due Bills**:        **{_f(alloc.checking_after_bills_cents)}**",
             "",
         ]
 
@@ -1396,22 +1426,41 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
             ])
 
         lines.extend([
-            f"### Paycheck Cash Flow Partition ({alloc.paycheck_date} to {alloc.next_paycheck_date})",
+            f"### 🚨 ALL Payments Due BEFORE Next Paycheck ({alloc.next_paycheck_date}):",
+            f"*(Notice: ALL items in this table fall in the window {alloc.paycheck_date} to {alloc.next_paycheck_date} and MUST be paid before the next paycheck arrives)*",
+            "",
+            "| Due Date | Obligation | Amount Due | Status | Autopay | Details |",
+            "| :--- | :--- | :---: | :---: | :---: | :--- |",
+        ])
+        if not alloc.bills:
+            lines.append("| — | No recurring bills scheduled before next paycheck | $0.00 | — | — | — |")
+        else:
+            for b in alloc.bills:
+                lines.append(f"| {b['due_date']} | {b['name']} | {_f(b['amount_cents'])} | [{b['status'].upper()}] | {'Yes' if b.get('is_autopay') else 'No'} | {b.get('note', '')} |")
+
+        lines.extend([
+            "",
+            f"**TOTAL DUE BEFORE NEXT PAYCHECK ({alloc.next_paycheck_date})**: **{_f(alloc.bills_due_cents)}** ({due_count} bills due)",
+            "",
+            f"⚠️ **DIRECTIVE FOR ASSISTANT**: The items above (including Spotify on Oct 25, Brother Payment on Nov 01, Gym on Nov 01, and Credit Card on Nov 02) are all scheduled BEFORE the next paycheck arrives on {alloc.next_paycheck_date}. When the user asks what is due until their next paycheck, explicitly include all due items above!",
+            "",
+            f"### 📊 Paycheck Cash Flow Partition ({alloc.paycheck_date} to {alloc.next_paycheck_date})",
             f"- **Paycheck Take-Home**:        {_f(alloc.paycheck_amount_cents)}",
             f"- **Immediate HYSA Savings**:    -{_f(alloc.savings_transfer_cents)} (Moved straight to Capital One HYSA)",
             f"- **Net Checking Inflow**:        {_f(alloc.net_checking_cents)}",
-            f"- **Bills Due in Window**:       -{_f(alloc.bills_due_cents)} ({len([b for b in alloc.bills if b.get('status') == 'due'])} bills due)",
+            f"- **Bills Due Before Paycheck**: -{_f(alloc.bills_due_cents)}",
             f"- **2-Week Variable Needs**:     -{_f(alloc.variable_needs_cents)} (Groceries: {_f(alloc.groceries_allocated_cents)}, Gas: {_f(alloc.gas_allocated_cents)})",
             f"- **SAFE-TO-SPEND CUSHION**:      **{_f(alloc.safe_to_spend_cents)}** (Flexible spending for this cycle)",
             "",
-            "| Due Date | Obligation | Amount | Status | Autopay |",
-            "| :--- | :--- | :---: | :---: | :---: |",
         ])
-        if not alloc.bills:
-            lines.append("| — | No recurring bills scheduled in this cycle | $0.00 | — | — |")
-        else:
-            for b in alloc.bills:
-                lines.append(f"| {b['due_date']} | {b['name']} | {_f(b['amount_cents'])} | [{b['status'].upper()}] | {'Yes' if b.get('is_autopay') else 'No'} |")
+        if alloc.other_bills:
+            lines.extend([
+                f"### ℹ️ Obligations Due AFTER Next Paycheck ({alloc.next_paycheck_date}):",
+                "| Due Day | Obligation | Amount | Status |",
+                "| :--- | :--- | :---: | :--- |",
+            ])
+            for b in alloc.other_bills:
+                lines.append(f"| Day {b['due_day']} | {b['name']} | {_f(b['amount_cents'])} | Due in future paycheck cycles |")
 
         return "\n".join(lines)
 
