@@ -836,46 +836,61 @@ class FinanceStore:
         # 1. Savings Goal Target and Baseline
         savings_target = overview.savings_target_cents
         savings_baseline = None
+
         if setup_data:
+            # A. Check starting_balances for Capital One Savings balance (as requested)
+            sb = setup_data.get("starting_balances") or {}
+            for k, v in sb.items():
+                clean_k = k.lower().replace("-", "_").replace(" ", "_")
+                if any(term in clean_k for term in ("capital", "capitol", "savings", "hysa")):
+                    if not any(excl in clean_k for excl in ("checking", "visa", "credit")):
+                        val = _parse_cents(v)
+                        if val is not None:
+                            savings_baseline = val
+                            break
+
+            # B. Check goals.savings
             goals_cfg = setup_data.get("goals") or {}
             sav_cfg = goals_cfg.get("savings") or goals_cfg.get("saving") or {}
             if isinstance(sav_cfg, dict):
                 t = _parse_cents(sav_cfg.get("target") or sav_cfg.get("amount") or sav_cfg.get("goal"))
                 if t is not None:
                     savings_target = t
-                b = _parse_cents(
-                    sav_cfg.get("already_saved")
-                    or sav_cfg.get("saved")
-                    or sav_cfg.get("current")
-                    or sav_cfg.get("already_paid")
-                    or sav_cfg.get("paid")
-                    or sav_cfg.get("actual")
-                )
-                if b is not None:
-                    savings_baseline = b
+                if savings_baseline is None:
+                    b = _parse_cents(
+                        sav_cfg.get("already_saved")
+                        or sav_cfg.get("saved")
+                        or sav_cfg.get("current")
+                        or sav_cfg.get("already_paid")
+                        or sav_cfg.get("paid")
+                        or sav_cfg.get("actual")
+                    )
+                    if b is not None:
+                        savings_baseline = b
             elif isinstance(sav_cfg, (int, float, str)):
                 t = _parse_cents(sav_cfg)
                 if t is not None:
                     savings_target = t
 
-            # Also check top-level setup_data.get("savings") or setup_data.get("savings_goal")
+            # C. Check top-level setup_data.get("savings") or setup_data.get("savings_goal")
             top_sav = setup_data.get("savings") or setup_data.get("savings_goal") or {}
             if isinstance(top_sav, dict):
                 t = _parse_cents(top_sav.get("target") or top_sav.get("amount"))
                 if t is not None and savings_target == 0:
                     savings_target = t
-                b = _parse_cents(
-                    top_sav.get("already_saved")
-                    or top_sav.get("saved")
-                    or top_sav.get("current")
-                    or top_sav.get("already_paid")
-                    or top_sav.get("paid")
-                    or top_sav.get("actual")
-                )
-                if b is not None and savings_baseline is None:
-                    savings_baseline = b
+                if savings_baseline is None:
+                    b = _parse_cents(
+                        top_sav.get("already_saved")
+                        or top_sav.get("saved")
+                        or top_sav.get("current")
+                        or top_sav.get("already_paid")
+                        or top_sav.get("paid")
+                        or top_sav.get("actual")
+                    )
+                    if b is not None:
+                        savings_baseline = b
 
-            # Also check monthly_targets for savings_target / already_saved
+            # D. Check monthly_targets for savings_target / already_saved
             mt = setup_data.get("monthly_targets") or {}
             if isinstance(mt, dict):
                 if savings_target == 0:
@@ -890,6 +905,9 @@ class FinanceStore:
                     )
                     if b is not None:
                         savings_baseline = b
+
+        if savings_target <= 0:
+            savings_target = 100000  # Default $1,000.00 monthly savings target
 
         # 2. Brother / Kahram Payment Goal Target and Baseline
         kahram_target = 10000
@@ -960,18 +978,21 @@ class FinanceStore:
         if savings_baseline is not None:
             saved_cents = max(0, savings_baseline)
         else:
-            with self._get_connection() as conn:
-                sav_row = conn.execute(
-                    """
-                    SELECT COALESCE(SUM(p.amount_cents), 0) as total
-                    FROM postings p
-                    JOIN transactions t ON p.transaction_id = t.id
-                    WHERE p.account_id = 'Assets:Savings:CapitalOne'
-                      AND t.date >= ? AND t.date <= ?;
-                    """,
-                    (start_date, end_date),
-                ).fetchone()
-                saved_cents = max(0, int(sav_row["total"]))
+            try:
+                saved_cents = max(0, self.get_account_balance("Assets:Savings:CapitalOne"))
+            except Exception:
+                with self._get_connection() as conn:
+                    sav_row = conn.execute(
+                        """
+                        SELECT COALESCE(SUM(p.amount_cents), 0) as total
+                        FROM postings p
+                        JOIN transactions t ON p.transaction_id = t.id
+                        WHERE p.account_id = 'Assets:Savings:CapitalOne'
+                          AND t.date >= ? AND t.date <= ?;
+                        """,
+                        (start_date, end_date),
+                    ).fetchone()
+                    saved_cents = max(0, int(sav_row["total"]))
 
         goals.append(
             GoalProgress(

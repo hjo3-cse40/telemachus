@@ -718,6 +718,40 @@ paycheck_plan:
             if status_file.exists():
                 status_file.unlink()
 
+    def test_savings_goal_from_starting_balances_capital_one(self):
+        """Verifies Savings goal progress pulls directly from starting_balances.capital_one_savings."""
+        yaml_path = Path(self.temp_dir.name) / "test_setup.yaml"
+        sample_yaml = """
+starting_balances:
+  wells_fargo_checking: 1200.00
+  capitol_one_saving: 750.00
+  visa_credit_card: 0.00
+
+monthly_targets:
+  savings_target: 1000.00
+
+goals:
+  brother:
+    target: 150.00
+    already_paid: 150.00
+"""
+        yaml_path.write_text(sample_yaml, encoding="utf-8")
+        self.store.setup_yaml_path = yaml_path
+
+        goals = self.store.get_goals_progress("2026-10")
+        savings_goal = [g for g in goals if "Savings" in g.name][0]
+        brother_goal = [g for g in goals if "Brother" in g.name or "Kahram" in g.name][0]
+
+        # Savings should go directly off capitol_one_saving starting balance ($750.00)
+        self.assertEqual(savings_goal.saved_cents, 75000)
+        self.assertEqual(savings_goal.target_cents, 100000)
+        self.assertEqual(savings_goal.progress_pct, 75.0)
+        self.assertIn("75.0%", savings_goal.progress_bar)
+
+        # Brother payment is 100% completed
+        self.assertEqual(brother_goal.saved_cents, 15000)
+        self.assertEqual(brother_goal.status, "completed")
+
 
 if __name__ == "__main__":
     unittest.main()
