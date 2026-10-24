@@ -231,7 +231,20 @@ def cmd_import_text(store: FinanceStore, args: argparse.Namespace) -> int:
         if not p.exists():
             print(f"❌ File not found: {p}")
             return 1
-        text = p.read_text(encoding="utf-8")
+        if p.suffix.lower() == ".rtf":
+            import subprocess
+            try:
+                proc = subprocess.run(
+                    ["textutil", "-convert", "txt", str(p), "-stdout"],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                text = proc.stdout
+            except Exception:
+                text = p.read_text(encoding="utf-8", errors="ignore")
+        else:
+            text = p.read_text(encoding="utf-8", errors="ignore")
     else:
         print("📥 Reading text from stdin (paste text and press Ctrl+D when done)...")
         text = sys.stdin.read()
