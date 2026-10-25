@@ -99,7 +99,13 @@ class CockpitLauncher:
         split_args.append(opencode_greeting)
         self._run_tmux(*split_args)
 
-        # 4. Attach to session
+        # 4. Give keyboard focus back to the dashboard pane. split-window leaves the
+        # new OpenCode pane active, which swallows keys like "4" meant for the TUI.
+        focus_args = ["select-pane"]
+        focus_args.extend(["-t", split_target] if split_target else ["-L"])
+        self._run_tmux(*focus_args)
+
+        # 5. Attach to session
         if attach and not in_tmux:
             os.execvp(self.tmux_bin, [self.tmux_bin, "attach-session", "-t", target])
 

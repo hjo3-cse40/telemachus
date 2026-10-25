@@ -207,6 +207,9 @@ def cmd_setup(store: FinanceStore, args: argparse.Namespace) -> int:
         summary = apply_setup_yaml(yaml_path=path, store=store)
         print("\n✅ Successfully applied financial configuration:")
         print(f"   • Starting balances initialized: {summary['balances_set']}")
+        if summary.get("balances_details"):
+            configured_accs = ", ".join(b["account"].split(":")[-1] for b in summary["balances_details"])
+            print(f"     Accounts configured:           {configured_accs}")
         print(f"   • Recurring rules updated:       {summary['rules_updated']}")
         if summary.get("monthly_overview_updated"):
             fixed_dollars = summary['fixed_bills_total_cents'] / 100.0
@@ -218,6 +221,95 @@ def cmd_setup(store: FinanceStore, args: argparse.Namespace) -> int:
     except Exception as e:
         print(f"❌ Error applying setup configuration: {e}")
         return 1
+
+
+def cmd_import_text(store: FinanceStore, args: argparse.Namespace) -> int:
+    from telemachus.finance.import_text import import_text_document
+
+    default_year = getattr(args, "year", None) or datetime.now().year
+
+    if args.file:
+        p = Path(args.file).expanduser().resolve()
+        if not p.exists():
+            print(f"❌ File not found: {p}")
+            return 1
+        if p.suffix.lower() == ".rtf":
+            import subprocess
+            try:
+                proc = subprocess.run(
+                    ["textutil", "-convert", "txt", str(p), "-stdout"],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                text = proc.stdout
+            except Exception:
+                text = p.read_text(encoding="utf-8", errors="ignore")
+        else:
+            text = p.read_text(encoding="utf-8", errors="ignore")
+    else:
+        print("📥 Reading text from stdin (paste text and press Ctrl+D when done)...")
+        text = sys.stdin.read()
+
+    res = import_text_document(text, store=store, default_year=default_year)
+    print("\n✅ Successfully imported text document:")
+    print(f"   • Transactions logged: {res['transactions_logged']}")
+    print(f"   • Days covered:        {res['days_count']} (From {res['dates'][0] if res['dates'] else 'N/A'} to {res['dates'][-1] if res['dates'] else 'N/A'})")
+    print("\n💡 Run 'python3 -m telemachus.finance plan' or open Cockpit Tab [4: Finances] to inspect.")
+    return 0
+
+
+def cmd_clear_day(store: FinanceStore, args: argparse.Namespace) -> int:
+    target_date = args.date or datetime.now().strftime("%Y-%m-%d")
+    count = store.delete_day_transactions(target_date)
+    exporter = FinanceExporter(store)
+    exporter.export_to_beancount()
+    print(f"\n🗑️  Successfully deleted {count} transaction(s) for {target_date} (opening balances preserved).")
+    return 0
+
+
+def cmd_clear_imported(store: FinanceStore, args: argparse.Namespace) -> int:
+    count = store.delete_all_imported_transactions()
+    exporter = FinanceExporter(store)
+    exporter.export_to_beancount()
+    print(f"\n🗑️  Successfully deleted {count} transaction(s). Opening balances and setup configuration preserved.")
+    return 0
+
+
+def cmd_delete_tx(store: FinanceStore, args: argparse.Namespace) -> int:
+    success = store.delete_transaction(args.id)
+    if success:
+        print(f"\n🗑️ Successfully deleted transaction {args.id}.")
+        return 0
+    else:
+        print(f"\n❌ Transaction {args.id} not found.")
+        return 1
+
+
+def cmd_deposit_savings(store: FinanceStore, args: argparse.Namespace) -> int:
+    date = args.date or datetime.now().strftime("%Y-%m-%d")
+    amount_cents = round(args.amount * 100)
+    postings = [
+        Posting(account_id="Assets:Checking:WellsFargo", amount_cents=-amount_cents, memo=args.memo or "Transfer to HYSA"),
+        Posting(account_id="Assets:Savings:CapitalOne", amount_cents=amount_cents, memo=args.memo or "HYSA Deposit"),
+    ]
+    tx = Transaction.create(
+        date=date,
+        payee="Capital One HYSA Deposit",
+        postings=postings,
+        memo=args.memo or "Transfer to HYSA",
+        source="cli",
+    )
+    logged = store.log_transaction(tx)
+    try:
+        FinanceExporter(store).export_to_beancount()
+    except Exception:
+        pass
+    print(f"\n✅ Logged ${args.amount:,.2f} savings deposit for {date}:")
+    print(f"   • From: Wells Fargo Checking (-${args.amount:,.2f})")
+    print(f"   • To:   Capital One Savings (+${args.amount:,.2f})")
+    print(f"   • Tx ID: {logged.id[:8]}")
+    return 0
 
 
 def cmd_breakdown(store: FinanceStore, recurring: RecurringEngine, args: argparse.Namespace) -> int:
@@ -255,9 +347,10 @@ def cmd_breakdown(store: FinanceStore, recurring: RecurringEngine, args: argpars
     print(f"  • Immediate HYSA Savings:     -{_f(alloc.savings_transfer_cents, 'HYSA_SAVINGS'):>12} (Moved straight to Capital One)")
     print(f"  • Net Checking Inflow:         {_f(alloc.net_checking_cents, 'NET_CHECKING'):>12}")
     print("  " + "-" * 50)
-    print(f"  • Upcoming Bills in Window:   -{_f(alloc.bills_due_cents, 'BILLS_DUE'):>12} ({len(alloc.bills)} bills scheduled)")
+    print(f"  • Upcoming Bills in Window:   -{_f(alloc.bills_due_cents, 'BILLS_DUE'):>12} ({len(alloc.bills)} bills evaluated)")
     for b in alloc.bills:
-        print(f"      - {b['due_date']}  {b['name']:<24} {_f(b['amount_cents']):>10}")
+        note_str = f" ({b['note']})" if b.get("note") else ""
+        print(f"      - {b['due_date']}  {b['name']:<28} {_f(b['amount_cents']):>10}{note_str}")
     print(f"  • 2-Week Groceries Allocation:-{_f(alloc.groceries_allocated_cents, 'GROCERIES_2W'):>12}")
     if alloc.dining_allocated_cents > 0:
         print(f"  • 2-Week Dining Out Buffer:   -{_f(alloc.dining_allocated_cents, 'DINING_2W'):>12}")
@@ -347,6 +440,29 @@ def main() -> int:
     p_break = subparsers.add_parser("breakdown", parents=[common_parser], help="Alias for 'plan'")
     p_break.add_argument("--date", help="Date or cycle to inspect (defaults to today)")
 
+    # import-text
+    p_imp = subparsers.add_parser("import-text", parents=[common_parser], help="Batch import historical daily bullet notes from a text file")
+    p_imp.add_argument("--file", help="Path to text document (or read from stdin)")
+    p_imp.add_argument("--year", type=int, default=datetime.now().year, help="Default year for Day/Month dates (defaults to current year)")
+
+    # clear-day
+    p_clear = subparsers.add_parser("clear-day", parents=[common_parser], help="Clear all transactions for a specific date")
+    p_clear.add_argument("--date", help="Date to clear (defaults to today YYYY-MM-DD)")
+
+    # clear-imported / reset
+    p_clrimp = subparsers.add_parser("clear-imported", parents=[common_parser], help="Clear all imported/logged transactions, preserving setup opening balances")
+    p_reset = subparsers.add_parser("reset-transactions", parents=[common_parser], help="Alias for 'clear-imported'")
+
+    # delete-tx
+    p_deltx = subparsers.add_parser("delete-tx", parents=[common_parser], help="Delete a specific transaction by ID")
+    p_deltx.add_argument("--id", required=True, help="Transaction ID")
+
+    # deposit-savings
+    p_dep = subparsers.add_parser("deposit-savings", parents=[common_parser], help="Log a savings transfer from checking to Capital One HYSA")
+    p_dep.add_argument("amount", type=float, help="Amount in dollars (e.g. 500 or 500.00)")
+    p_dep.add_argument("--date", help="Date of deposit (defaults to today YYYY-MM-DD)")
+    p_dep.add_argument("--memo", default="HYSA Deposit", help="Optional memo")
+
     # export
     p_exp = subparsers.add_parser("export", parents=[common_parser], help="Export to Beancount and CSV formats")
     p_exp.add_argument("--beancount", action="store_true", help="Export to journal.beancount")
@@ -361,6 +477,16 @@ def main() -> int:
         return cmd_setup(store, args)
     elif args.command in ("plan", "breakdown"):
         return cmd_breakdown(store, recurring, args)
+    elif args.command == "import-text":
+        return cmd_import_text(store, args)
+    elif args.command == "clear-day":
+        return cmd_clear_day(store, args)
+    elif args.command in ("clear-imported", "reset-transactions"):
+        return cmd_clear_imported(store, args)
+    elif args.command == "delete-tx":
+        return cmd_delete_tx(store, args)
+    elif args.command == "deposit-savings":
+        return cmd_deposit_savings(store, args)
     elif args.command == "paycheck":
         return cmd_paycheck(recurring, args)
     elif args.command == "status":

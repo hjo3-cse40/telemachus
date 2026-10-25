@@ -14,6 +14,7 @@ import yaml
 from telemachus.finance.export import FinanceExporter
 from telemachus.finance.models import (
     DEFAULT_USER_RECURRING_RULES,
+    is_variable_bill,
     AccountType,
     Frequency,
     PaycheckPlan,
@@ -161,6 +162,68 @@ def create_setup_yaml_template(target_path: Optional[Path | str] = None) -> Path
     return path
 
 
+def _parse_cents(val: Any) -> Optional[int]:
+    """Robustly parses numeric amounts (float, int, or string like '$1,250.00') into integer cents."""
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return int(round(float(val) * 100))
+    s = str(val).strip().replace("$", "").replace(",", "")
+    try:
+        return int(round(float(s) * 100))
+    except (ValueError, TypeError):
+        return None
+
+
+def _resolve_account_id(key: str, store: FinanceStore) -> Optional[str]:
+    """Resolves arbitrary user key from setup.yaml to a valid double-entry account ID."""
+    # 1. Exact match with an existing account
+    acc = store.get_account(key)
+    if acc:
+        return acc.id
+
+    # 2. Case-insensitive exact match
+    accounts = store.list_accounts()
+    for a in accounts:
+        if a.id.lower() == key.lower():
+            return a.id
+
+    # 3. Normalized alias matching
+    clean = key.lower().replace("-", "_").replace(" ", "_")
+
+    # Checking aliases
+    if any(k in clean for k in ("checking", "wells", "wf", "primary_checking")):
+        return "Assets:Checking:WellsFargo"
+
+    # Savings / HYSA aliases
+    if any(k in clean for k in ("saving", "capital", "capitol", "hysa")):
+        return "Assets:Savings:CapitalOne"
+
+    # Credit card / Visa aliases
+    if any(k in clean for k in ("visa", "credit", "card", "cc")):
+        return "Liabilities:CreditCard:Visa"
+
+    # 4. Partial match against existing account IDs
+    for a in accounts:
+        if clean in a.id.lower().replace(":", "_"):
+            return a.id
+
+    return None
+
+
+def load_setup_yaml(yaml_path: Optional[Path | str] = None) -> Optional[Dict[str, Any]]:
+    """Safely loads configuration data directly from setup.yaml if available."""
+    path = Path(yaml_path).expanduser().resolve() if yaml_path else DEFAULT_SETUP_YAML_PATH
+    if not path.exists():
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    except Exception as e:
+        logger.debug(f"Failed to load setup.yaml from {path}: {e}")
+        return None
+
+
 def apply_setup_yaml(yaml_path: Optional[Path | str] = None, store: Optional[FinanceStore] = None) -> Dict[str, Any]:
     """Applies configuration from setup.yaml to SQLite store and recurring engine.
     
@@ -177,11 +240,13 @@ def apply_setup_yaml(yaml_path: Optional[Path | str] = None, store: Optional[Fin
         data = yaml.safe_load(f) or {}
 
     store = store or FinanceStore()
-    recurring = RecurringEngine(store)
+    store.setup_yaml_path = path
+    recurring = RecurringEngine(store, yaml_path=path)
 
     as_of_date = str(data.get("as_of_date") or time.strftime("%Y-%m-%d"))
     summary: Dict[str, Any] = {
         "balances_set": 0,
+        "balances_details": [],
         "rules_updated": 0,
         "monthly_overview_updated": False,
         "month": "",
@@ -189,61 +254,89 @@ def apply_setup_yaml(yaml_path: Optional[Path | str] = None, store: Optional[Fin
     }
 
     # 1. Process Starting Balances
-    starting_balances = data.get("starting_balances", {})
-    account_map = {
-        "wells_fargo_checking": "Assets:Checking:WellsFargo",
-        "capital_one_savings": "Assets:Savings:CapitalOne",
-        "visa_credit_card": "Liabilities:CreditCard:Visa",
-    }
+    starting_balances = (
+        data.get("starting_balances")
+        or data.get("starting_balance")
+        or data.get("balances")
+        or data.get("accounts")
+        or {}
+    )
 
-    for key, val in starting_balances.items():
-        if val is None:
+    for key, raw_val in starting_balances.items():
+        if raw_val is None:
             continue
-        cents = int(round(float(val) * 100))
-        acc_id = account_map.get(key, key)
-        
-        # Verify account exists
+        cents = _parse_cents(raw_val)
+        if cents is None:
+            logger.warning(f"Could not parse numeric amount for {key}: {raw_val}")
+            continue
+
+        acc_id = _resolve_account_id(key, store)
+        if not acc_id:
+            logger.warning(f"Skipping unknown account in setup.yaml: {key}")
+            continue
+
         acc = store.get_account(acc_id)
         if not acc:
             logger.warning(f"Skipping unknown account in setup.yaml: {acc_id}")
             continue
 
-        # Look for existing opening balance transaction to ensure idempotency
-        existing_txs = store.list_transactions(limit=100)
-        existing_opening_tx = None
-        for tx in existing_txs:
-            if tx.payee == "Opening Balance" and tx.source == "setup":
-                for p in tx.postings:
-                    if p.account_id == acc_id:
-                        existing_opening_tx = tx
-                        break
-            if existing_opening_tx:
-                break
+        # Delete ANY existing opening balance transactions for this account to guarantee idempotency
+        with store._write_lock():
+            with store._get_connection() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT DISTINCT t.id FROM transactions t
+                    JOIN postings p ON t.id = p.transaction_id
+                    WHERE t.payee = 'Opening Balance' AND t.source = 'setup' AND p.account_id = ?;
+                    """,
+                    (acc_id,),
+                ).fetchall()
+                for r in rows:
+                    conn.execute("DELETE FROM transactions WHERE id = ?;", (r["id"],))
+                conn.commit()
 
-        if existing_opening_tx:
-            store.delete_transaction(existing_opening_tx.id)
+        # Check for historical transactions prior to or on as_of_date to avoid double-counting
+        with store._get_connection() as conn:
+            hist_row = conn.execute(
+                """
+                SELECT COALESCE(SUM(p.amount_cents), 0) as hist_cents, MIN(t.date) as min_date
+                FROM postings p
+                JOIN transactions t ON p.transaction_id = t.id
+                WHERE p.account_id = ? AND t.source != 'setup' AND t.date <= ?;
+                """,
+                (acc_id, as_of_date),
+            ).fetchone()
+            hist_cents = int(hist_row["hist_cents"]) if hist_row else 0
+            min_date = hist_row["min_date"] if hist_row and hist_row["min_date"] else None
+
+        tx_date = as_of_date
+        if min_date and min_date < as_of_date:
+            tx_date = min_date
+            adjusted_asset_cents = cents - hist_cents
+            adjusted_liab_cents = -cents - hist_cents
+        else:
+            adjusted_asset_cents = cents
+            adjusted_liab_cents = -cents
 
         # Build balanced transaction
-        # For Assets: Debit Asset (+), Credit Equity:OpeningBalances (-)
-        # For Liabilities: Credit Liability (-), Debit Equity:OpeningBalances (+)
         if acc.account_type == AccountType.ASSET:
             postings = [
-                Posting(account_id=acc_id, amount_cents=cents, memo="Starting opening balance"),
-                Posting(account_id="Equity:OpeningBalances", amount_cents=-cents, memo="Equity offset"),
+                Posting(account_id=acc_id, amount_cents=adjusted_asset_cents, memo="Starting opening balance"),
+                Posting(account_id="Equity:OpeningBalances", amount_cents=-adjusted_asset_cents, memo="Equity offset"),
             ]
         elif acc.account_type == AccountType.LIABILITY:
             postings = [
-                Posting(account_id=acc_id, amount_cents=-cents, memo="Starting card balance"),
-                Posting(account_id="Equity:OpeningBalances", amount_cents=cents, memo="Equity offset"),
+                Posting(account_id=acc_id, amount_cents=adjusted_liab_cents, memo="Starting card balance"),
+                Posting(account_id="Equity:OpeningBalances", amount_cents=-adjusted_liab_cents, memo="Equity offset"),
             ]
         else:
             postings = [
-                Posting(account_id=acc_id, amount_cents=cents, memo="Opening balance"),
-                Posting(account_id="Equity:OpeningBalances", amount_cents=-cents, memo="Equity offset"),
+                Posting(account_id=acc_id, amount_cents=adjusted_asset_cents, memo="Starting balance"),
+                Posting(account_id="Equity:OpeningBalances", amount_cents=-adjusted_asset_cents, memo="Equity offset"),
             ]
 
         tx = Transaction.create(
-            date=as_of_date,
+            date=tx_date,
             payee="Opening Balance",
             postings=postings,
             memo=f"Initial setup opening balance for {acc_id}",
@@ -251,28 +344,36 @@ def apply_setup_yaml(yaml_path: Optional[Path | str] = None, store: Optional[Fin
         )
         store.log_transaction(tx)
         summary["balances_set"] += 1
-
+        summary["balances_details"].append({"account": acc_id, "amount_cents": cents})
     # 2. Process Fixed Recurring Bills
     fixed_bills = data.get("fixed_bills", {})
     rule_map = {
-        "kahram": "rule_kahram",
-        "gym": "rule_gym",
-        "apple_icloud": "rule_apple_cloud",
-        "spotify": "rule_spotify",
-        "wifi": "rule_wifi",
-        "rent": "rule_rent",
+        "kahram": ("rule_kahram", "Expenses:Family:Kahram"),
+        "brother": ("rule_kahram", "Expenses:Family:Kahram"),
+        "gym": ("rule_gym", "Expenses:Subscriptions:Gym"),
+        "apple_icloud": ("rule_apple_cloud", "Expenses:Subscriptions:AppleCloud"),
+        "spotify": ("rule_spotify", "Expenses:Subscriptions:Spotify"),
+        "wifi": ("rule_wifi", "Expenses:Utilities:WiFi"),
+        "rent": ("rule_rent", "Expenses:Home:Rent"),
+        "credit_card": ("rule_credit_card", "Liabilities:CreditCard:Visa"),
+        "visa": ("rule_credit_card", "Liabilities:CreditCard:Visa"),
+        "visa_credit_card": ("rule_credit_card", "Liabilities:CreditCard:Visa"),
+        "pge": ("rule_pge", "Expenses:Utilities:PGE"),
     }
 
     total_fixed_cents = 0
+    configured_rule_ids = set()
 
     for key, cfg in fixed_bills.items():
         if not isinstance(cfg, dict):
             continue
-        rule_id = rule_map.get(key, f"rule_{key}")
-        amount = cfg.get("amount", 0.0)
+        rule_info = rule_map.get(key, (f"rule_{key}", f"Expenses:{key.replace('_', ' ').title()}"))
+        rule_id = rule_info[0] if isinstance(rule_info, tuple) else rule_info
+        configured_rule_ids.add(rule_id)
+        to_acc = rule_info[1] if isinstance(rule_info, tuple) else f"Expenses:{key.replace('_', ' ').title()}"
         due_day = int(cfg.get("due_day", 1))
         is_active = bool(cfg.get("active", True))
-        amount_cents = int(round(float(amount) * 100))
+        amount_cents = _parse_cents(cfg.get("amount", 0.0)) or 0
 
         existing_rule = recurring.get_rule(rule_id)
         if existing_rule:
@@ -292,8 +393,43 @@ def apply_setup_yaml(yaml_path: Optional[Path | str] = None, store: Optional[Fin
             )
             recurring.add_rule(updated_rule)
             summary["rules_updated"] += 1
-            if is_active:
+            if is_active and not is_variable_bill(key, cfg):
                 total_fixed_cents += amount_cents
+        else:
+            cat = cfg.get("category", "Fixed Bill")
+            if not store.get_account(to_acc):
+                store.create_account(to_acc, AccountType.EXPENSE, name=key.replace("_", " ").title())
+            new_rule = RecurringRule(
+                id=rule_id,
+                name=cfg.get("name", key.replace("_", " ").title()),
+                rule_type=RuleType.FIXED,
+                frequency=Frequency.MONTHLY,
+                due_day_of_month=due_day,
+                base_amount_cents=amount_cents,
+                from_account="Assets:Checking:WellsFargo",
+                to_account=to_acc,
+                is_autopay=True,
+                lead_time_days=3,
+                is_active=is_active,
+                notes=cfg.get("notes", f"Configured via setup.yaml ({cat})"),
+            )
+            recurring.add_rule(new_rule)
+            summary["rules_updated"] += 1
+            if is_active and not is_variable_bill(key, cfg):
+                total_fixed_cents += amount_cents
+
+    # Keep rule_pge active if pge is in fixed_bills or monthly_targets
+    if "pge" in fixed_bills or data.get("monthly_targets", {}).get("pge_estimate"):
+        configured_rule_ids.add("rule_pge")
+
+    # Deactivate any legacy rules in SQLite that are not in setup.yaml (e.g. old rule_internet)
+    with store._write_lock():
+        with store._get_connection() as conn:
+            all_db_rules = conn.execute("SELECT id FROM recurring_rules;").fetchall()
+            for r in all_db_rules:
+                if r["id"] not in configured_rule_ids:
+                    conn.execute("UPDATE recurring_rules SET is_active = 0 WHERE id = ?;", (r["id"],))
+            conn.commit()
 
     summary["fixed_bills_total_cents"] = total_fixed_cents
 
@@ -301,12 +437,12 @@ def apply_setup_yaml(yaml_path: Optional[Path | str] = None, store: Optional[Fin
     monthly_targets = data.get("monthly_targets", {})
     if monthly_targets:
         month = str(monthly_targets.get("month") or time.strftime("%Y-%m"))
-        income_cents = int(round(float(monthly_targets.get("income", 0.0)) * 100))
-        savings_target_cents = int(round(float(monthly_targets.get("savings_target", 0.0)) * 100))
-        groceries_planned_cents = int(round(float(monthly_targets.get("groceries_planned", 0.0)) * 100))
-        dining_planned_cents = int(round(float(monthly_targets.get("dining_planned", 0.0)) * 100))
-        gas_planned_cents = int(round(float(monthly_targets.get("gas_planned", 0.0)) * 100))
-        pge_cents = int(round(float(monthly_targets.get("pge_estimate", 0.0)) * 100))
+        income_cents = _parse_cents(monthly_targets.get("monthly_income") if monthly_targets.get("monthly_income") is not None else monthly_targets.get("income", 0.0)) or 0
+        savings_target_cents = _parse_cents(monthly_targets.get("savings_target", 0.0)) or 0
+        groceries_planned_cents = _parse_cents(monthly_targets.get("groceries_planned") if monthly_targets.get("groceries_planned") is not None else monthly_targets.get("groceries", 0.0)) or 0
+        dining_planned_cents = _parse_cents(monthly_targets.get("dining_planned") if monthly_targets.get("dining_planned") is not None else monthly_targets.get("dining", 0.0)) or 0
+        gas_planned_cents = _parse_cents(monthly_targets.get("gas_planned") if monthly_targets.get("gas_planned") is not None else monthly_targets.get("gas", 0.0)) or 0
+        pge_cents = _parse_cents(monthly_targets.get("pge_estimate") if monthly_targets.get("pge_estimate") is not None else monthly_targets.get("pge", 0.0)) or 0
         notes = str(monthly_targets.get("notes") or "Configured via setup.yaml")
 
         store.set_monthly_overview(
@@ -327,8 +463,8 @@ def apply_setup_yaml(yaml_path: Optional[Path | str] = None, store: Optional[Fin
     # 4. Process Paycheck Plan (if provided)
     paycheck_cfg = data.get("paycheck_plan")
     if paycheck_cfg and isinstance(paycheck_cfg, dict):
-        p_amount = int(round(float(paycheck_cfg.get("paycheck_amount", 0.0)) * 100))
-        p_savings = int(round(float(paycheck_cfg.get("savings_per_paycheck", 0.0)) * 100))
+        p_amount = _parse_cents(paycheck_cfg.get("paycheck_amount", 0.0)) or 0
+        p_savings = _parse_cents(paycheck_cfg.get("savings_per_paycheck", 0.0)) or 0
         p_freq = str(paycheck_cfg.get("frequency", "biweekly")).lower().strip()
         p_anchor = str(paycheck_cfg.get("anchor_date") or time.strftime("%Y-%m-%d"))
 

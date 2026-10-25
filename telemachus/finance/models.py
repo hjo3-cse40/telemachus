@@ -7,6 +7,15 @@ import hashlib
 from typing import Any, Dict, List, Optional
 import uuid
 
+# fixed_bills keys whose amount is only an estimate (real amount arrives on the statement).
+VARIABLE_BILL_KEYS = frozenset({"pge"})
+
+
+def is_variable_bill(key: str, cfg: Optional[Dict[str, Any]] = None) -> bool:
+    """True when a setup.yaml bill amount is an estimate, not a known fixed charge."""
+    clean = key.lower().replace("-", "_").replace(" ", "_")
+    return clean in VARIABLE_BILL_KEYS or bool((cfg or {}).get("variable"))
+
 
 class AccountType(str, Enum):
     """Core double-entry account categories."""
@@ -460,7 +469,16 @@ class PaycheckWindowAllocation:
     gas_allocated_cents: int
     variable_needs_cents: int
     safe_to_spend_cents: int
+    checking_balance_cents: int = 0
+    checking_after_bills_cents: int = 0
+    credit_card_reminder: str = ""
     notes: str = ""
+    other_bills: List[Dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def bills_due(self) -> List[Dict[str, Any]]:
+        """Alias for bills list for compatibility."""
+        return self.bills
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -471,7 +489,11 @@ class PaycheckWindowAllocation:
             "savings_transfer_cents": self.savings_transfer_cents,
             "net_checking_cents": self.net_checking_cents,
             "bills_due_cents": self.bills_due_cents,
+            "checking_balance_cents": self.checking_balance_cents,
+            "checking_after_bills_cents": self.checking_after_bills_cents,
+            "credit_card_reminder": self.credit_card_reminder,
             "bills": self.bills,
+            "other_bills": self.other_bills,
             "groceries_allocated_cents": self.groceries_allocated_cents,
             "dining_allocated_cents": self.dining_allocated_cents,
             "gas_allocated_cents": self.gas_allocated_cents,

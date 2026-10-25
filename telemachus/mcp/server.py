@@ -718,7 +718,7 @@ TOOLS_DEFINITIONS = [
     },
     {
         "name": "finance_list_recurring",
-        "description": "Lists upcoming fixed recurring obligations (Kahram, Gym, iCloud, Spotify, Wi-Fi) and rolling PG&E variable estimate.",
+        "description": "Lists upcoming recurring obligations and bills (Kahram, Gym, iCloud, Spotify, Wi-Fi, PG&E, Credit Card), explicitly distinguishing bills due before your upcoming paycheck from bills due after.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -777,8 +777,9 @@ TOOLS_DEFINITIONS = [
     {
         "name": "finance_paycheck_plan",
         "description": (
-            "Calculates bi-weekly paycheck cash flow partitioning: take-home pay, automatic HYSA savings transfer, "
-            "bills due specifically within this paycheck window, 2-week grocery & gas buffer, and safe-to-spend remainder."
+            "Answers 'what payments/bills are due before or until my next paycheck' and calculates bi-weekly cash flow: "
+            "the exact date the next paycheck arrives, checking cash position after due payments, "
+            "every bill due before that next paycheck arrives, automatic HYSA savings transfer, and safe-to-spend remainder."
         ),
         "inputSchema": {
             "type": "object",
@@ -809,6 +810,19 @@ TOOLS_DEFINITIONS = [
         },
     },
 ]
+
+
+ESTIMATE_DISCLAIMER = (
+    "⚠️ Amounts marked 'ESTIMATE' (e.g. PG&E) are rough guesses based on past bills, NOT the actual "
+    "amount due. Always say 'about $X (estimate)' and tell the user the real amount is only known "
+    "when the PG&E statement arrives."
+)
+
+
+def _bill_amount(cents: int, is_estimate: bool) -> str:
+    """Formats a bill amount; estimates are visibly marked so they are never read as exact."""
+    text = f"${cents / 100.0:,.2f}"
+    return f"~{text} (ESTIMATE)" if is_estimate else text
 
 
 def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
@@ -1142,12 +1156,14 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
                 "transactions": [t.to_dict() for t in logged],
             }, indent=2)
         else:
-            cat = arguments.get("category", "personal")
+            payee = arguments.get("payee") or "Expense"
+            amt = float(arguments.get("amount") or 0.0)
+            cat = arguments.get("category") or "personal"
             single_item = {
-                "payee": arguments.get("payee"),
-                "amount": arguments.get("amount", 0.0),
+                "payee": payee,
+                "amount": amt,
                 "category": cat,
-                "memo": arguments.get("memo", ""),
+                "memo": arguments.get("memo") or "",
                 "date": arguments.get("date"),
             }
             logged = store.log_batch_transactions([single_item])
@@ -1163,14 +1179,14 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
     elif name == "finance_monthly_overview":
         store = FinanceStore()
         month = arguments.get("month")
-        if any(k in arguments for k in ("income", "savings_target", "groceries_planned", "gas_planned", "pge", "notes")):
+        if any(arguments.get(k) is not None for k in ("income", "savings_target", "groceries_planned", "gas_planned", "pge", "notes")):
             current = store.get_monthly_overview(month)
-            inc = round(arguments.get("income", current.income_cents / 100.0) * 100)
-            sav = round(arguments.get("savings_target", current.savings_target_cents / 100.0) * 100)
-            groc_p = round(arguments.get("groceries_planned", current.groceries_planned_cents / 100.0) * 100)
-            gas_p = round(arguments.get("gas_planned", current.gas_planned_cents / 100.0) * 100)
-            pge_val = round(arguments.get("pge", current.pge_cents / 100.0) * 100)
-            notes_val = arguments.get("notes", current.notes)
+            inc = round(float(arguments["income"]) * 100) if arguments.get("income") is not None else current.income_cents
+            sav = round(float(arguments["savings_target"]) * 100) if arguments.get("savings_target") is not None else current.savings_target_cents
+            groc_p = round(float(arguments["groceries_planned"]) * 100) if arguments.get("groceries_planned") is not None else current.groceries_planned_cents
+            gas_p = round(float(arguments["gas_planned"]) * 100) if arguments.get("gas_planned") is not None else current.gas_planned_cents
+            pge_val = round(float(arguments["pge"]) * 100) if arguments.get("pge") is not None else current.pge_cents
+            notes_val = str(arguments["notes"]) if arguments.get("notes") is not None else current.notes
             overview = store.set_monthly_overview(
                 month=month or current.month,
                 income_cents=inc,
@@ -1232,26 +1248,53 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
     elif name == "finance_list_recurring":
         store = FinanceStore()
         engine = RecurringEngine(store)
-        days = int(arguments.get("days_ahead", 30))
+        days = int(arguments.get("days_ahead") or 30)
         obligations = engine.get_upcoming_obligations(days_ahead=days)
         cash_flow = engine.get_committed_cash_flow(days_ahead=days)
+        alloc = engine.get_paycheck_allocation()
 
         def _f(cents: int) -> str:
             return f"${cents / 100.0:,.2f}"
 
+        next_paycheck = alloc.next_paycheck_date
+        before_paycheck = [o for o in obligations if o["due_date"] <= next_paycheck]
+        after_paycheck = [o for o in obligations if o["due_date"] > next_paycheck]
+        due_before_total = sum(o["amount_cents"] for o in before_paycheck if o.get("status") == "due")
+
         lines = [
-            f"### Upcoming Obligations Radar (Next {days} Days)",
-            f"- **Liquid Capital**:       {_f(cash_flow['liquid_capital_cents'])}",
-            f"- **Committed Bills**:      {_f(cash_flow['committed_cents'])}",
-            f"- **Safe-to-Spend Buffer**: {_f(cash_flow['safe_to_spend_cents'])}",
+            f"### 🗓️ Upcoming Obligations Radar (Next {days} Days)",
+            f"- **Current Checking Balance**:        {_f(cash_flow['checking_balance_cents'])}",
+            f"- **Next Paycheck Arrives**:           **{next_paycheck}**",
+            f"- **Bills Due BEFORE Next Paycheck**: -{_f(due_before_total)}",
+            f"- **Checking After Due Bills**:        **{_f(cash_flow['checking_balance_cents'] - due_before_total)}**",
             "",
-            "| Due Date | Obligation | Amount | Status | Type | Autopay |",
-            "| :--- | :--- | :---: | :---: | :---: | :---: |",
+            f"### 🚨 ALL Bills Due BEFORE Next Paycheck ({next_paycheck}):",
+            "| Due Date | Obligation | Amount Due | Status | Autopay |",
+            "| :--- | :--- | :---: | :---: | :---: |",
         ]
-        for o in obligations:
-            lines.append(
-                f"| {o['due_date']} | {o['name']} | {_f(o['amount_cents'])} | [{o['status'].upper()}] | {o['rule_type'].title()} | {'Yes' if o['is_autopay'] else 'No'} |"
-            )
+        if not before_paycheck:
+            lines.append("| — | No bills scheduled before next paycheck | $0.00 | — | — |")
+        else:
+            for o in before_paycheck:
+                lines.append(
+                    f"| {o['due_date']} | {o['name']} | {_bill_amount(o['amount_cents'], o.get('is_estimate', False))} | [{o['status'].upper()}] | {'Yes' if o['is_autopay'] else 'No'} |"
+                )
+
+        if after_paycheck:
+            lines.extend([
+                "",
+                f"### ℹ️ Obligations Due AFTER Next Paycheck ({next_paycheck}):",
+                "| Due Date | Obligation | Amount | Status | Autopay |",
+                "| :--- | :--- | :---: | :---: | :---: |",
+            ])
+            for o in after_paycheck:
+                lines.append(
+                    f"| {o['due_date']} | {o['name']} | {_bill_amount(o['amount_cents'], o.get('is_estimate', False))} | [{o['status'].upper()}] | {'Yes' if o['is_autopay'] else 'No'} |"
+                )
+
+        if any(o.get("is_estimate") and o.get("status") != "paid" for o in obligations):
+            lines.extend(["", ESTIMATE_DISCLAIMER])
+
         return "\n".join(lines)
 
     elif name == "finance_goals_progress":
@@ -1275,7 +1318,7 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
         date = arguments.get("date")
         start_date = date or arguments.get("start_date")
         end_date = date or arguments.get("end_date")
-        limit = int(arguments.get("limit", 20))
+        limit = int(arguments.get("limit") or 20)
 
         cat_account_map = {
             "groceries": "Expenses:Food:Groceries",
@@ -1379,23 +1422,62 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
         def _f(cents: int) -> str:
             return f"${cents / 100.0:,.2f}"
 
+        due_count = len([b for b in alloc.bills if b.get('status') == 'due'])
         lines = [
-            f"### Paycheck Cash Flow Partition ({alloc.paycheck_date} to {alloc.next_paycheck_date})",
-            f"- **Paycheck Take-Home**:        {_f(alloc.paycheck_amount_cents)}",
-            f"- **Immediate HYSA Savings**:     {_f(alloc.savings_transfer_cents)} (Moved straight to Capital One HYSA)",
-            f"- **Net Checking Inflow**:        {_f(alloc.net_checking_cents)}",
-            f"- **Bills Due in Window**:        {_f(alloc.bills_due_cents)} ({len(alloc.bills)} bills due)",
-            f"- **2-Week Variable Needs**:      {_f(alloc.variable_needs_cents)} (Groceries: {_f(alloc.groceries_allocated_cents)}, Gas: {_f(alloc.gas_allocated_cents)})",
-            f"- **SAFE-TO-SPEND CUSHION**:      {_f(alloc.safe_to_spend_cents)} (Flexible spending for this cycle)",
+            f"### 🗓️ Paycheck Window & Due Dates Summary",
+            f"- **Current Cycle Start Date**:        {alloc.paycheck_date}",
+            f"- **NEXT PAYCHECK ARRIVES ON**:        **{alloc.next_paycheck_date}** (in 14 days)",
             "",
-            "| Due Date | Obligation | Amount | Status | Autopay |",
-            "| :--- | :--- | :---: | :---: | :---: |",
+            f"### 🏦 Cash Position Summary (Checking Account)",
+            f"- **Current Checking Balance**:        {_f(alloc.checking_balance_cents)}",
+            f"- **Bills Due BEFORE Next Paycheck**: -{_f(alloc.bills_due_cents)}",
+            f"- **Checking After Due Bills**:        **{_f(alloc.checking_after_bills_cents)}**",
+            "",
         ]
+
+        if alloc.credit_card_reminder:
+            lines.extend([
+                f"💳 **Credit Card Reminder**: {alloc.credit_card_reminder}",
+                "",
+            ])
+
+        lines.extend([
+            f"### 🚨 ALL Payments Due BEFORE Next Paycheck ({alloc.next_paycheck_date}):",
+            f"*(Notice: ALL items in this table fall in the window {alloc.paycheck_date} to {alloc.next_paycheck_date} and MUST be paid before the next paycheck arrives)*",
+            "",
+            "| Due Date | Obligation | Amount Due | Status | Autopay | Details |",
+            "| :--- | :--- | :---: | :---: | :---: | :--- |",
+        ])
         if not alloc.bills:
-            lines.append("| — | No recurring bills scheduled in this cycle | $0.00 | — | — |")
+            lines.append("| — | No recurring bills scheduled before next paycheck | $0.00 | — | — | — |")
         else:
             for b in alloc.bills:
-                lines.append(f"| {b['due_date']} | {b['name']} | {_f(b['amount_cents'])} | [{b['status'].upper()}] | {'Yes' if b['is_autopay'] else 'No'} |")
+                lines.append(f"| {b['due_date']} | {b['name']} | {_bill_amount(b['amount_cents'], b.get('is_estimate', False))} | [{b['status'].upper()}] | {'Yes' if b.get('is_autopay') else 'No'} | {b.get('note', '')} |")
+
+        lines.extend([
+            "",
+            f"**TOTAL DUE BEFORE NEXT PAYCHECK ({alloc.next_paycheck_date})**: **{_f(alloc.bills_due_cents)}** ({due_count} bills due)",
+            "",
+            f"⚠️ **DIRECTIVE FOR ASSISTANT**: Every item in the table above is scheduled BEFORE the next paycheck arrives on {alloc.next_paycheck_date}. When the user asks what is due until their next paycheck, include all items with status DUE.",
+            *([ESTIMATE_DISCLAIMER] if any(b.get("is_estimate") for b in alloc.bills) else []),
+            "",
+            f"### 📊 Paycheck Cash Flow Partition ({alloc.paycheck_date} to {alloc.next_paycheck_date})",
+            f"- **Paycheck Take-Home**:        {_f(alloc.paycheck_amount_cents)}",
+            f"- **Immediate HYSA Savings**:    -{_f(alloc.savings_transfer_cents)} (Moved straight to Capital One HYSA)",
+            f"- **Net Checking Inflow**:        {_f(alloc.net_checking_cents)}",
+            f"- **Bills Due Before Paycheck**: -{_f(alloc.bills_due_cents)}",
+            f"- **2-Week Variable Needs**:     -{_f(alloc.variable_needs_cents)} (Groceries: {_f(alloc.groceries_allocated_cents)}, Gas: {_f(alloc.gas_allocated_cents)})",
+            f"- **SAFE-TO-SPEND CUSHION**:      **{_f(alloc.safe_to_spend_cents)}** (Flexible spending for this cycle)",
+            "",
+        ])
+        if alloc.other_bills:
+            lines.extend([
+                f"### ℹ️ Obligations Due AFTER Next Paycheck ({alloc.next_paycheck_date}):",
+                "| Due Day | Obligation | Amount | Status |",
+                "| :--- | :--- | :---: | :--- |",
+            ])
+            for b in alloc.other_bills:
+                lines.append(f"| Day {b['due_day']} | {b['name']} | {_bill_amount(b['amount_cents'], b.get('is_estimate', False))} | Due in future paycheck cycles |")
 
         return "\n".join(lines)
 
@@ -1414,9 +1496,21 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
         lines = [
             f"### Comprehensive Financial Situation & Bi-Weekly Allocation Breakdown",
             f"- **As of Date**:            {now_str} (Month: {month_str})",
-            f"- **Liquid Capital**:         {_f(balances['liquid_assets_cents'])} (Wells Fargo Checking + Capital One HYSA)",
-            f"- **Net Worth**:              {_f(balances['net_worth_cents'])}",
             "",
+            f"#### 🏦 Cash Position Summary (Checking Account)",
+            f"- **Current Checking Balance**:        {_f(alloc.checking_balance_cents)}",
+            f"- **Payments Due in Window**:          -{_f(alloc.bills_due_cents)}",
+            f"- **Checking After Due Payments**:      **{_f(alloc.checking_after_bills_cents)}**",
+            "",
+        ]
+
+        if alloc.credit_card_reminder:
+            lines.extend([
+                f"💳 **Credit Card Reminder**: {alloc.credit_card_reminder}",
+                "",
+            ])
+
+        lines.extend([
             f"#### 🗓️ Monthly Plan Breakdown ({month_str})",
             f"- **Monthly Take-Home**:      {_f(overview.income_cents)}",
             f"- **HYSA Savings Target**:    {_f(overview.savings_target_cents)} (Target transfer to Capital One HYSA)",
@@ -1431,12 +1525,28 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
             f"- **Bi-Weekly Paycheck**:     {_f(alloc.paycheck_amount_cents)}",
             f"- **Immediate HYSA Savings**: -{_f(alloc.savings_transfer_cents)} (Moved straight to Capital One HYSA)",
             f"- **Net Checking Inflow**:    {_f(alloc.net_checking_cents)}",
-            f"- **Bills Due in Window**:    -{_f(alloc.bills_due_cents)} ({len(alloc.bills)} bills scheduled)",
+            f"- **Bills Due in Window**:    -{_f(alloc.bills_due_cents)}",
+        ])
+
+        if alloc.bills:
+            lines.append("  **Bills Due in this 2-Week Window:**")
+            for b in alloc.bills:
+                note_str = f" ({b['note']})" if b.get("note") else ""
+                lines.append(f"  • **{b['name']}** (Due: {b['due_date']}): {_f(b['amount_cents'])}{note_str}")
+
+        if getattr(alloc, "other_bills", None):
+            lines.append("")
+            lines.append("  **Bills Outside This Window (Later Cycle):**")
+            for ob in alloc.other_bills:
+                lines.append(f"  • {ob['name']}: {_f(ob['amount_cents'])} ({ob['note']})")
+
+        lines.extend([
+            "",
             f"- **2-Week Groceries**:       -{_f(alloc.groceries_allocated_cents)}",
             f"- **2-Week Eating Out**:      -{_f(alloc.dining_allocated_cents)}",
             f"- **2-Week Car Gas**:         -{_f(alloc.gas_allocated_cents)}",
             f"- **SAFE-TO-SPEND CUSHION**:  **{_f(alloc.safe_to_spend_cents)}** (Discretionary cash for next 14 days)",
-        ]
+        ])
         return "\n".join(lines)
 
     else:

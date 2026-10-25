@@ -91,3 +91,6 @@ vector_store/
 tmp/
 scratch/
 .refact/
+
+# Held-out memory eval fixture (contains real-looking names; keep local)
+tests/fixtures/memory_intake_heldout.json

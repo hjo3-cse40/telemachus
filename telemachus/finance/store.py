@@ -21,6 +21,7 @@ from typing import Any, Dict, Generator, List, Optional, Tuple
 
 from telemachus.finance.models import (
     DEFAULT_USER_ACCOUNTS,
+    is_variable_bill,
     Account,
     AccountType,
     BillInstance,
@@ -69,7 +70,25 @@ class FinanceStore:
         self.root_dir = Path(root_dir).expanduser().resolve() if root_dir else get_finance_root()
         self.db_path = self.root_dir / "finances.sqlite3"
         self.lock_path = self.root_dir / ".lock"
+        self.setup_yaml_path: Optional[Path] = None
         self._init_storage()
+
+    def get_setup_yaml_path(self) -> Optional[Path]:
+        """Resolves the setup.yaml path corresponding to this store."""
+        if self.setup_yaml_path and self.setup_yaml_path.exists():
+            return self.setup_yaml_path
+        if os.environ.get("TELEMACHUS_SETUP_YAML"):
+            p = Path(os.environ["TELEMACHUS_SETUP_YAML"]).expanduser().resolve()
+            if p.exists():
+                return p
+        sibling_yaml = self.root_dir / "setup.yaml"
+        if sibling_yaml.exists():
+            return sibling_yaml
+        if self.root_dir.resolve() == get_finance_root().resolve():
+            default_p = get_finance_root() / "setup.yaml"
+            if default_p.exists():
+                return default_p
+        return None
 
     def _init_storage(self) -> None:
         """Ensures the directory exists with 0700 permissions and initializes database tables."""
@@ -470,6 +489,28 @@ class FinanceStore:
                 conn.commit()
                 return res.rowcount > 0
 
+    def delete_day_transactions(self, date_str: str, include_setup: bool = False) -> int:
+        """Deletes all transactions for a specific date (defaults to preserving setup opening balances)."""
+        with self._write_lock():
+            with self._get_connection() as conn:
+                if include_setup:
+                    res = conn.execute("DELETE FROM transactions WHERE date = ?;", (date_str,))
+                else:
+                    res = conn.execute(
+                        "DELETE FROM transactions WHERE date = ? AND (source != 'setup' OR source IS NULL);",
+                        (date_str,),
+                    )
+                conn.commit()
+                return res.rowcount
+
+    def delete_all_imported_transactions(self) -> int:
+        """Deletes all imported and logged transactions, preserving initial setup balances."""
+        with self._write_lock():
+            with self._get_connection() as conn:
+                res = conn.execute("DELETE FROM transactions WHERE source != 'setup' OR source IS NULL;")
+                conn.commit()
+                return res.rowcount
+
     # ==========================================================================
     # Balances & Aggregations (Deterministic Calculations)
     # ==========================================================================
@@ -651,7 +692,9 @@ class FinanceStore:
                 conn.commit()
         return self.get_monthly_overview(month)
 
-    def get_monthly_overview(self, month: Optional[str] = None) -> MonthlyOverview:
+    def get_monthly_overview(
+        self, month: Optional[str] = None, yaml_path: Optional[Path | str] = None
+    ) -> MonthlyOverview:
         """Fetches monthly overview with actuals dynamically calculated from postings."""
         if not month:
             from datetime import datetime
@@ -662,6 +705,103 @@ class FinanceStore:
         y, m = map(int, month.split("-"))
         _, last_day = calendar.monthrange(y, m)
         end_date = f"{month}-{last_day:02d}"
+
+        # 1. Load setup.yaml live as the primary source of truth for targets and bills!
+        setup_data = None
+        yaml_p = yaml_path or self.get_setup_yaml_path()
+        if yaml_p:
+            try:
+                from telemachus.finance.setup import load_setup_yaml, _parse_cents
+                setup_data = load_setup_yaml(yaml_p)
+            except Exception:
+                pass
+        if "_parse_cents" not in locals():
+            _parse_cents = lambda x: int(round(float(x) * 100)) if x is not None else None
+
+        yaml_income = None
+        yaml_savings = None
+        yaml_groceries = None
+        yaml_dining = None
+        yaml_gas = None
+        yaml_pge = None
+        yaml_fixed = None
+        yaml_notes = None
+
+        if setup_data:
+            # Check monthly_targets (e.g. monthly_targets: savings_target: 1000.00)
+            mt = setup_data.get("monthly_targets")
+            if isinstance(mt, dict):
+                # Savings target
+                if mt.get("savings_target") is not None:
+                    yaml_savings = _parse_cents(mt["savings_target"])
+                elif mt.get("savings") is not None:
+                    yaml_savings = _parse_cents(mt["savings"])
+                elif mt.get("monthly_savings") is not None:
+                    yaml_savings = _parse_cents(mt["monthly_savings"])
+
+                # Income
+                if mt.get("monthly_income") is not None:
+                    yaml_income = _parse_cents(mt["monthly_income"])
+                elif mt.get("income") is not None:
+                    yaml_income = _parse_cents(mt["income"])
+
+                # Groceries
+                if mt.get("groceries_planned") is not None:
+                    yaml_groceries = _parse_cents(mt["groceries_planned"])
+                elif mt.get("groceries") is not None:
+                    yaml_groceries = _parse_cents(mt["groceries"])
+
+                # Dining
+                if mt.get("dining_planned") is not None:
+                    yaml_dining = _parse_cents(mt["dining_planned"])
+                elif mt.get("dining") is not None:
+                    yaml_dining = _parse_cents(mt["dining"])
+
+                # Gas
+                if mt.get("gas_planned") is not None:
+                    yaml_gas = _parse_cents(mt["gas_planned"])
+                elif mt.get("gas") is not None:
+                    yaml_gas = _parse_cents(mt["gas"])
+
+                # PGE
+                if mt.get("pge_estimate") is not None:
+                    yaml_pge = _parse_cents(mt["pge_estimate"])
+                elif mt.get("pge") is not None:
+                    yaml_pge = _parse_cents(mt["pge"])
+
+                if mt.get("notes"):
+                    yaml_notes = str(mt["notes"])
+
+            # Also check top-level keys in setup.yaml
+            if yaml_savings is None:
+                if setup_data.get("savings_target") is not None:
+                    yaml_savings = _parse_cents(setup_data["savings_target"])
+                elif setup_data.get("savings") is not None:
+                    yaml_savings = _parse_cents(setup_data["savings"])
+                elif setup_data.get("goals") and isinstance(setup_data["goals"], dict):
+                    sg = setup_data["goals"].get("savings") or setup_data["goals"].get("saving") or {}
+                    if isinstance(sg, dict) and sg.get("target") is not None:
+                        yaml_savings = _parse_cents(sg["target"])
+                    elif isinstance(sg, (int, float, str)):
+                        yaml_savings = _parse_cents(sg)
+
+            if yaml_income is None:
+                if setup_data.get("monthly_income") is not None:
+                    yaml_income = _parse_cents(setup_data["monthly_income"])
+                elif setup_data.get("income") is not None:
+                    yaml_income = _parse_cents(setup_data["income"])
+
+            # Fixed bills total from fixed_bills in setup.yaml
+            fb = setup_data.get("fixed_bills")
+            if isinstance(fb, dict):
+                tot_f = 0
+                for k, v in fb.items():
+                    if isinstance(v, dict) and bool(v.get("active", True)) and not is_variable_bill(k, v):
+                        amt = _parse_cents(v.get("amount", 0.0))
+                        if amt:
+                            tot_f += amt
+                if tot_f > 0:
+                    yaml_fixed = tot_f
 
         with self._get_connection() as conn:
             row = conn.execute("SELECT * FROM monthly_overview WHERE month = ?;", (month,)).fetchone()
@@ -728,53 +868,70 @@ class FinanceStore:
             pge_actual = int(pge_row["total"])
 
             if row:
-                income = row["income_cents"] or actual_income
-                pge = row["pge_cents"] or pge_actual
-                dining_planned = row["dining_planned_cents"] if "dining_planned_cents" in row.keys() else 0
+                income = yaml_income if yaml_income is not None else (row["income_cents"] or actual_income)
+                savings = yaml_savings if yaml_savings is not None else row["savings_target_cents"]
+                fixed = yaml_fixed if yaml_fixed is not None else row["fixed_bills_cents"]
+                pge = yaml_pge if yaml_pge is not None else (row["pge_cents"] or pge_actual)
+                groceries_planned = yaml_groceries if yaml_groceries is not None else row["groceries_planned_cents"]
+                dining_planned = yaml_dining if yaml_dining is not None else (row["dining_planned_cents"] if "dining_planned_cents" in row.keys() else 0)
+                gas_planned = yaml_gas if yaml_gas is not None else row["gas_planned_cents"]
+                notes = yaml_notes if yaml_notes is not None else (row["notes"] or "")
+
                 return MonthlyOverview(
                     month=row["month"],
                     status=row["status"],
                     income_cents=income,
-                    savings_target_cents=row["savings_target_cents"],
-                    fixed_bills_cents=row["fixed_bills_cents"],
+                    savings_target_cents=savings,
+                    fixed_bills_cents=fixed,
                     pge_cents=pge,
-                    groceries_planned_cents=row["groceries_planned_cents"],
+                    groceries_planned_cents=groceries_planned,
                     groceries_actual_cents=groceries_actual,
                     dining_planned_cents=dining_planned,
                     dining_actual_cents=dining_actual,
-                    gas_planned_cents=row["gas_planned_cents"],
+                    gas_planned_cents=gas_planned,
                     gas_actual_cents=gas_actual,
-                    notes=row["notes"] or "",
+                    notes=notes,
                     updated_at=row["updated_at"],
                 )
             else:
+                income = yaml_income if yaml_income is not None else actual_income
+                savings = yaml_savings if yaml_savings is not None else 0
+                fixed = yaml_fixed if yaml_fixed is not None else 26071
+                pge = yaml_pge if yaml_pge is not None else pge_actual
+                groceries_planned = yaml_groceries if yaml_groceries is not None else 0
+                dining_planned = yaml_dining if yaml_dining is not None else 0
+                gas_planned = yaml_gas if yaml_gas is not None else 0
+                notes = yaml_notes if yaml_notes is not None else ""
+
                 return MonthlyOverview(
                     month=month,
                     status="open",
-                    income_cents=actual_income,
-                    savings_target_cents=0,
-                    fixed_bills_cents=26071,
-                    pge_cents=pge_actual,
-                    groceries_planned_cents=0,
+                    income_cents=income,
+                    savings_target_cents=savings,
+                    fixed_bills_cents=fixed,
+                    pge_cents=pge,
+                    groceries_planned_cents=groceries_planned,
                     groceries_actual_cents=groceries_actual,
-                    dining_planned_cents=0,
+                    dining_planned_cents=dining_planned,
                     dining_actual_cents=dining_actual,
-                    gas_planned_cents=0,
+                    gas_planned_cents=gas_planned,
                     gas_actual_cents=gas_actual,
-                    notes="",
+                    notes=notes,
                     updated_at=int(time.time()),
                 )
 
     # ==========================================================================
     # Goals Progress Tracker (Screenshot 4)
     # ==========================================================================
-    def get_goals_progress(self, month: Optional[str] = None) -> List[GoalProgress]:
+    def get_goals_progress(
+        self, month: Optional[str] = None, yaml_path: Optional[Path | str] = None
+    ) -> List[GoalProgress]:
         """Calculates progress toward monthly Savings and Kahram payment targets."""
         if not month:
             from datetime import datetime
             month = datetime.now().strftime("%Y-%m")
 
-        overview = self.get_monthly_overview(month)
+        overview = self.get_monthly_overview(month, yaml_path=yaml_path)
         start_date = f"{month}-01"
         import calendar
         y, m = map(int, month.split("-"))
@@ -783,51 +940,221 @@ class FinanceStore:
 
         goals: List[GoalProgress] = []
 
-        with self._get_connection() as conn:
-            # Savings Goal: Net transfers into Capital One Savings
-            sav_row = conn.execute(
-                """
-                SELECT COALESCE(SUM(p.amount_cents), 0) as total
-                FROM postings p
-                JOIN transactions t ON p.transaction_id = t.id
-                WHERE p.account_id = 'Assets:Savings:CapitalOne'
-                  AND t.date >= ? AND t.date <= ?;
-                """,
-                (start_date, end_date),
-            ).fetchone()
-            saved_cents = max(0, int(sav_row["total"]))
-            goals.append(
-                GoalProgress(
-                    name="💰 Savings",
-                    target_cents=overview.savings_target_cents,
-                    saved_cents=saved_cents,
-                    status="open" if saved_cents < overview.savings_target_cents else "completed",
-                )
-            )
+        # Read setup.yaml for live targets and baseline already_paid amounts
+        setup_data = None
+        yaml_p = yaml_path or self.get_setup_yaml_path()
+        if yaml_p:
+            try:
+                from telemachus.finance.setup import load_setup_yaml, _parse_cents
+                setup_data = load_setup_yaml(yaml_p)
+            except Exception:
+                pass
 
-            # Kahram Payment
-            kahram_row = conn.execute(
-                """
-                SELECT COALESCE(SUM(p.amount_cents), 0) as total
-                FROM postings p
-                JOIN transactions t ON p.transaction_id = t.id
-                WHERE p.account_id IN ('Expenses:Family:Kahram', 'Expenses:Family:Brother')
-                  AND t.date >= ? AND t.date <= ?;
-                """,
-                (start_date, end_date),
-            ).fetchone()
-            kahram_paid = max(0, int(kahram_row["total"]))
-            rule_row = conn.execute("SELECT base_amount_cents FROM recurring_rules WHERE id = 'rule_kahram';").fetchone()
-            kahram_target = int(rule_row["base_amount_cents"]) if rule_row else 10000
+        # 1. Savings Goal Target and Baseline
+        savings_target = overview.savings_target_cents
+        savings_baseline = None
 
-            goals.append(
-                GoalProgress(
-                    name="🏠 Kahram Payment",
-                    target_cents=kahram_target,
-                    saved_cents=kahram_paid,
-                    status="open" if kahram_paid < kahram_target else "completed",
-                )
+        if setup_data:
+            # A. Check starting_balances for Capital One Savings balance (as requested)
+            sb = setup_data.get("starting_balances") or {}
+            for k, v in sb.items():
+                clean_k = k.lower().replace("-", "_").replace(" ", "_")
+                if any(term in clean_k for term in ("capital", "capitol", "savings", "hysa")):
+                    if not any(excl in clean_k for excl in ("checking", "visa", "credit")):
+                        val = _parse_cents(v)
+                        if val is not None:
+                            savings_baseline = val
+                            break
+
+            # B. Check monthly_targets for savings_target (as requested: "in my setup yaml, there is a monthly_targets and a savings_target")
+            mt = setup_data.get("monthly_targets") or {}
+            if isinstance(mt, dict):
+                t = _parse_cents(mt.get("savings_target") or mt.get("savings") or mt.get("monthly_savings"))
+                if t is not None:
+                    savings_target = t
+                if savings_baseline is None:
+                    b = _parse_cents(
+                        mt.get("already_saved")
+                        or mt.get("savings_saved")
+                        or mt.get("savings_actual")
+                    )
+                    if b is not None:
+                        savings_baseline = b
+
+            # C. Check top-level setup_data.get("savings_target")
+            if setup_data.get("savings_target") is not None:
+                t = _parse_cents(setup_data["savings_target"])
+                if t is not None:
+                    savings_target = t
+
+            # D. Check goals.savings
+            goals_cfg = setup_data.get("goals") or {}
+            sav_cfg = goals_cfg.get("savings") or goals_cfg.get("saving") or {}
+            if isinstance(sav_cfg, dict):
+                t = _parse_cents(sav_cfg.get("target") or sav_cfg.get("amount") or sav_cfg.get("goal"))
+                if t is not None:
+                    savings_target = t
+                if savings_baseline is None:
+                    b = _parse_cents(
+                        sav_cfg.get("already_saved")
+                        or sav_cfg.get("saved")
+                        or sav_cfg.get("current")
+                        or sav_cfg.get("already_paid")
+                        or sav_cfg.get("paid")
+                        or sav_cfg.get("actual")
+                    )
+                    if b is not None:
+                        savings_baseline = b
+            elif isinstance(sav_cfg, (int, float, str)):
+                t = _parse_cents(sav_cfg)
+                if t is not None:
+                    savings_target = t
+
+            # E. Check top-level setup_data.get("savings") or setup_data.get("savings_goal")
+            top_sav = setup_data.get("savings") or setup_data.get("savings_goal") or {}
+            if isinstance(top_sav, dict):
+                t = _parse_cents(top_sav.get("target") or top_sav.get("amount"))
+                if t is not None:
+                    savings_target = t
+                if savings_baseline is None:
+                    b = _parse_cents(
+                        top_sav.get("already_saved")
+                        or top_sav.get("saved")
+                        or top_sav.get("current")
+                        or top_sav.get("already_paid")
+                        or top_sav.get("paid")
+                        or top_sav.get("actual")
+                    )
+                    if b is not None:
+                        savings_baseline = b
+
+        if savings_target <= 0:
+            savings_target = 100000  # Default $1,000.00 monthly savings target
+
+        # 2. Brother / Kahram Payment Goal Target and Baseline
+        kahram_target = 10000
+        kahram_baseline = None
+        if setup_data:
+            goals_cfg = setup_data.get("goals") or {}
+            bro_cfg = (
+                goals_cfg.get("brother")
+                or goals_cfg.get("kahram")
+                or goals_cfg.get("brother_payment")
+                or {}
             )
+            if isinstance(bro_cfg, dict):
+                t = _parse_cents(bro_cfg.get("target") or bro_cfg.get("amount") or bro_cfg.get("goal"))
+                if t is not None:
+                    kahram_target = t
+                b = _parse_cents(
+                    bro_cfg.get("already_paid")
+                    or bro_cfg.get("paid")
+                    or bro_cfg.get("current")
+                    or bro_cfg.get("already_saved")
+                    or bro_cfg.get("saved")
+                    or bro_cfg.get("actual")
+                )
+                if b is not None:
+                    kahram_baseline = b
+            elif isinstance(bro_cfg, (int, float, str)):
+                t = _parse_cents(bro_cfg)
+                if t is not None:
+                    kahram_target = t
+
+            # Fallback to fixed_bills.kahram or fixed_bills.brother if not in goals section
+            fb = setup_data.get("fixed_bills") or {}
+            k_bill = fb.get("kahram") or fb.get("brother") or {}
+            if isinstance(k_bill, dict):
+                if kahram_target == 10000:
+                    t = _parse_cents(k_bill.get("amount") or k_bill.get("target"))
+                    if t is not None:
+                        kahram_target = t
+                if kahram_baseline is None:
+                    b = _parse_cents(
+                        k_bill.get("already_paid")
+                        or k_bill.get("paid")
+                        or k_bill.get("current")
+                        or k_bill.get("actual")
+                    )
+                    if b is not None:
+                        kahram_baseline = b
+
+            # Also check top-level setup_data.get("brother") or setup_data.get("kahram")
+            top_bro = setup_data.get("brother") or setup_data.get("kahram") or {}
+            if isinstance(top_bro, dict):
+                if kahram_target == 10000:
+                    t = _parse_cents(top_bro.get("target") or top_bro.get("amount"))
+                    if t is not None:
+                        kahram_target = t
+                if kahram_baseline is None:
+                    b = _parse_cents(
+                        top_bro.get("already_paid")
+                        or top_bro.get("paid")
+                        or top_bro.get("current")
+                        or top_bro.get("actual")
+                    )
+                    if b is not None:
+                        kahram_baseline = b
+
+        # 3. Determine Progress Amounts (Prioritizing setup.yaml source of truth)
+        if savings_baseline is not None:
+            saved_cents = max(0, savings_baseline)
+        else:
+            try:
+                saved_cents = max(0, self.get_account_balance("Assets:Savings:CapitalOne"))
+            except Exception:
+                with self._get_connection() as conn:
+                    sav_row = conn.execute(
+                        """
+                        SELECT COALESCE(SUM(p.amount_cents), 0) as total
+                        FROM postings p
+                        JOIN transactions t ON p.transaction_id = t.id
+                        WHERE p.account_id = 'Assets:Savings:CapitalOne'
+                          AND t.date >= ? AND t.date <= ?;
+                        """,
+                        (start_date, end_date),
+                    ).fetchone()
+                    saved_cents = max(0, int(sav_row["total"]))
+
+        goals.append(
+            GoalProgress(
+                name="💰 Savings Target",
+                target_cents=savings_target,
+                saved_cents=saved_cents,
+                status="completed" if saved_cents >= savings_target else "open",
+            )
+        )
+
+        if kahram_baseline is not None:
+            total_kahram_paid = max(0, kahram_baseline)
+        else:
+            with self._get_connection() as conn:
+                kahram_row = conn.execute(
+                    """
+                    SELECT COALESCE(SUM(p.amount_cents), 0) as total
+                    FROM postings p
+                    JOIN transactions t ON p.transaction_id = t.id
+                    WHERE p.account_id IN ('Expenses:Family:Kahram', 'Expenses:Family:Brother')
+                      AND t.date >= ? AND t.date <= ?;
+                    """,
+                    (start_date, end_date),
+                ).fetchone()
+                total_kahram_paid = max(0, int(kahram_row["total"]))
+
+        if kahram_target == 10000:
+            with self._get_connection() as conn:
+                rule_row = conn.execute("SELECT base_amount_cents FROM recurring_rules WHERE id = 'rule_kahram';").fetchone()
+                if rule_row:
+                    kahram_target = int(rule_row["base_amount_cents"])
+
+        goals.append(
+            GoalProgress(
+                name="🏠 Brother (Kahram) Payment",
+                target_cents=kahram_target,
+                saved_cents=total_kahram_paid,
+                status="completed" if total_kahram_paid >= kahram_target else "open",
+            )
+        )
 
         return goals
 
@@ -844,27 +1171,39 @@ class FinanceStore:
         today_str = default_date or datetime.now().strftime("%Y-%m-%d")
 
         CATEGORY_MAP = {
-            "groceries": ("Expenses:Food:Groceries", "Liabilities:CreditCard:Visa"),
-            "grocery": ("Expenses:Food:Groceries", "Liabilities:CreditCard:Visa"),
-            "dining": ("Expenses:Food:Dining", "Liabilities:CreditCard:Visa"),
-            "dining out": ("Expenses:Food:Dining", "Liabilities:CreditCard:Visa"),
-            "eating out": ("Expenses:Food:Dining", "Liabilities:CreditCard:Visa"),
-            "lunch": ("Expenses:Food:Dining", "Liabilities:CreditCard:Visa"),
-            "dinner": ("Expenses:Food:Dining", "Liabilities:CreditCard:Visa"),
-            "coffee": ("Expenses:Food:Dining", "Liabilities:CreditCard:Visa"),
-            "gas": ("Expenses:Transport:Gas", "Liabilities:CreditCard:Visa"),
-            "fuel": ("Expenses:Transport:Gas", "Liabilities:CreditCard:Visa"),
+            "groceries": ("Expenses:Food:Groceries", "Assets:Checking:WellsFargo"),
+            "grocery": ("Expenses:Food:Groceries", "Assets:Checking:WellsFargo"),
+            "dining": ("Expenses:Food:Dining", "Assets:Checking:WellsFargo"),
+            "dining out": ("Expenses:Food:Dining", "Assets:Checking:WellsFargo"),
+            "eating out": ("Expenses:Food:Dining", "Assets:Checking:WellsFargo"),
+            "lunch": ("Expenses:Food:Dining", "Assets:Checking:WellsFargo"),
+            "dinner": ("Expenses:Food:Dining", "Assets:Checking:WellsFargo"),
+            "coffee": ("Expenses:Food:Dining", "Assets:Checking:WellsFargo"),
+            "gas": ("Expenses:Transport:Gas", "Assets:Checking:WellsFargo"),
+            "fuel": ("Expenses:Transport:Gas", "Assets:Checking:WellsFargo"),
             "payday": ("Assets:Checking:WellsFargo", "Income:Salary"),
             "salary": ("Assets:Checking:WellsFargo", "Income:Salary"),
             "income": ("Assets:Checking:WellsFargo", "Income:Salary"),
             "kahram": ("Expenses:Family:Kahram", "Assets:Checking:WellsFargo"),
             "brother": ("Expenses:Family:Kahram", "Assets:Checking:WellsFargo"),
-            "gym": ("Expenses:Subscriptions:Gym", "Liabilities:CreditCard:Visa"),
-            "spotify": ("Expenses:Subscriptions:Spotify", "Liabilities:CreditCard:Visa"),
-            "icloud": ("Expenses:Subscriptions:AppleCloud", "Liabilities:CreditCard:Visa"),
+            "gym": ("Expenses:Subscriptions:Gym", "Assets:Checking:WellsFargo"),
+            "spotify": ("Expenses:Subscriptions:Spotify", "Assets:Checking:WellsFargo"),
+            "icloud": ("Expenses:Subscriptions:AppleCloud", "Assets:Checking:WellsFargo"),
             "wifi": ("Expenses:Utilities:WiFi", "Assets:Checking:WellsFargo"),
             "pge": ("Expenses:Utilities:PGE", "Assets:Checking:WellsFargo"),
-            "personal": ("Expenses:Personal:Discretionary", "Liabilities:CreditCard:Visa"),
+            "personal": ("Expenses:Personal:Discretionary", "Assets:Checking:WellsFargo"),
+            "savings": ("Assets:Savings:CapitalOne", "Assets:Checking:WellsFargo"),
+            "saving": ("Assets:Savings:CapitalOne", "Assets:Checking:WellsFargo"),
+            "hysa": ("Assets:Savings:CapitalOne", "Assets:Checking:WellsFargo"),
+            "capital one": ("Assets:Savings:CapitalOne", "Assets:Checking:WellsFargo"),
+            "savings deposit": ("Assets:Savings:CapitalOne", "Assets:Checking:WellsFargo"),
+            "savings transfer": ("Assets:Savings:CapitalOne", "Assets:Checking:WellsFargo"),
+            "credit_card_payment": ("Liabilities:CreditCard:Visa", "Assets:Checking:WellsFargo"),
+            "credit card payment": ("Liabilities:CreditCard:Visa", "Assets:Checking:WellsFargo"),
+            "credit card": ("Liabilities:CreditCard:Visa", "Assets:Checking:WellsFargo"),
+            "cc payment": ("Liabilities:CreditCard:Visa", "Assets:Checking:WellsFargo"),
+            "visa payment": ("Liabilities:CreditCard:Visa", "Assets:Checking:WellsFargo"),
+            "card payment": ("Liabilities:CreditCard:Visa", "Assets:Checking:WellsFargo"),
         }
 
         logged_txs = []
@@ -880,7 +1219,12 @@ class FinanceStore:
                 target_acc, source_acc = CATEGORY_MAP[raw_cat]
             else:
                 target_acc = item.get("to_account") or "Expenses:Personal:Discretionary"
-                source_acc = item.get("from_account") or "Liabilities:CreditCard:Visa"
+                source_acc = item.get("from_account") or "Assets:Checking:WellsFargo"
+
+            if item.get("from_account"):
+                source_acc = item["from_account"]
+            if item.get("to_account"):
+                target_acc = item["to_account"]
 
             if raw_cat in ("payday", "salary", "income") or (amount_val > 0 and target_acc == "Assets:Checking:WellsFargo"):
                 postings = [

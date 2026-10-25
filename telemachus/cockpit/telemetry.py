@@ -190,8 +190,30 @@ class CockpitTelemetry:
         self._thinking_cache_time = now
         return res
 
-    def format_single_line_header(self, max_width: int = 120) -> str:
+    def get_llm_status(self, status_path: Optional[Path] = None) -> Dict[str, Any]:
+        """Reads live LM Studio processing/producing status from Ingress proxy monitor."""
+        target_path = status_path or (Path.home() / ".memory" / "llm_status.json")
+        if not target_path.exists():
+            return {"status": "idle"}
+        try:
+            with open(target_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            now = time.time()
+            st = data.get("status", "idle")
+            # Stale timeout check: if active status is older than threshold, treat as idle
+            if st == "processing_prompt" and (now - data.get("start_time", now)) > 25:
+                return {"status": "idle"}
+            if st == "producing_tokens" and (now - data.get("start_time", now)) > 120:
+                return {"status": "idle"}
+            return data
+        except Exception:
+            return {"status": "idle"}
+
+    def format_single_line_header(self, max_width: int = 120, status_path: Optional[Path] = None) -> str:
         """Renders the unified top header string formatted for tmux/terminal."""
+        llm_stat = self.get_llm_status(status_path=status_path)
+        state = llm_stat.get("status")
+
         model = self.get_active_model()
         if len(model) > 22:
             model = model.split("/")[-1]
@@ -204,8 +226,18 @@ class CockpitTelemetry:
         think = self.get_thinking_tokens()
         think_tok = f" · Think: {think['last_turn_tokens']}t" if think["last_turn_tokens"] > 0 else " · Think: ON"
 
+        # Active LM Studio processing/producing indicator
+        if state == "processing_prompt":
+            badge = "[⚡ LM Studio: Processing Prompt...]"
+        elif state == "producing_tokens":
+            toks = llm_stat.get("tokens_produced", 0)
+            spd = llm_stat.get("speed_tps", speed)
+            badge = f"[✨ LM Studio: Producing ({toks} tok · {spd:.1f} t/s)]"
+        else:
+            badge = f"[MODEL: {model}{think_tok}]"
+
         line = (
-            f"[MODEL: {model}{think_tok}] | "
+            f"{badge} | "
             f"CTX: {ctx['used_tokens']:,}/{ctx['max_tokens']:,} ({ctx['used_pct']}%) | "
             f"RAM: {mem['used_gb']:.1f}/{mem['total_gb']:.1f}G ({mem['used_pct']}%) "
             f"[MLX {mem['mlx_gb']}G · Laya {mem['laya_gb']}G] | "
@@ -213,7 +245,7 @@ class CockpitTelemetry:
         )
         if len(line) > max_width:
             line = (
-                f"[MODEL: {model}{think_tok}] | "
+                f"{badge} | "
                 f"CTX: {ctx['used_pct']}% | "
                 f"RAM: {mem['used_gb']:.1f}/{mem['total_gb']:.1f}G | "
                 f"SPEED: {speed:.1f} t/s"

@@ -431,9 +431,9 @@ class TestFinanceEngine(unittest.TestCase):
         txs = self.store.log_batch_transactions(items, default_date="2026-10-23")
         self.assertEqual(len(txs), 4)
 
-        # Verify balances reflect batch
+        # Verify balances reflect batch (checking debit card pays for daily expenses)
         wf_bal = self.store.get_account_balance("Assets:Checking:WellsFargo")
-        self.assertEqual(wf_bal, 160000) # $1,600 from payday
+        self.assertEqual(wf_bal, 160000 - 4520 - 1850 - 3500) # $1,600 payday - expenses (150130 cents)
 
         groc_bal = self.store.get_account_balance("Expenses:Food:Groceries")
         self.assertEqual(groc_bal, 4520)
