@@ -7,6 +7,15 @@ import hashlib
 from typing import Any, Dict, List, Optional
 import uuid
 
+# fixed_bills keys whose amount is only an estimate (real amount arrives on the statement).
+VARIABLE_BILL_KEYS = frozenset({"pge"})
+
+
+def is_variable_bill(key: str, cfg: Optional[Dict[str, Any]] = None) -> bool:
+    """True when a setup.yaml bill amount is an estimate, not a known fixed charge."""
+    clean = key.lower().replace("-", "_").replace(" ", "_")
+    return clean in VARIABLE_BILL_KEYS or bool((cfg or {}).get("variable"))
+
 
 class AccountType(str, Enum):
     """Core double-entry account categories."""

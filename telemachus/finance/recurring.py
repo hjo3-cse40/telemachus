@@ -8,6 +8,7 @@ Handles:
 """
 from __future__ import annotations
 
+import calendar
 from datetime import datetime, timedelta
 import math
 from pathlib import Path
@@ -25,8 +26,11 @@ from telemachus.finance.models import (
     RecurringRule,
     RuleType,
     Transaction,
+    is_variable_bill,
 )
 from telemachus.finance.store import FinanceStore
+
+ESTIMATE_NOTE = "Estimate from past bills; the real amount is only known when the statement arrives"
 
 
 class RecurringEngine:
@@ -271,7 +275,6 @@ class RecurringEngine:
         if not due_date:
             year, month = map(int, billing_cycle.split("-"))
             # Ensure day doesn't exceed month's days
-            import calendar
             _, max_days = calendar.monthrange(year, month)
             day = min(rule.due_day_of_month, max_days)
             due_date = f"{year:04d}-{month:02d}-{day:02d}"
@@ -456,6 +459,9 @@ class RecurringEngine:
                 )
                 due_day = int(v.get("due_day", def_day))
                 amt = _parse_cents(v.get("amount", 0.0)) or 0
+                is_estimate = is_variable_bill(clean_k, v)
+                if is_estimate and not amt:
+                    amt = _parse_cents((setup_data.get("monthly_targets") or {}).get("pge_estimate")) or 0
                 bill_specs.append({
                     "id": f"bill_{clean_k}",
                     "name": v.get("name") or def_name,
@@ -463,6 +469,7 @@ class RecurringEngine:
                     "due_day": due_day,
                     "amount_cents": amt,
                     "is_active": True,
+                    "is_estimate": is_estimate,
                     "category": v.get("category") or def_cat,
                 })
 
@@ -479,6 +486,7 @@ class RecurringEngine:
                     "due_day": 28,
                     "amount_cents": pge_est,
                     "is_active": True,
+                    "is_estimate": True,
                     "category": "Utility (Variable)",
                 })
 
@@ -502,7 +510,7 @@ class RecurringEngine:
                 d_day = check_date.day
 
                 for spec in bill_specs:
-                    if spec["due_day"] == d_day:
+                    if self._effective_due_day(spec["due_day"], check_date) == d_day:
                         if spec["id"] == "bill_credit_card":
                             card_bal = self.store.get_account_balance("Liabilities:CreditCard:Visa")
                             status = "paid" if card_bal <= 0 else "due"
@@ -523,7 +531,7 @@ class RecurringEngine:
                             amt = max(0, spec["amount_cents"] - paid_this_month)
                             status = "paid" if amt == 0 else "due"
                         else:
-                            is_paid = self._is_bill_paid_in_month(spec["account_id"], m_str)
+                            is_paid = self._is_bill_paid_for_due_date(spec["account_id"], d_str)
                             status = "paid" if is_paid else "due"
                             amt = spec["amount_cents"] if not is_paid else 0
 
@@ -534,8 +542,9 @@ class RecurringEngine:
                             "due_date": d_str,
                             "amount_cents": amt,
                             "hist_avg_cents": spec["amount_cents"],
+                            "is_estimate": bool(spec.get("is_estimate")),
                             "status": status,
-                            "rule_type": "fixed",
+                            "rule_type": "variable" if spec.get("is_estimate") else "fixed",
                             "is_autopay": True,
                             "from_account": "Assets:Checking:WellsFargo",
                             "to_account": spec["account_id"],
@@ -568,6 +577,10 @@ class RecurringEngine:
                         "due_date": instance.due_date,
                         "amount_cents": instance.effective_amount_cents,
                         "hist_avg_cents": hist_cents,
+                        "is_estimate": (
+                            rule.rule_type == RuleType.VARIABLE
+                            and instance.actual_amount_cents is None
+                        ),
                         "status": instance.status.value,
                         "rule_type": rule.rule_type.value,
                         "is_autopay": rule.is_autopay,
@@ -610,10 +623,43 @@ class RecurringEngine:
     # ==========================================================================
     # Paycheck Cash Flow Partitioning
     # ==========================================================================
+    @staticmethod
+    def _effective_due_day(due_day: int, on_date: datetime) -> int:
+        """Clamps a due day to the month's length (day 30 -> Feb 28/29)."""
+        return min(due_day, calendar.monthrange(on_date.year, on_date.month)[1])
+
+    @staticmethod
+    def _due_date_for_month(due_day: int, month: str) -> str:
+        y, m = map(int, month.split("-"))
+        day = min(due_day, calendar.monthrange(y, m)[1])
+        return f"{y:04d}-{m:02d}-{day:02d}"
+
+    def _is_bill_paid_for_due_date(self, account_id: str, due_date: str) -> bool:
+        """True if a payment was logged within ~half a month of this due date.
+
+        Bills are often paid at the turn of the month (e.g. the 1st) for the
+        previous month's statement, so a calendar-month match wrongly credits
+        that payment to the new month. Windows centred on each due date tile
+        the calendar without overlapping.
+        """
+        due = datetime.strptime(due_date, "%Y-%m-%d")
+        start_date = (due - timedelta(days=15)).strftime("%Y-%m-%d")
+        end_date = (due + timedelta(days=14)).strftime("%Y-%m-%d")
+        with self.store._get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) as cnt
+                FROM postings p
+                JOIN transactions t ON p.transaction_id = t.id
+                WHERE p.account_id = ? AND t.date >= ? AND t.date <= ? AND p.amount_cents > 0;
+                """,
+                (account_id, start_date, end_date),
+            ).fetchone()
+            return int(row["cnt"]) > 0 if row else False
+
     def _is_bill_paid_in_month(self, account_id: str, month: str) -> bool:
         """Checks if any payment transaction was logged for this account in the specified month."""
         start_date = f"{month}-01"
-        import calendar
         y, m = map(int, month.split("-"))
         _, last_day = calendar.monthrange(y, m)
         end_date = f"{month}-{last_day:02d}"
@@ -629,6 +675,28 @@ class RecurringEngine:
                 (account_id, start_date, end_date),
             ).fetchone()
             return int(row["cnt"]) > 0 if row else False
+
+    @staticmethod
+    def _next_paycheck_date(plan: PaycheckPlan, today: datetime) -> datetime:
+        """First payday strictly after `today`, derived from the plan's anchor and frequency.
+
+        On a payday itself, today's paycheck has already landed, so the cycle
+        runs to the following payday.
+        """
+        if plan.frequency == "semimonthly":
+            for day in (1, 15):
+                candidate = today.replace(day=day)
+                if candidate > today:
+                    return candidate
+            first_next = (today.replace(day=1) + timedelta(days=32)).replace(day=1)
+            return first_next
+        try:
+            anchor = datetime.strptime(plan.anchor_date, "%Y-%m-%d")
+        except ValueError:
+            return today + timedelta(days=14)
+        elapsed = (today - anchor).days
+        periods = elapsed // 14 + 1
+        return anchor + timedelta(days=14 * periods)
 
     def get_paycheck_allocation(
         self, as_of_date: Optional[str] = None, yaml_path: Optional[Path | str] = None
@@ -687,12 +755,13 @@ class RecurringEngine:
             )
 
         # 3. 14-Day Evaluation Window: starting from now_dt
-        days_in_cycle = 14
         start_dt = now_dt
-        end_dt = start_dt + timedelta(days=days_in_cycle - 1)
+        next_paycheck_dt = self._next_paycheck_date(plan, start_dt)
+        days_in_cycle = (next_paycheck_dt - start_dt).days
+        end_dt = next_paycheck_dt - timedelta(days=1)
         paycheck_date_str = start_dt.strftime("%Y-%m-%d")
         end_window_str = end_dt.strftime("%Y-%m-%d")
-        next_paycheck_str = (end_dt + timedelta(days=1)).strftime("%Y-%m-%d")
+        next_paycheck_str = next_paycheck_dt.strftime("%Y-%m-%d")
 
         # 4. Map of active bills from setup.yaml (or database fallback)
         configured_bills = {}
@@ -727,6 +796,9 @@ class RecurringEngine:
             acc, default_name, default_day = STD_BILL_ACCOUNTS.get(clean_k, (f"Expenses:{k.title()}", k.title(), 1))
             due_day = int(v.get("due_day", default_day))
             amt = _parse_cents(v.get("amount", 0.0)) or 0
+            is_estimate = is_variable_bill(clean_k, v)
+            if is_estimate and not amt:
+                amt = _parse_cents((setup_data.get("monthly_targets") or {}).get("pge_estimate")) or 0
             already_paid = _parse_cents(v.get("already_paid"))
             bill_specs.append({
                 "key": clean_k,
@@ -735,6 +807,7 @@ class RecurringEngine:
                 "due_day": due_day,
                 "amount_cents": amt,
                 "already_paid_cents": already_paid,
+                "is_estimate": is_estimate,
                 "is_active": bool(v.get("active", True)),
             })
 
@@ -765,6 +838,7 @@ class RecurringEngine:
                 "due_day": 28,
                 "amount_cents": pge_est,
                 "already_paid_cents": None,
+                "is_estimate": True,
                 "is_active": True,
             })
 
@@ -782,7 +856,7 @@ class RecurringEngine:
             for spec in bill_specs:
                 if not spec["is_active"]:
                     continue
-                if spec["due_day"] == d_day:
+                if self._effective_due_day(spec["due_day"], check_date) == d_day:
                     key = spec["key"]
                     handled_keys_in_window.add(key)
 
@@ -856,7 +930,7 @@ class RecurringEngine:
 
                     # C. Standard Fixed Bills (WiFi, PG&E, Gym, Rent, Subscriptions)
                     else:
-                        is_paid = self._is_bill_paid_in_month(spec["account_id"], m_str)
+                        is_paid = self._is_bill_paid_for_due_date(spec["account_id"], d_str)
                         if is_paid:
                             status_str = "paid"
                             amt_due = 0
@@ -864,12 +938,13 @@ class RecurringEngine:
                         else:
                             status_str = "due"
                             amt_due = spec["amount_cents"]
-                            note_str = "Due in this window"
+                            note_str = ESTIMATE_NOTE if spec.get("is_estimate") else "Due in this window"
 
                         window_bills.append({
                             "name": spec["name"],
                             "due_date": d_str,
                             "amount_cents": amt_due,
+                            "is_estimate": bool(spec.get("is_estimate")) and not is_paid,
                             "status": status_str,
                             "note": note_str,
                             "notes": note_str,
@@ -886,6 +961,7 @@ class RecurringEngine:
                 "name": spec["name"],
                 "due_day": spec["due_day"],
                 "amount_cents": spec["amount_cents"],
+                "is_estimate": bool(spec.get("is_estimate")),
                 "status": "outside_window",
                 "note": out_note,
                 "notes": out_note,
@@ -969,7 +1045,6 @@ class RecurringEngine:
         if not month:
             month = datetime.now().strftime("%Y-%m")
         start_date = f"{month}-01"
-        import calendar
         y, m = map(int, month.split("-"))
         _, last_day = calendar.monthrange(y, m)
         end_date = f"{month}-{last_day:02d}"
@@ -1055,10 +1130,16 @@ class RecurringEngine:
                     status = "due"
                     status_text = f"⏳ Rem: ${(amt - paid_tot)/100:.2f}"
             else:
-                is_paid = self._is_bill_paid_in_month(acc, month)
+                is_paid = self._is_bill_paid_for_due_date(acc, self._due_date_for_month(due_day, month))
                 if is_paid:
                     status = "paid"
                     status_text = "✅ Paid"
+
+            is_variable = is_variable_bill(clean_k, v)
+            if is_variable:
+                if not amt:
+                    amt = _parse_cents((setup_data.get("monthly_targets") or {}).get("pge_estimate")) or 0
+                notes = notes or ESTIMATE_NOTE
 
             bills.append({
                 "key": clean_k,
@@ -1071,7 +1152,7 @@ class RecurringEngine:
                 "account_id": acc,
                 "is_active": is_active,
                 "notes": notes,
-                "is_variable": False,
+                "is_variable": is_variable,
             })
 
         # Add PG&E variable bill if not explicitly added
@@ -1081,7 +1162,9 @@ class RecurringEngine:
                 p = _parse_cents(setup_data["monthly_targets"].get("pge_estimate"))
                 if p:
                     pge_est = p
-            pge_paid = self._is_bill_paid_in_month("Expenses:Utilities:PGE", month)
+            pge_paid = self._is_bill_paid_for_due_date(
+                "Expenses:Utilities:PGE", self._due_date_for_month(28, month)
+            )
             bills.append({
                 "key": "pge",
                 "name": "PG&E Electric & Gas",

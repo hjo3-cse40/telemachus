@@ -21,6 +21,7 @@ from typing import Any, Dict, Generator, List, Optional, Tuple
 
 from telemachus.finance.models import (
     DEFAULT_USER_ACCOUNTS,
+    is_variable_bill,
     Account,
     AccountType,
     BillInstance,
@@ -795,7 +796,7 @@ class FinanceStore:
             if isinstance(fb, dict):
                 tot_f = 0
                 for k, v in fb.items():
-                    if isinstance(v, dict) and bool(v.get("active", True)):
+                    if isinstance(v, dict) and bool(v.get("active", True)) and not is_variable_bill(k, v):
                         amt = _parse_cents(v.get("amount", 0.0))
                         if amt:
                             tot_f += amt

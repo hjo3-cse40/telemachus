@@ -202,26 +202,30 @@ def parse_bullet_line(line: str) -> Optional[Dict[str, Any]]:
     desc_clean = desc.strip()
     cat_lower = desc_clean.lower()
 
-    # Category matching
-    if any(k in cat_lower for k in ("grocery", "groceries", "safeway", "trader", "costco food", "supermarket")):
+    # Category matching (keywords must start a word, so "att" no longer matches "mattress"
+    # and "gas" no longer matches "Vegas"; "att" must be a whole word)
+    def has(*words: str) -> bool:
+        return any(re.search(rf"\b{re.escape(w)}", cat_lower) for w in words)
+
+    if has("grocery", "groceries", "safeway", "trader", "costco food", "supermarket"):
         category = "groceries"
-    elif any(k in cat_lower for k in ("gas", "fuel", "chevron", "shell", "gasoline")):
+    elif has("gas", "fuel", "chevron", "shell", "gasoline"):
         category = "gas"
-    elif any(k in cat_lower for k in ("lunch", "dinner", "dining", "taqueria", "burrito", "chipotle", "restaurant", "food", "coffee", "starbucks")):
+    elif has("lunch", "dinner", "dining", "taqueria", "burrito", "chipotle", "restaurant", "food", "coffee", "starbucks"):
         category = "dining"
-    elif any(k in cat_lower for k in ("wifi", "wi-fi", "internet", "comcast", "att")):
+    elif has("wifi", "wi-fi", "internet", "comcast") or re.search(r"\batt\b", cat_lower):
         category = "wifi"
-    elif any(k in cat_lower for k in ("pge", "pg&e", "electric", "power", "utility")):
+    elif has("pge", "pg&e", "electric", "power", "utility"):
         category = "pge"
-    elif "gym" in cat_lower:
+    elif has("gym"):
         category = "gym"
-    elif "spotify" in cat_lower:
+    elif has("spotify"):
         category = "spotify"
-    elif any(k in cat_lower for k in ("icloud", "apple")):
+    elif has("icloud", "apple"):
         category = "icloud"
-    elif any(k in cat_lower for k in ("kahram", "brother")):
+    elif has("kahram", "brother"):
         category = "kahram"
-    elif any(k in cat_lower for k in ("credit card", "credit card payment", "cc payment", "visa payment", "card payment")):
+    elif has("credit card", "credit card payment", "cc payment", "visa payment", "card payment"):
         category = "credit_card_payment"
     else:
         category = "personal"

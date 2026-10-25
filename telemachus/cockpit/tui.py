@@ -12,19 +12,62 @@ import os
 import subprocess
 import sys
 import time
+import unicodedata
 from typing import Any, Dict, List, Optional
 
 from telemachus.cockpit.email_panel import EmailTriagePanel
-from telemachus.cockpit.finance_panel import FinanceTuiPanel
+from telemachus.cockpit.finance_panel import EDIT_CATEGORIES, FinanceTuiPanel
 from telemachus.cockpit.safety_memory_panel import SafetyMemoryPanel
 from telemachus.cockpit.telemetry import CockpitTelemetry
+
+# Variation selector 16 asks for emoji presentation. Terminals, tmux and ncurses
+# disagree on the resulting width, which desyncs the cursor column and makes
+# lines jitter on every repaint. Dropping it keeps one stable width everywhere.
+_VS16 = "\ufe0f"
+
+
+def _char_width(ch: str) -> int:
+    """Terminal cell width of a single character (0, 1 or 2)."""
+    if unicodedata.combining(ch) or unicodedata.category(ch) in ("Mn", "Me", "Cf"):
+        return 0
+    return 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+
+
+def _clip_pad(text: str, width: int) -> str:
+    """Clips text to `width` terminal cells and pads with spaces to exactly `width`."""
+    out: List[str] = []
+    used = 0
+    for ch in text.replace(_VS16, ""):
+        w = _char_width(ch)
+        if used + w > width:
+            break
+        out.append(ch)
+        used += w
+    return "".join(out) + " " * (width - used)
+
+
+class _SafeScreen:
+    """Delegates to a curses window but normalizes all text written via addstr."""
+
+    def __init__(self, win: Any):
+        self._win = win
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._win, name)
+
+    def addstr(self, *args: Any) -> Any:
+        # Signatures: (text[, attr]) or (y, x, text[, attr])
+        args_list = list(args)
+        text_idx = 0 if isinstance(args_list[0], str) else 2
+        args_list[text_idx] = args_list[text_idx].replace(_VS16, "")
+        return self._win.addstr(*args_list)
 
 
 class CockpitTUI:
     """Curses-driven Terminal Cockpit with Tokyo Night aesthetics."""
 
     def __init__(self, stdscr: curses.window):
-        self.stdscr = stdscr
+        self.stdscr = _SafeScreen(stdscr)
         self.telemetry = CockpitTelemetry()
         self.email_panel = EmailTriagePanel()
         self.safety_panel = SafetyMemoryPanel()
@@ -74,9 +117,37 @@ class CockpitTUI:
         self.editing_orig_text = ""
         self.editing_buffer = ""
         self.editing_account_idx = 0
+        self.editing_category_idx = 0  # index into EDIT_CATEGORIES; 0 = Auto
+        self.editing_current_category = ""
+
+        self._last_size = self.stdscr.getmaxyx()
+        self._settle_repaint_at = 0.0
+        self._debug_path = os.environ.get("TELEMACHUS_TUI_DEBUG")
 
         self._init_curses()
         self.refresh_data()
+
+    def _hard_reset_screen(self) -> None:
+        """Re-sync curses with the real terminal after a burst of resizes."""
+        try:
+            sys.stdout.write("\x1b[r")  # reset any stale scroll region
+            sys.stdout.flush()
+            curses.endwin()
+            self.stdscr.refresh()  # re-enters curses mode with a fresh full repaint
+            self.stdscr.clearok(True)
+            self.stdscr.redrawwin()
+        except curses.error:
+            pass
+
+    def _debug(self, msg: str) -> None:
+        """Opt-in frame log: set TELEMACHUS_TUI_DEBUG=/path/to/log to record redraw causes."""
+        if not self._debug_path:
+            return
+        try:
+            with open(self._debug_path, "a", encoding="utf-8") as f:
+                f.write(f"{time.time():.3f} {msg}\n")
+        except OSError:
+            pass
 
     def _init_curses(self) -> None:
         curses.curs_set(0)  # Hide hardware cursor
@@ -89,7 +160,8 @@ class CockpitTUI:
 
         # Enable full mouse events
         try:
-            curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
+            # No REPORT_MOUSE_POSITION: motion events would fire on every cursor move
+            curses.mousemask(curses.ALL_MOUSE_EVENTS)
             curses.mouseinterval(0)
         except Exception:
             pass
@@ -122,7 +194,7 @@ class CockpitTUI:
                 return
             # Ensure we never write into the final terminal column to prevent curses auto-wrap
             safe_w = min(width, max(1, max_x - x - 1))
-            padded = f"{text:<{safe_w}}"[:safe_w]
+            padded = _clip_pad(text, safe_w)
             self.stdscr.addstr(y, x, padded, attr)
         except curses.error:
             pass
@@ -893,6 +965,12 @@ class CockpitTUI:
                 self.stdscr.addstr(start_y + 2, start_x + 3, acc_line[:box_w - 6], curses.color_pair(4) | curses.A_BOLD)
                 self.stdscr.addstr(start_y + 3, start_x + 3, "(Press [Tab] to cycle account: Checking ⇄ Visa ⇄ CapitalOne)", curses.color_pair(8))
 
+                cat_label = EDIT_CATEGORIES[self.editing_category_idx][0]
+                cat_line = f"Category: ◀ {cat_label} ▶"
+                if self.editing_category_idx == 0 and self.editing_current_category:
+                    cat_line += f"   (now: {self.editing_current_category}, [←/→] to pick)"
+                self.stdscr.addstr(start_y + 4, start_x + 3, cat_line[:box_w - 6], curses.color_pair(4) | curses.A_BOLD)
+
                 self.stdscr.addstr(start_y + 5, start_x + 3, "Notion Bullet:", curses.color_pair(2) | curses.A_BOLD)
                 input_y = start_y + 6
                 prompt = f"> {self.editing_buffer}█"
@@ -900,7 +978,9 @@ class CockpitTUI:
 
                 self.stdscr.addstr(start_y + 8, start_x + 3, "Examples: - groceries - 25.50   gas - 40   savings - 500", curses.color_pair(8))
 
-                hints = "[Enter] Save Changes   [Tab] Cycle Account   [d] Delete   [Esc] Cancel"
+                hints_top = "[Enter] Save   [Tab] Account   [←/→] Category"
+                hints = "[Ctrl+D] or [Del] Delete this item   [Esc] Cancel"
+                self.stdscr.addstr(start_y + box_h - 3, start_x + 3, hints_top[:box_w - 6], curses.color_pair(2))
                 self.stdscr.addstr(start_y + box_h - 2, start_x + 3, hints[:box_w - 6], curses.color_pair(2))
         except curses.error:
             pass
@@ -929,25 +1009,31 @@ class CockpitTUI:
 
         if self.finances_focus == "items" or len(items) == 1:
             idx = min(self.selected_item_idx, len(items) - 1)
-            target = items[idx]
-            self.editing_stage = "item"
-            self.editing_tx_id = target["id"]
-            bullet_text = self.finance_panel.item_to_bullet(target)
-            self.editing_orig_text = bullet_text
-            self.editing_buffer = bullet_text
-
-            acc_str = str(target.get("account", "")).lower()
-            if "checking" in acc_str or "wells" in acc_str:
-                self.editing_account_idx = 0
-            elif "visa" in acc_str or "card" in acc_str:
-                self.editing_account_idx = 1
-            elif "savings" in acc_str or "capital" in acc_str:
-                self.editing_account_idx = 2
-            else:
-                self.editing_account_idx = 0
+            self._begin_item_edit(items[idx])
         else:
             self.editing_stage = "day_menu"
             self.editing_buffer = ""
+
+    def _begin_item_edit(self, target: Dict[str, Any]) -> None:
+        """Loads one ledger item into the edit modal (text, account, category)."""
+        self.editing_stage = "item"
+        self.editing_tx_id = target["id"]
+        bullet_text = self.finance_panel.item_to_bullet(target)
+        self.editing_orig_text = bullet_text
+        self.editing_buffer = bullet_text
+        # Auto = let the text decide; the user can pick a category explicitly with Left/Right.
+        self.editing_category_idx = 0
+        self.editing_current_category = str(target.get("category") or "")
+
+        acc_str = str(target.get("account", "")).lower()
+        if "checking" in acc_str or "wells" in acc_str:
+            self.editing_account_idx = 0
+        elif "visa" in acc_str or "card" in acc_str:
+            self.editing_account_idx = 1
+        elif "savings" in acc_str or "capital" in acc_str:
+            self.editing_account_idx = 2
+        else:
+            self.editing_account_idx = 0
 
     def handle_modal_key(self, ch: int) -> None:
         if ch in (27,):  # ESC
@@ -1008,23 +1094,8 @@ class CockpitTUI:
                 elif cmd.isdigit():
                     num = int(cmd)
                     if 1 <= num <= len(items):
-                        target = items[num - 1]
                         self.selected_item_idx = num - 1
-                        self.editing_stage = "item"
-                        self.editing_tx_id = target["id"]
-                        bullet_text = self.finance_panel.item_to_bullet(target)
-                        self.editing_orig_text = bullet_text
-                        self.editing_buffer = bullet_text
-
-                        acc_str = str(target.get("account", "")).lower()
-                        if "checking" in acc_str or "wells" in acc_str:
-                            self.editing_account_idx = 0
-                        elif "visa" in acc_str or "card" in acc_str:
-                            self.editing_account_idx = 1
-                        elif "savings" in acc_str or "capital" in acc_str:
-                            self.editing_account_idx = 2
-                        else:
-                            self.editing_account_idx = 0
+                        self._begin_item_edit(items[num - 1])
                         return
                     else:
                         self.set_notification(f"Enter a number between 1 and {len(items)}")
@@ -1045,22 +1116,34 @@ class CockpitTUI:
                 acc_name = ["Checking", "Visa", "CapitalOne"][self.editing_account_idx]
                 self.set_notification(f"Funding Account changed to: {acc_name}")
                 return
+            elif ch in (curses.KEY_LEFT, curses.KEY_RIGHT):
+                step = 1 if ch == curses.KEY_RIGHT else -1
+                self.editing_category_idx = (self.editing_category_idx + step) % len(EDIT_CATEGORIES)
+                self.set_notification(f"Category: {EDIT_CATEGORIES[self.editing_category_idx][0]}")
+                return
             elif ch in (10, 13, curses.KEY_ENTER):
                 new_text = self.editing_buffer.strip()
                 if not new_text:
                     self.is_editing_finances = False
                     return
                 acc_choice = ["Checking", "Visa", "CapitalOne"][self.editing_account_idx]
+                cat_label, cat_key = EDIT_CATEGORIES[self.editing_category_idx]
                 res = self.finance_panel.edit_transaction(
-                    self.editing_tx_id, self.editing_date, new_text, account_choice=acc_choice
+                    self.editing_tx_id,
+                    self.editing_date,
+                    new_text,
+                    account_choice=acc_choice,
+                    category_choice=cat_key,
                 )
                 self.is_editing_finances = False
                 self.refresh_data()
                 if res:
-                    self.set_notification(f"✅ Updated transaction: [{acc_choice}] {new_text}")
+                    cat_note = f" -> {cat_label}" if cat_key else ""
+                    self.set_notification(f"✅ Updated transaction: [{acc_choice}]{cat_note} {new_text}")
                 else:
                     self.set_notification("❌ Could not parse bullet. Example: - groceries - 25.50")
-            elif ch in (ord("d"), ord("D")) and not self.editing_buffer:
+            elif ch in (4, curses.KEY_DC) or (ch in (ord("d"), ord("D")) and not self.editing_buffer):
+                # Ctrl+D / Delete key always delete; plain 'd' is text while the buffer is pre-filled.
                 self.finance_panel.delete_transaction(self.editing_tx_id)
                 self.is_editing_finances = False
                 self.refresh_data()
@@ -1123,6 +1206,19 @@ class CockpitTUI:
                 self.stdscr.addstr(max_y - 1, 1, hint[: max_x - 2], curses.color_pair(1))
         except curses.error:
             pass
+
+    def _ui_state(self) -> tuple:
+        """Snapshot of everything a mouse event can change on screen."""
+        return (
+            self.current_tab,
+            self.selected_email_idx,
+            self.selected_day_idx,
+            self.selected_item_idx,
+            self.selected_bill_idx,
+            self.finances_view_mode,
+            self.finances_focus,
+            self.notification,
+        )
 
     def handle_mouse(self) -> None:
         try:
@@ -1236,6 +1332,12 @@ class CockpitTUI:
                 prev_modal_state = curr_modal_state
                 needs_render = True
 
+            # Deferred full repaint after a resize burst
+            if self._settle_repaint_at and now >= self._settle_repaint_at:
+                self._settle_repaint_at = 0.0
+                self._hard_reset_screen()
+                needs_render = True
+
             # Telemetry & Clock tick (every 1.0 second)
             if now - last_telemetry >= 1.0:
                 last_telemetry = now
@@ -1254,6 +1356,7 @@ class CockpitTUI:
 
             # Render frame only when state or periodic timer requires it
             if needs_render:
+                frame_start = time.time()
                 max_y, max_x = self.stdscr.getmaxyx()
 
                 if max_y < 8 or max_x < 24:
@@ -1285,6 +1388,7 @@ class CockpitTUI:
                     self.draw_bottom_bar(max_y, max_x)
                     self.stdscr.refresh()
 
+                self._debug(f"frame {max_y}x{max_x} draw_ms={(time.time() - frame_start) * 1000:.1f}")
                 needs_render = False
 
             # Wait up to 50ms for user input (OS poll - zero CPU when idle)
@@ -1295,17 +1399,33 @@ class CockpitTUI:
 
             if ch == -1:
                 continue
+            self._debug(f"key {ch}")
 
-            # Key received! Flag next frame for render
-            needs_render = True
+            # Key received! Flag next frame for render (mouse events decide below)
+            needs_render = ch != curses.KEY_MOUSE
 
             if ch == curses.KEY_RESIZE:
+                # Only call curses.resizeterm() when the real tty size differs from what curses
+                # has. Calling it unconditionally queues another KEY_RESIZE every time, which
+                # loops forever (screen flashing, "4" and "q" never reach the handler).
                 try:
-                    curses.resizeterm(*self.stdscr.getmaxyx())
-                except Exception:
+                    tty = os.get_terminal_size(sys.stdout.fileno())
+                    if (tty.lines, tty.columns) != tuple(self.stdscr.getmaxyx()):
+                        curses.resizeterm(tty.lines, tty.columns)
+                except (OSError, ValueError, curses.error):
                     pass
+                new_size = self.stdscr.getmaxyx()
+                if new_size == self._last_size:
+                    # tmux can send repeated resize signals with no real change.
+                    # A full clear() here would flash the whole screen each time.
+                    needs_render = False
+                    continue
+                self._last_size = new_size
                 self.stdscr.clearok(True)
                 self.stdscr.clear()
+                # tmux resizes and re-splits panes in bursts while attaching. Repaint once more
+                # after the burst settles, so the screen can't stay out of sync with curses.
+                self._settle_repaint_at = time.time() + 0.4
                 continue
 
             if self.is_adding_finances:
@@ -1316,7 +1436,9 @@ class CockpitTUI:
                 continue
 
             if ch == curses.KEY_MOUSE:
+                before = self._ui_state()
                 self.handle_mouse()
+                needs_render = self._ui_state() != before
             elif ch in (ord("q"), ord("Q")):
                 break
             elif ch in (ord("1"),):

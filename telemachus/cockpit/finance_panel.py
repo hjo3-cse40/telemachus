@@ -27,6 +27,22 @@ from telemachus.finance.store import FinanceStore, get_finance_root
 
 logger = logging.getLogger(__name__)
 
+# Categories offered in the edit modal: (label shown, key understood by log_batch_transactions).
+# "Auto" (None) lets the bullet text decide, as when adding a transaction.
+EDIT_CATEGORIES: List[Tuple[str, Optional[str]]] = [
+    ("Auto", None),
+    ("Discretionary", "personal"),
+    ("Groceries", "groceries"),
+    ("Dining", "dining"),
+    ("Gas", "gas"),
+    ("WiFi", "wifi"),
+    ("PG&E", "pge"),
+    ("Gym", "gym"),
+    ("Spotify", "spotify"),
+    ("iCloud", "icloud"),
+    ("Brother", "kahram"),
+]
+
 
 class FinanceTuiPanel:
     """Manages finance data feeds, caching, and mutations for the Cockpit TUI."""
@@ -201,7 +217,10 @@ class FinanceTuiPanel:
         self.refresh()
         return self._cached_cashflow
 
-    def get_paycheck_allocation(self) -> Optional[PaycheckWindowAllocation]:
+    def get_paycheck_allocation(self, as_of_date: Optional[str] = None) -> Optional[PaycheckWindowAllocation]:
+        """Cached allocation for today, or a fresh computation for an explicit as_of_date."""
+        if as_of_date:
+            return self.recurring.get_paycheck_allocation(as_of_date=as_of_date)
         self.refresh()
         return self._cached_paycheck
 
@@ -245,12 +264,23 @@ class FinanceTuiPanel:
         date_str: str,
         new_bullet_line: str,
         account_choice: Optional[str] = None,
+        category_choice: Optional[str] = None,
     ) -> Optional[Transaction]:
-        """Edits an existing transaction by replacing it with a newly parsed bullet and optional account override."""
+        """Edits an existing transaction by replacing it with a newly parsed bullet and optional account/category overrides.
+
+        category_choice is a key from EDIT_CATEGORIES (e.g. "personal" for Discretionary); None keeps the
+        category the bullet text implies.
+        """
         parsed = parse_bullet_line(new_bullet_line)
         if not parsed:
             return None
         parsed["date"] = date_str
+
+        if category_choice:
+            parsed["category"] = category_choice
+            # Drop any destination the text implied (e.g. a "savings" word) so the chosen category wins.
+            parsed.pop("to_account", None)
+            parsed.pop("account_id", None)
 
         if account_choice:
             choice = account_choice.lower()
@@ -284,10 +314,6 @@ class FinanceTuiPanel:
     def get_goals_progress(self, month: Optional[str] = None) -> List[Any]:
         """Returns visual GoalProgress objects for monthly tracking bars."""
         return self.store.get_goals_progress(month=month)
-
-    def get_paycheck_allocation(self, as_of_date: Optional[str] = None) -> Any:
-        """Returns 14-day paycheck window allocation."""
-        return self.recurring.get_paycheck_allocation(as_of_date=as_of_date)
 
     def get_monthly_bills_breakdown(self, month: Optional[str] = None) -> Dict[str, Any]:
         """Returns recurring bills sorted by due date and monthly overview with Notion formulas."""

@@ -812,6 +812,19 @@ TOOLS_DEFINITIONS = [
 ]
 
 
+ESTIMATE_DISCLAIMER = (
+    "⚠️ Amounts marked 'ESTIMATE' (e.g. PG&E) are rough guesses based on past bills, NOT the actual "
+    "amount due. Always say 'about $X (estimate)' and tell the user the real amount is only known "
+    "when the PG&E statement arrives."
+)
+
+
+def _bill_amount(cents: int, is_estimate: bool) -> str:
+    """Formats a bill amount; estimates are visibly marked so they are never read as exact."""
+    text = f"${cents / 100.0:,.2f}"
+    return f"~{text} (ESTIMATE)" if is_estimate else text
+
+
 def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
     """Executes a tool and returns the formatted text output."""
     if name == "email_status":
@@ -1264,7 +1277,7 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
         else:
             for o in before_paycheck:
                 lines.append(
-                    f"| {o['due_date']} | {o['name']} | {_f(o['amount_cents'])} | [{o['status'].upper()}] | {'Yes' if o['is_autopay'] else 'No'} |"
+                    f"| {o['due_date']} | {o['name']} | {_bill_amount(o['amount_cents'], o.get('is_estimate', False))} | [{o['status'].upper()}] | {'Yes' if o['is_autopay'] else 'No'} |"
                 )
 
         if after_paycheck:
@@ -1276,8 +1289,11 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
             ])
             for o in after_paycheck:
                 lines.append(
-                    f"| {o['due_date']} | {o['name']} | {_f(o['amount_cents'])} | [{o['status'].upper()}] | {'Yes' if o['is_autopay'] else 'No'} |"
+                    f"| {o['due_date']} | {o['name']} | {_bill_amount(o['amount_cents'], o.get('is_estimate', False))} | [{o['status'].upper()}] | {'Yes' if o['is_autopay'] else 'No'} |"
                 )
+
+        if any(o.get("is_estimate") and o.get("status") != "paid" for o in obligations):
+            lines.extend(["", ESTIMATE_DISCLAIMER])
 
         return "\n".join(lines)
 
@@ -1436,13 +1452,14 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
             lines.append("| — | No recurring bills scheduled before next paycheck | $0.00 | — | — | — |")
         else:
             for b in alloc.bills:
-                lines.append(f"| {b['due_date']} | {b['name']} | {_f(b['amount_cents'])} | [{b['status'].upper()}] | {'Yes' if b.get('is_autopay') else 'No'} | {b.get('note', '')} |")
+                lines.append(f"| {b['due_date']} | {b['name']} | {_bill_amount(b['amount_cents'], b.get('is_estimate', False))} | [{b['status'].upper()}] | {'Yes' if b.get('is_autopay') else 'No'} | {b.get('note', '')} |")
 
         lines.extend([
             "",
             f"**TOTAL DUE BEFORE NEXT PAYCHECK ({alloc.next_paycheck_date})**: **{_f(alloc.bills_due_cents)}** ({due_count} bills due)",
             "",
-            f"⚠️ **DIRECTIVE FOR ASSISTANT**: The items above (including Spotify on Oct 25, Brother Payment on Nov 01, Gym on Nov 01, and Credit Card on Nov 02) are all scheduled BEFORE the next paycheck arrives on {alloc.next_paycheck_date}. When the user asks what is due until their next paycheck, explicitly include all due items above!",
+            f"⚠️ **DIRECTIVE FOR ASSISTANT**: Every item in the table above is scheduled BEFORE the next paycheck arrives on {alloc.next_paycheck_date}. When the user asks what is due until their next paycheck, include all items with status DUE.",
+            *([ESTIMATE_DISCLAIMER] if any(b.get("is_estimate") for b in alloc.bills) else []),
             "",
             f"### 📊 Paycheck Cash Flow Partition ({alloc.paycheck_date} to {alloc.next_paycheck_date})",
             f"- **Paycheck Take-Home**:        {_f(alloc.paycheck_amount_cents)}",
@@ -1460,7 +1477,7 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
                 "| :--- | :--- | :---: | :--- |",
             ])
             for b in alloc.other_bills:
-                lines.append(f"| Day {b['due_day']} | {b['name']} | {_f(b['amount_cents'])} | Due in future paycheck cycles |")
+                lines.append(f"| Day {b['due_day']} | {b['name']} | {_bill_amount(b['amount_cents'], b.get('is_estimate', False))} | Due in future paycheck cycles |")
 
         return "\n".join(lines)
 

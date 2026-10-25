@@ -14,6 +14,7 @@ import yaml
 from telemachus.finance.export import FinanceExporter
 from telemachus.finance.models import (
     DEFAULT_USER_RECURRING_RULES,
+    is_variable_bill,
     AccountType,
     Frequency,
     PaycheckPlan,
@@ -392,7 +393,7 @@ def apply_setup_yaml(yaml_path: Optional[Path | str] = None, store: Optional[Fin
             )
             recurring.add_rule(updated_rule)
             summary["rules_updated"] += 1
-            if is_active:
+            if is_active and not is_variable_bill(key, cfg):
                 total_fixed_cents += amount_cents
         else:
             cat = cfg.get("category", "Fixed Bill")
@@ -414,7 +415,7 @@ def apply_setup_yaml(yaml_path: Optional[Path | str] = None, store: Optional[Fin
             )
             recurring.add_rule(new_rule)
             summary["rules_updated"] += 1
-            if is_active:
+            if is_active and not is_variable_bill(key, cfg):
                 total_fixed_cents += amount_cents
 
     # Keep rule_pge active if pge is in fixed_bills or monthly_targets

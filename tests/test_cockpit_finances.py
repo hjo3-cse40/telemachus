@@ -1018,10 +1018,13 @@ fixed_bills:
             ("finance_plan_breakdown", {"date": None}),
             ("finance_log_entry", {"payee": None, "amount": None, "category": None}),
         ]
-        for name, args in null_calls:
-            out = handle_tool_call(name, args)
-            self.assertIsInstance(out, str)
-            self.assertTrue(len(out) > 0)
+        # MCP tools build FinanceStore() from the env var: keep this off the real ledger.
+        with tempfile.TemporaryDirectory(prefix="telemachus_test_null_args_") as tmp:
+            with patch.dict(os.environ, {"TELEMACHUS_FINANCE_DIR": tmp}):
+                for name, args in null_calls:
+                    out = handle_tool_call(name, args)
+                    self.assertIsInstance(out, str)
+                    self.assertTrue(len(out) > 0)
 
 
 if __name__ == "__main__":
