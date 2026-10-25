@@ -68,7 +68,7 @@ class TestEndOfMonthBills(unittest.TestCase):
 
     def test_month_turn_payment_does_not_mark_next_month_paid(self):
         # Paid on Oct 1 for September's bill; October's bill (due Oct 30) is still unpaid.
-        self._pay("2026-10-01", "Expenses:Utilities:PGE", 1056)
+        self._pay("2026-10-01", "Expenses:Utilities:PGE", 1234)
         self._pay("2026-10-01", "Expenses:Utilities:WiFi", 2000)
         self.assertEqual(self._window_bill("2026-10-25", "PG&E")["status"], "due")
         self.assertEqual(self._window_bill("2026-10-25", "WiFi")["status"], "due")
