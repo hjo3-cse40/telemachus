@@ -80,7 +80,11 @@ class CockpitTUI:
 
     def _init_curses(self) -> None:
         curses.curs_set(0)  # Hide hardware cursor
-        self.stdscr.nodelay(True)  # Non-blocking input
+        try:
+            curses.set_escdelay(25)  # Fast escape sequence resolution (25ms)
+        except Exception:
+            pass
+        self.stdscr.timeout(50)  # Wait up to 50ms for input in poll() - yields CPU to OS
         self.stdscr.keypad(True)
 
         # Enable full mouse events
@@ -1212,64 +1216,88 @@ class CockpitTUI:
     def run(self) -> None:
         """Main rendering and event loop."""
         last_refresh = time.time()
+        last_telemetry = time.time()
         prev_tab = self.current_tab
         prev_view_mode = getattr(self, "finances_view_mode", "daily")
+        prev_modal_state = (self.is_adding_finances, self.is_editing_finances)
+        needs_render = True
 
         while True:
-            # Atomic physical clear if tab or sub-view changed to eradicate ghosting
+            now = time.time()
+
+            # Mode / Tab / Modal transition detection
             curr_mode = getattr(self, "finances_view_mode", "daily")
-            if self.current_tab != prev_tab or curr_mode != prev_view_mode:
+            curr_modal_state = (self.is_adding_finances, self.is_editing_finances)
+            if self.current_tab != prev_tab or curr_mode != prev_view_mode or curr_modal_state != prev_modal_state:
                 self.stdscr.clearok(True)
                 self.stdscr.clear()
                 prev_tab = self.current_tab
                 prev_view_mode = curr_mode
-            else:
-                self.stdscr.erase()
+                prev_modal_state = curr_modal_state
+                needs_render = True
 
-            max_y, max_x = self.stdscr.getmaxyx()
-
-            if max_y < 8 or max_x < 24:
-                try:
-                    self.stdscr.addstr(0, 0, "Terminal window too small for Cockpit.")
-                except curses.error:
-                    pass
-                self.stdscr.refresh()
-                time.sleep(0.2)
-                continue
-
-            self.draw_top_telemetry(max_x)
-            self.draw_tabs(max_x)
-
-            if self.current_tab == 1:
-                self.draw_daily_ops(max_y, max_x)
-            elif self.current_tab == 2:
-                self.draw_memory_vault_view(max_y, max_x)
-            elif self.current_tab == 3:
-                self.draw_safety_guard_view(max_y, max_x)
-            elif self.current_tab == 4:
-                self.draw_finances_view(max_y, max_x)
-
-            if self.is_adding_finances:
-                self.draw_add_day_modal(max_y, max_x)
-            elif self.is_editing_finances:
-                self.draw_edit_modal(max_y, max_x)
-
-            self.draw_bottom_bar(max_y, max_x)
-            self.stdscr.refresh()
+            # Telemetry & Clock tick (every 1.0 second)
+            if now - last_telemetry >= 1.0:
+                last_telemetry = now
+                needs_render = True
 
             # Auto refresh background data every 10 seconds
-            if time.time() - last_refresh > 10.0:
+            if now - last_refresh > 10.0:
                 self.refresh_data()
-                last_refresh = time.time()
+                last_refresh = now
+                needs_render = True
 
+            # Notification auto-expiry check
+            if self.notification and now >= self.notification_expiry:
+                self.notification = ""
+                needs_render = True
+
+            # Render frame only when state or periodic timer requires it
+            if needs_render:
+                max_y, max_x = self.stdscr.getmaxyx()
+
+                if max_y < 8 or max_x < 24:
+                    try:
+                        self.stdscr.erase()
+                        self.stdscr.addstr(0, 0, "Terminal window too small for Cockpit.")
+                        self.stdscr.refresh()
+                    except curses.error:
+                        pass
+                else:
+                    self.stdscr.erase()
+                    self.draw_top_telemetry(max_x)
+                    self.draw_tabs(max_x)
+
+                    if self.current_tab == 1:
+                        self.draw_daily_ops(max_y, max_x)
+                    elif self.current_tab == 2:
+                        self.draw_memory_vault_view(max_y, max_x)
+                    elif self.current_tab == 3:
+                        self.draw_safety_guard_view(max_y, max_x)
+                    elif self.current_tab == 4:
+                        self.draw_finances_view(max_y, max_x)
+
+                    if self.is_adding_finances:
+                        self.draw_add_day_modal(max_y, max_x)
+                    elif self.is_editing_finances:
+                        self.draw_edit_modal(max_y, max_x)
+
+                    self.draw_bottom_bar(max_y, max_x)
+                    self.stdscr.refresh()
+
+                needs_render = False
+
+            # Wait up to 50ms for user input (OS poll - zero CPU when idle)
             try:
                 ch = self.stdscr.getch()
             except curses.error:
                 ch = -1
 
             if ch == -1:
-                time.sleep(0.04)
                 continue
+
+            # Key received! Flag next frame for render
+            needs_render = True
 
             if ch == curses.KEY_RESIZE:
                 try:
