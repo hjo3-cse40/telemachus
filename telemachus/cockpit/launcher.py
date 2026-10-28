@@ -6,6 +6,7 @@ top status bar telemetry, and the OpenCode execution harness.
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -13,6 +14,18 @@ import time
 from typing import Optional
 
 from telemachus.config.loader import find_project_root
+
+
+# Env vars that choose which finance vault the dashboard reads. tmux does not pass the
+# caller's environment to an already-running server, so they must be forwarded explicitly,
+# otherwise the dashboard silently falls back to the real vault.
+FORWARDED_ENV_VARS = ("TELEMACHUS_FINANCE_DIR", "TELEMACHUS_SETUP_YAML")
+
+
+def forwarded_env_prefix() -> str:
+    """Shell prefix like `env VAR='value' ` for the forwarded vars that are set, else ''."""
+    pairs = [f"{k}={shlex.quote(os.environ[k])}" for k in FORWARDED_ENV_VARS if os.environ.get(k)]
+    return f"env {' '.join(pairs)} " if pairs else ""
 
 
 class CockpitLauncher:
@@ -64,7 +77,7 @@ class CockpitLauncher:
         py_bin = sys.executable
 
         # 1. Start tmux session in background with Left Pane running TUI dashboard
-        tui_cmd = f"cd '{self.project_root}' && {py_bin} -m telemachus.cockpit.tui"
+        tui_cmd = f"cd '{self.project_root}' && {forwarded_env_prefix()}{py_bin} -m telemachus.cockpit.tui"
         if in_tmux:
             # Create a new window inside current tmux
             res = self._run_tmux("new-window", "-n", "cockpit", tui_cmd)
