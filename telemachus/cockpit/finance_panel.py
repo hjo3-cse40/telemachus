@@ -8,6 +8,7 @@ Provides:
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import logging
 import os
@@ -42,6 +43,99 @@ EDIT_CATEGORIES: List[Tuple[str, Optional[str]]] = [
     ("iCloud", "icloud"),
     ("Brother", "kahram"),
 ]
+
+
+PACE_WINDOW_DAYS = 7
+
+
+@dataclass
+class RunwayInfo:
+    """How far the money in checking goes before the next paycheck.
+
+    All amounts are cents. `left_cents` is checking minus the bills still due before payday.
+    """
+
+    today: str
+    next_paycheck: str
+    days_left: int
+    checking_cents: int
+    bills_due_cents: int
+    left_cents: int
+    per_day_cents: int
+    pace_cents: int  # average daily spend over the last PACE_WINDOW_DAYS days
+    run_out_date: Optional[str]  # first day the balance would go below zero at the current pace
+    allowance_cents: int  # grocery + dining + gas allowance for this pay period
+    after_allowances_cents: int  # left_cents minus allowance_cents
+    bill_marks: List[Tuple[str, int]] = field(default_factory=list)  # (due date, cents) still due
+    month_spent_cents: int = 0
+
+
+def _rounded_div(cents: int, n: int) -> int:
+    """Integer division rounded to the nearest cent (half away from zero)."""
+    q, r = divmod(abs(cents), n)
+    if r * 2 >= n:
+        q += 1
+    return q if cents >= 0 else -q
+
+
+def compute_runway(
+    today: str,
+    paycheck: PaycheckWindowAllocation,
+    days: List[Dict[str, Any]],
+) -> RunwayInfo:
+    """Pure calculation behind the plain-English hero on the Finances tab."""
+    today_dt = datetime.strptime(today, "%Y-%m-%d").date()
+    next_dt = datetime.strptime(paycheck.next_paycheck_date, "%Y-%m-%d").date()
+    days_left = max(1, (next_dt - today_dt).days)
+
+    checking = paycheck.checking_balance_cents
+    left = checking - paycheck.bills_due_cents
+    per_day = _rounded_div(left, days_left)
+
+    window_start = today_dt - timedelta(days=PACE_WINDOW_DAYS - 1)
+    spent = 0
+    for d in days:
+        try:
+            d_dt = datetime.strptime(d["date"], "%Y-%m-%d").date()
+        except (KeyError, ValueError):
+            continue
+        if window_start <= d_dt <= today_dt:
+            spent += d["outflow_cents"]
+    pace = _rounded_div(spent, PACE_WINDOW_DAYS)
+
+    due_by_date: Dict[str, int] = {}
+    for b in paycheck.bills:
+        if b.get("status") == "due" and b.get("amount_cents", 0) > 0:
+            due_by_date[b["due_date"]] = due_by_date.get(b["due_date"], 0) + b["amount_cents"]
+
+    run_out: Optional[str] = None
+    if pace > 0:
+        balance = checking
+        for offset in range(1, days_left + 1):
+            day = (today_dt + timedelta(days=offset)).isoformat()
+            balance -= pace + due_by_date.get(day, 0)
+            if balance < 0:
+                run_out = day
+                break
+
+    month_prefix = today[:7]
+    month_spent = sum(d["outflow_cents"] for d in days if d["date"].startswith(month_prefix))
+
+    return RunwayInfo(
+        today=today,
+        next_paycheck=paycheck.next_paycheck_date,
+        days_left=days_left,
+        checking_cents=checking,
+        bills_due_cents=paycheck.bills_due_cents,
+        left_cents=left,
+        per_day_cents=per_day,
+        pace_cents=pace,
+        run_out_date=run_out,
+        allowance_cents=paycheck.variable_needs_cents,
+        after_allowances_cents=left - paycheck.variable_needs_cents,
+        bill_marks=sorted(due_by_date.items()),
+        month_spent_cents=month_spent,
+    )
 
 
 class FinanceTuiPanel:
@@ -223,6 +317,18 @@ class FinanceTuiPanel:
             return self.recurring.get_paycheck_allocation(as_of_date=as_of_date)
         self.refresh()
         return self._cached_paycheck
+
+    def get_runway(self, today: Optional[str] = None) -> Optional[RunwayInfo]:
+        """Runway to the next paycheck, or None when no paycheck plan is configured."""
+        self.refresh()
+        today_str = today or datetime.now().strftime("%Y-%m-%d")
+        paycheck = self._cached_paycheck if today is None else self.recurring.get_paycheck_allocation(as_of_date=today_str)
+        if paycheck is None:
+            return None
+        try:
+            return compute_runway(today_str, paycheck, self._cached_days)
+        except ValueError:
+            return None
 
     def get_balances(self) -> Dict[str, Any]:
         self.refresh()

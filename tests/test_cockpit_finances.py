@@ -408,6 +408,7 @@ class TestCockpitTUIFinances(unittest.TestCase):
         bullets = "- dinner - 45.00\nsavings + 600.00\npayday + 1350.00"
         self.panel.log_day_bullets("2026-10-23", bullets)
         self.tui.refresh_data()
+        self.tui.finances_view_mode = "day"  # the day screen lists the individual items
         self.tui.draw_finances_view(35, 90)
 
         # Inspect addstr calls
@@ -659,11 +660,11 @@ paycheck_plan:
         addstr_calls = [c[0] for c in self.mock_stdscr.addstr.call_args_list]
         combined_text = " ".join(str(arg) for call in addstr_calls for arg in call)
 
-        self.assertTrue("CASH POSITION" in combined_text or "BALANCES" in combined_text)
-        self.assertIn("2-WEEK WINDOW", combined_text)
+        self.assertIn("Net worth", combined_text)
+        self.assertIn("UNTIL PAYDAY", combined_text)
         self.assertIn("Savings", combined_text)
         self.assertIn("Brother", combined_text)
-        self.assertIn("Left:", combined_text)
+        self.assertIn(" of $", combined_text)
 
     def test_telemetry_lm_studio_status_parsing(self):
         """Verifies LM Studio live status indicators in telemetry banner."""
@@ -856,7 +857,7 @@ fixed_bills:
         self.tui.draw_finances_view(35, 90)
         addstr_calls = [c[0] for c in self.mock_stdscr.addstr.call_args_list]
         combined = " ".join(str(arg) for call in addstr_calls for arg in call)
-        self.assertIn("[v] DAY NAVIGATOR", combined)
+        self.assertIn("UNTIL PAYDAY", combined)
 
         # 2. Toggle to 'bills' mode
         self.tui.finances_view_mode = "bills"

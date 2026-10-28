@@ -474,6 +474,10 @@ class PaycheckWindowAllocation:
     credit_card_reminder: str = ""
     notes: str = ""
     other_bills: List[Dict[str, Any]] = field(default_factory=list)
+    # Bills that came due earlier in this pay cycle (since the last payday) and were already paid.
+    # Kept apart from `bills` so upcoming-obligation lists and totals only ever look forward.
+    paid_bills: List[Dict[str, Any]] = field(default_factory=list)
+    cycle_start_date: str = ""  # YYYY-MM-DD of the last payday (start of the current pay cycle)
 
     @property
     def bills_due(self) -> List[Dict[str, Any]]:
@@ -494,6 +498,8 @@ class PaycheckWindowAllocation:
             "credit_card_reminder": self.credit_card_reminder,
             "bills": self.bills,
             "other_bills": self.other_bills,
+            "paid_bills": self.paid_bills,
+            "cycle_start_date": self.cycle_start_date,
             "groceries_allocated_cents": self.groceries_allocated_cents,
             "dining_allocated_cents": self.dining_allocated_cents,
             "gas_allocated_cents": self.gas_allocated_cents,

@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 
 from telemachus.cockpit.email_panel import EmailTriagePanel
 from telemachus.cockpit.finance_panel import EDIT_CATEGORIES, FinanceTuiPanel
+from telemachus.cockpit.finance_view import FinanceViewData, build_cycle_detail, build_day, build_math, build_overview
 from telemachus.cockpit.safety_memory_panel import SafetyMemoryPanel
 from telemachus.cockpit.telemetry import CockpitTelemetry
 
@@ -90,10 +91,13 @@ class CockpitTUI:
         self.finance_overview: Any = None
         self.finance_cashflow: Any = None
         self.finance_paycheck: Any = None
+        self.finance_runway: Any = None
+        self._finance_day_rows: Dict[int, int] = {}  # screen row -> day index (for mouse clicks)
+        self._finance_item_rows: Dict[int, int] = {}  # screen row -> item index
         self.finance_balances: Dict[str, Any] = {}
         self.finance_goals: List[Any] = []
         self.finance_bills_breakdown: Dict[str, Any] = {}
-        self.finances_view_mode: str = "daily"  # "daily" or "bills"
+        self.finances_view_mode: str = "daily"  # "daily" (overview), "day", "math" or "bills"
         self.finances_focus: str = "days"  # "days" or "items"
         self.selected_day_idx = 0
         self.day_scroll_offset = 0
@@ -214,6 +218,7 @@ class CockpitTUI:
             self.finance_overview = self.finance_panel.get_monthly_overview()
             self.finance_cashflow = self.finance_panel.get_cash_flow_summary()
             self.finance_paycheck = self.finance_panel.get_paycheck_allocation()
+            self.finance_runway = self.finance_panel.get_runway()
             self.finance_balances = self.finance_panel.get_balances()
             self.finance_goals = self.finance_panel.get_goals_progress()
             self.finance_bills_breakdown = self.finance_panel.get_monthly_bills_breakdown()
@@ -267,12 +272,9 @@ class CockpitTUI:
             self.stdscr.addstr(1, 36, "[3: Safety Guard]", tab3_attr)
             self.stdscr.addstr(1, 55, "[4: Finances]", tab4_attr)
 
-            if self.current_tab == 4:
-                actions = "[a] Add  [e] Edit  [d] Delete  [Tab] Switch  [m] Mask  [q] Quit"
-            else:
-                actions = "[t] Triage  [r] Refresh  [q] Quit"
+            actions = "" if self.current_tab == 4 else "[t] Triage  [r] Refresh  [q] Quit"
 
-            if max_x > len(actions) + 72:
+            if actions and max_x > len(actions) + 72:
                 self.stdscr.addstr(1, max_x - len(actions) - 2, actions, curses.color_pair(2))
         except curses.error:
             pass
@@ -430,7 +432,8 @@ class CockpitTUI:
         abs_val = abs(cents) / 100.0
         return f"{sign}${abs_val:,.2f}"
 
-    def draw_finances_view(self, max_y: int, max_x: int) -> None:
+    def _draw_bills_screen(self, max_y: int, max_x: int) -> None:
+        """Recurring Bills view: legacy balances header, then the bills table and monthly overview."""
         try:
             # 1. Top Balances Deck (Checking, HYSA Savings, Outstanding Visa, Net Worth)
             acc_bals = self.finance_balances.get("account_balances", {})
@@ -530,175 +533,92 @@ class CockpitTUI:
                 self._draw_line_padded(5, 1, max_x - 2, f" 📊 CASH FLOW ({month_label}): Inflow active", curses.color_pair(4) | curses.A_BOLD)
 
             # Row 6: Interactive Mode Switcher Divider
-            mode_a_badge = "[1: Daily Ledger (ACTIVE)]" if getattr(self, "finances_view_mode", "daily") == "daily" else "1: Daily Ledger"
-            mode_b_badge = "[2: Recurring Bills & Budget (ACTIVE)]" if getattr(self, "finances_view_mode", "daily") == "bills" else "2: Recurring Bills & Budget"
-            div_left = f"── [v] View: {mode_a_badge}  {mode_b_badge} "
+            div_left = "── Recurring Bills & Budget  ([v] back to overview) "
             divider_line = div_left + "─" * max(0, (max_x - 2) - len(div_left))
             self._draw_line_padded(6, 1, max_x - 2, divider_line, curses.color_pair(8))
 
-            # 4. View Switcher Mode: Bills View vs Daily Ledger View
-            if getattr(self, "finances_view_mode", "daily") == "bills":
-                self.draw_bills_overview_view(max_y, max_x)
-                return
+            self.draw_bills_overview_view(max_y, max_x)
+        except curses.error:
+            pass
 
-            # Main Dual-Column Layout (Lines 7+)
-            split_x = min(36, max(26, max_x // 3))
+    def _finance_view_data(self) -> FinanceViewData:
+        acc = self.finance_balances.get("account_balances", {})
 
-            # Left Column Header (Line 7)
-            left_focus_prefix = "▶ " if self.finances_focus == "days" else "  "
-            left_hdr_attr = (curses.color_pair(7) | curses.A_BOLD) if self.finances_focus == "days" else (curses.color_pair(1) | curses.A_BOLD)
-            left_title = f"{left_focus_prefix}[v] DAY NAVIGATOR"
-            hdr_left_str = f"{left_title:<18} {'NET':>8}"
-            self._draw_line_padded(7, 1, split_x - 1, hdr_left_str, left_hdr_attr)
-            self._draw_line_padded(8, 1, split_x - 1, "─" * (split_x - 1), curses.color_pair(8))
+        def pick(exact: str, words: tuple) -> int:
+            if acc.get(exact) is not None:
+                return acc[exact]
+            return next((v for k, v in acc.items() if any(w in k.lower() for w in words)), 0)
 
-            # Vertical divider between Left and Right columns
-            for y in range(7, max_y - 2):
+        return FinanceViewData(
+            runway=self.finance_runway,
+            checking_cents=pick("Assets:Checking:WellsFargo", ("check", "wells")),
+            savings_cents=pick("Assets:Savings:CapitalOne", ("sav", "capital", "hysa")),
+            visa_cents=pick("Liabilities:CreditCard:Visa", ("visa", "credit", "card")),
+            net_worth_cents=self.finance_balances.get("net_worth_cents", 0),
+            goals=self.finance_goals or [],
+            days=self.finance_days,
+            overview=self.finance_overview,
+            paycheck=self.finance_paycheck,
+            mask=self.mask_amounts,
+            selected_day_idx=self.selected_day_idx,
+            selected_item_idx=self.selected_item_idx,
+            day_scroll_offset=self.day_scroll_offset,
+        )
+
+    def _style_attr(self, style: str) -> int:
+        name, _, flag = style.partition("+")
+        bold = curses.A_BOLD if flag == "b" else 0
+        if name == "dim":
+            return curses.color_pair(8) | curses.A_DIM
+        if name == "line":
+            return curses.color_pair(8) | curses.A_DIM
+        if name == "sel":
+            return curses.color_pair(7) | curses.A_BOLD
+        pair = {"sub": 8, "fg": 8, "snow": 8, "cyan": 1, "blue": 6, "mag": 2, "green": 5, "yellow": 4}.get(name, 8)
+        return curses.color_pair(pair) | bold | (curses.A_BOLD if name == "snow" else 0)
+
+    def _draw_styled_lines(self, y0: int, x0: int, lines: List[Any], max_y: int, max_x: int) -> None:
+        """Draws lines of (text, style) segments; each line is clipped at the screen edge."""
+        limit_x = max_x - 1  # never write into the last column (curses auto-wrap)
+        for i, line in enumerate(lines):
+            y = y0 + i
+            if y >= max_y - 1:
+                break
+            x = x0
+            try:
+                self.stdscr.addstr(y, x0, " " * max(0, limit_x - x0), curses.color_pair(8))
+            except curses.error:
+                pass
+            for text, style in line:
+                room = limit_x - x
+                if room <= 0:
+                    break
+                clipped = _clip_pad(text, min(room, sum(_char_width(c) for c in text)))
                 try:
-                    self.stdscr.addstr(y, split_x, "│", curses.color_pair(8))
+                    self.stdscr.addstr(y, x, clipped, self._style_attr(style))
                 except curses.error:
                     pass
+                x += sum(_char_width(c) for c in clipped)
 
-            avail_day_rows = max(1, max_y - 11)
-            visible_days = self.finance_days[self.day_scroll_offset : self.day_scroll_offset + avail_day_rows]
-
-            if not self.finance_days:
-                self._draw_line_padded(9, 1, split_x - 1, " (No days logged yet)", curses.color_pair(8))
-                right_x = split_x + 2
-                right_w = max(10, max_x - right_x - 1)
-                self._draw_line_padded(7, right_x, right_w, "DAY DETAILS", curses.color_pair(1) | curses.A_BOLD)
-                self._draw_line_padded(9, right_x, right_w, "No transactions logged.", curses.color_pair(8))
-                self._draw_line_padded(10, right_x, right_w, "Press [a] to log a new day with Notion bullet format,", curses.color_pair(4))
-                self._draw_line_padded(11, right_x, right_w, "or run 'python3 -m telemachus.finance import-text --file <path>'.", curses.color_pair(4))
-                return
-
-            for idx, d in enumerate(visible_days):
-                actual_idx = self.day_scroll_offset + idx
-                row_y = 9 + idx
-                if row_y >= max_y - 2:
-                    break
-
-                is_selected = (actual_idx == self.selected_day_idx)
-                attr = curses.color_pair(7) | curses.A_BOLD if is_selected else curses.color_pair(8)
-
-                net_c = d["net_cents"]
-                net_str = self._fmt_money(net_c, self.mask_amounts, signed=True)
-                title_col = d["day_title"][:16]
-
-                day_row_text = f" {title_col:<16} {net_str:>8}"
-                net_pair = curses.color_pair(7) if is_selected else (
-                    curses.color_pair(5) if net_c >= 0 else curses.color_pair(3)
-                )
-                self._draw_line_padded(row_y, 1, split_x - 1, day_row_text, net_pair | (curses.A_BOLD if is_selected else 0))
-
-            # Right Column: Split Vertically (Card 1: Day Items, Card 2: Upcoming Paycheck Obligations)
-            right_x = split_x + 2
-            right_w = max(10, max_x - right_x - 1)
-            split_y = max(13, int(max_y * 0.48))
-
-            # -------------------------------------------------------------
-            # CARD 1: Selected Day Transactions (Rows 7 to split_y - 1)
-            # -------------------------------------------------------------
-            if 0 <= self.selected_day_idx < len(self.finance_days):
-                curr = self.finance_days[self.selected_day_idx]
-                day_out = self._fmt_money(curr["outflow_cents"], self.mask_amounts)
-                day_in = self._fmt_money(curr["inflow_cents"], self.mask_amounts)
-                right_focus_prefix = "▶ " if self.finances_focus == "items" else "  "
-                right_hdr_attr = (curses.color_pair(7) | curses.A_BOLD) if self.finances_focus == "items" else (curses.color_pair(1) | curses.A_BOLD)
-
-                header_right = f"{right_focus_prefix}📅 {curr['day_title']} ({curr['date']}) · Spent: {day_out} · Inflow: {day_in}"
-                if curr.get("savings_cents", 0) > 0:
-                    day_sav = self._fmt_money(curr["savings_cents"], self.mask_amounts)
-                    header_right += f" · Savings: {day_sav}"
-
-                self._draw_line_padded(7, right_x, right_w, header_right, right_hdr_attr)
-
-                # Column headers for Card 1
-                col_amt_x = right_x + right_w - 14
-                desc_w = max(8, col_amt_x - (right_x + 28) - 1)
-                hdr_cols = f"  {'ACCOUNT':<10} {'CATEGORY':<14} {'DESCRIPTION / PAYEE':<{desc_w}} {'AMOUNT':>12}"
-                self._draw_line_padded(8, right_x, right_w, hdr_cols, curses.color_pair(2) | curses.A_BOLD)
-
-                items = curr["items"]
-                max_items_shown = max(1, split_y - 10)
-                for i_idx, item in enumerate(items[:max_items_shown]):
-                    item_y = 9 + i_idx
-                    if item_y >= split_y - 1:
-                        break
-
-                    amt = item["amount_cents"]
-                    if item.get("is_income"):
-                        amt_str = self._fmt_money(amt, self.mask_amounts, signed=True)
-                        amt_pair = curses.color_pair(5)  # Green for inflow (+$)
-                    elif item.get("is_savings"):
-                        amt_str = self._fmt_money(-amt, self.mask_amounts, signed=True)
-                        amt_pair = curses.color_pair(2)  # Magenta for savings outflow (-$)
-                    else:
-                        amt_str = self._fmt_money(-amt, self.mask_amounts, signed=True)
-                        amt_pair = curses.color_pair(3)  # Red for expense outflow (-$)
-
-                    is_item_sel = (self.finances_focus == "items" and i_idx == self.selected_item_idx)
-                    row_attr = (curses.color_pair(7) | curses.A_BOLD) if is_item_sel else curses.color_pair(8)
-
-                    acc_str = f"[{item['account'][:8]}]"
-                    cat_str = item["category"][:13]
-                    desc_str = (item["payee"] or item["memo"] or "")[:desc_w]
-
-                    row_text = f"  {acc_str:<10} {cat_str:<14} {desc_str:<{desc_w}} {amt_str:>12}"
-                    if is_item_sel:
-                        self._draw_line_padded(item_y, right_x, right_w, row_text, curses.color_pair(7) | curses.A_BOLD)
-                    else:
-                        self._draw_line_padded(item_y, right_x, right_w, row_text, row_attr)
-
-                # Clear remaining rows of Card 1 if day has few items
-                for empty_y in range(9 + len(items[:max_items_shown]), split_y - 1):
-                    self._draw_line_padded(empty_y, right_x, right_w, "", curses.color_pair(8))
-
-            # Divider between Card 1 and Card 2
-            card_div = "── ⏳ BILLS DUE BEFORE NEXT PAYCHECK "
-            div_card_str = card_div + "─" * max(0, right_w - len(card_div))
-            self._draw_line_padded(split_y - 1, right_x, right_w, div_card_str, curses.color_pair(4) | curses.A_BOLD)
-
-            # -------------------------------------------------------------
-            # CARD 2: Obligations Horizon Due Before Next Paycheck (Rows split_y to max_y - 2)
-            # -------------------------------------------------------------
-            if pc and pc.bills:
-                name_max = max(10, right_w - 38)
-                b_cols = f"  {'DUE':<6} {'OBLIGATION':<{name_max}} {'STATUS':<7} {'AMOUNT':>8}  {'RUNNING':>9}"
-                self._draw_line_padded(split_y, right_x, right_w, b_cols, curses.color_pair(2) | curses.A_BOLD)
-
-                running_chk = chk_cents
-                for b_idx, b in enumerate(pc.bills):
-                    b_y = split_y + 1 + b_idx
-                    if b_y >= max_y - 2:
-                        break
-
-                    b_amt = b["amount_cents"]
-                    if b.get("status") == "due":
-                        running_chk -= b_amt
-                    
-                    b_amt_str = self._fmt_money(b_amt, self.mask_amounts)
-                    chk_run_str = self._fmt_money(running_chk, self.mask_amounts)
-                    stat_badge = "✅ Paid" if b.get("status") == "paid" else "⏳ Due "
-                    stat_pair = curses.color_pair(5) if b.get("status") == "paid" else curses.color_pair(4)
-                    
-                    b_name = b["name"][:name_max]
-                    b_date = b["due_date"][5:] if len(b.get("due_date", "")) >= 10 else b.get("due_date", "")
-                    row_bill_text = f"  {b_date:<6} {b_name:<{name_max}} {stat_badge:<7} {b_amt_str:>8}  {chk_run_str:>9}"
-                    self._draw_line_padded(b_y, right_x, right_w, row_bill_text, stat_pair | curses.A_BOLD)
-
-                # Clear remaining bottom rows in Card 2
-                for empty_by in range(split_y + 1 + len(pc.bills), max_y - 2):
-                    self._draw_line_padded(empty_by, right_x, right_w, "", curses.color_pair(8))
-            else:
-                self._draw_line_padded(split_y, right_x, right_w, "  No bills scheduled before next paycheck.", curses.color_pair(5))
-                for empty_by in range(split_y + 1, max_y - 2):
-                    self._draw_line_padded(empty_by, right_x, right_w, "", curses.color_pair(8))
-
-        except curses.error:
-            pass
-        except curses.error:
-            pass
+    def draw_finances_view(self, max_y: int, max_x: int) -> None:
+        """Finances tab: overview (default), one day's items, the math, or recurring bills."""
+        mode = self.finances_view_mode
+        if mode == "bills":
+            self._draw_bills_screen(max_y, max_x)
+            return
+        data = self._finance_view_data()
+        rows = max_y - 3  # rows 0-1 are the header and tabs, the last row is the hint bar
+        cols = max_x - 2  # one blank column on each side
+        if mode == "day":
+            rendered = build_day(data, cols, rows)
+        elif mode == "math":
+            rendered = build_math(data, cols, rows)
+        else:
+            rendered = build_overview(data, cols, rows)
+            self.day_scroll_offset = rendered.day_scroll_offset
+        self._finance_day_rows = {2 + k: v for k, v in rendered.day_rows.items()}
+        self._finance_item_rows = {2 + k: v for k, v in rendered.item_rows.items()}
+        self._draw_styled_lines(2, 1, rendered.lines, max_y, max_x)
 
     def draw_bills_overview_view(self, max_y: int, max_x: int) -> None:
         """Renders the Recurring Fixed Bills table (sorted by due date) & Monthly Overview (Notion formulas)."""
@@ -835,19 +755,14 @@ class CockpitTUI:
 
                     # Section 4: Upcoming 7-Day Cash Call Warning (Rows 22+)
                     curr_y = 22
-                    if pc and pc.bills and max_y >= 26:
+                    if pc and (pc.bills or getattr(pc, "paid_bills", None)) and max_y >= 26:
                         self._draw_line_padded(curr_y, right_x, right_w, "  " + "─" * max(1, right_w - 4), curses.color_pair(8))
                         curr_y += 1
-                        self._draw_line_padded(curr_y, right_x, right_w, f"  🚨 Cycle Action: Bills Due Before Paycheck ({pc.next_paycheck_date}):", curses.color_pair(4) | curses.A_BOLD)
-                        curr_y += 1
-                        for wb in pc.bills[:max(1, max_y - curr_y - 2)]:
-                            if curr_y >= max_y - 2:
-                                break
-                            wb_st = "✅" if wb.get("status") == "paid" else "⏳"
-                            wb_amt = self._fmt_money(wb["amount_cents"], self.mask_amounts)
-                            wb_line = f"   • {wb['due_date']} {wb['name'][:18]:<18} {wb_st} {wb_amt}"
-                            self._draw_line_padded(curr_y, right_x, right_w, wb_line, curses.color_pair(8))
-                            curr_y += 1
+                        # Whole pay cycle (last payday to next payday): runway chart plus what is due each day
+                        spare = 1 if overview.notes else 0
+                        detail = build_cycle_detail(self._finance_view_data(), right_w - 3, max_y - 2 - curr_y - spare)
+                        self._draw_styled_lines(curr_y, right_x + 2, detail, max_y - 1, right_x + 2 + right_w - 2)
+                        curr_y += min(len(detail), max(0, max_y - 2 - curr_y))
 
                     if overview.notes and curr_y < max_y - 2:
                         self._draw_line_padded(curr_y, right_x, right_w, f"  📝 Notes: {overview.notes}", curses.color_pair(4))
@@ -1197,10 +1112,15 @@ class CockpitTUI:
                 self.stdscr.addstr(max_y - 1, 1, f"🔔 {self.notification}"[: max_x - 2], curses.color_pair(4) | curses.A_BOLD)
             else:
                 if self.current_tab == 4:
-                    if getattr(self, "finances_view_mode", "daily") == "bills":
-                        hint = " [j/k]: Move  [v]: View Ledger  [m]: Mask  [r]: Refresh  [q]: Exit"
+                    mode = self.finances_view_mode
+                    if mode == "bills":
+                        hint = " [j/k] move   [v] overview   [m] mask   [r] refresh   [q] quit"
+                    elif mode == "day":
+                        hint = " [j/k] move   [e] edit   [d] delete   [a] add   [esc] back   [m] mask   [q] quit"
+                    elif mode == "math":
+                        hint = " [esc] back   [m] mask   [q] quit"
                     else:
-                        hint = " [j/k]: Move  [Tab]: Switch Day/Items  [v]: Recurring Bills  [a]: Add  [e]: Edit  [d]: Delete  [m]: Mask  [q]: Exit"
+                        hint = " [j/k] move  [enter] open  [i] math  [a] add  [e] edit  [v] bills  [m] mask  [q] quit"
                 else:
                     hint = " [↑/↓/j/k]: Navigate  [1-4]: Views  [t]: Triage in OpenCode  [r]: Refresh  [q]: Exit"
                 self.stdscr.addstr(max_y - 1, 1, hint[: max_x - 2], curses.color_pair(1))
@@ -1219,6 +1139,84 @@ class CockpitTUI:
             self.finances_focus,
             self.notification,
         )
+
+    def _set_finance_mode(self, mode: str) -> None:
+        self.finances_view_mode = mode
+        self.finances_focus = "items" if mode == "day" else "days"
+
+    def _move_finance_selection(self, delta: int, avail_rows: int = 10) -> None:
+        """Moves the highlighted row for whichever Finances screen is showing."""
+        mode = self.finances_view_mode
+        if mode == "bills":
+            bills = (self.finance_bills_breakdown or {}).get("bills", [])
+            if not bills:
+                return
+            self.selected_bill_idx = max(0, min(len(bills) - 1, self.selected_bill_idx + delta))
+            if self.selected_bill_idx < self.bills_scroll_offset:
+                self.bills_scroll_offset = self.selected_bill_idx
+            elif self.selected_bill_idx >= self.bills_scroll_offset + avail_rows:
+                self.bills_scroll_offset = self.selected_bill_idx - avail_rows + 1
+        elif mode == "day":
+            items = self.finance_days[self.selected_day_idx]["items"] if self.finance_days else []
+            if items:
+                self.selected_item_idx = max(0, min(len(items) - 1, self.selected_item_idx + delta))
+        elif mode == "daily":
+            if self.finance_days:
+                new_idx = max(0, min(len(self.finance_days) - 1, self.selected_day_idx + delta))
+                if new_idx != self.selected_day_idx:
+                    self.selected_day_idx = new_idx
+                    self.selected_item_idx = 0
+
+    def _handle_finance_click(self, my: int) -> None:
+        mode = self.finances_view_mode
+        if mode == "daily" and my in self._finance_day_rows:
+            if self._finance_day_rows[my] == self.selected_day_idx:
+                self._open_selected_day()
+            else:
+                self.selected_day_idx = self._finance_day_rows[my]
+                self.selected_item_idx = 0
+        elif mode == "day" and my in self._finance_item_rows:
+            self.selected_item_idx = self._finance_item_rows[my]
+        elif mode == "bills" and 9 <= my <= 35:
+            bills = (self.finance_bills_breakdown or {}).get("bills", [])
+            clicked = self.bills_scroll_offset + (my - 9)
+            if 0 <= clicked < len(bills):
+                self.selected_bill_idx = clicked
+
+    def _open_selected_day(self) -> None:
+        if self.finance_days:
+            self.selected_item_idx = 0
+            self._set_finance_mode("day")
+
+    def handle_finance_key(self, ch: int, max_y: int) -> None:
+        mode = self.finances_view_mode
+        if ch in (ord("m"), ord("M")):
+            self.mask_amounts = not self.mask_amounts
+            self.set_notification(f"Finance amounts {'masked' if self.mask_amounts else 'unmasked'}.")
+        elif ch in (ord("v"), ord("V")):
+            self._set_finance_mode("daily" if mode == "bills" else "bills")
+        elif ch in (ord("i"), ord("I")) and mode != "bills":
+            self._set_finance_mode("daily" if mode == "math" else "math")
+        elif ch == 27 and mode in ("day", "math", "bills"):
+            self._set_finance_mode("daily")
+        elif ch in (curses.KEY_UP, ord("k")):
+            self._move_finance_selection(-1, max(1, max_y - 12))
+        elif ch in (curses.KEY_DOWN, ord("j")):
+            self._move_finance_selection(1, max(1, max_y - 12))
+        elif mode == "daily" and ch in (10, 13, curses.KEY_ENTER, curses.KEY_RIGHT, ord("l")):
+            self._open_selected_day()
+        elif mode == "day" and ch in (curses.KEY_LEFT, ord("h")):
+            self._set_finance_mode("daily")
+        elif mode in ("daily", "day"):
+            if ch in (ord("a"), ord("A")):
+                self.open_add_modal()
+            elif ch in (ord("e"), ord("E")):
+                self.open_edit_modal()
+            elif ch in (ord("d"), ord("D")):
+                if mode == "day":
+                    self.delete_selected_finance()
+                else:
+                    self.set_notification("Press enter to open the day, then d to delete an item (or e to clear the day).")
 
     def handle_mouse(self) -> None:
         try:
@@ -1243,69 +1241,19 @@ class CockpitTUI:
 
             # Click in finance view
             if self.current_tab == 4:
-                # Click on Line 7 toggles Daily Ledger vs Recurring Bills view
-                if my == 7 and mx <= 36:
-                    self.finances_view_mode = "bills" if getattr(self, "finances_view_mode", "daily") == "daily" else "daily"
-                    mode_label = "Recurring Bills" if self.finances_view_mode == "bills" else "Daily Ledger"
-                    self.set_notification(f"Finances View: {mode_label}")
-                    return
-
-                if getattr(self, "finances_view_mode", "daily") == "bills":
-                    split_x = min(58, max(38, int(curses.COLS * 0.52))) if hasattr(curses, "COLS") else 45
-                    if 9 <= my <= 35 and mx <= split_x:
-                        clicked_bill = self.bills_scroll_offset + (my - 9)
-                        bb = getattr(self, "finance_bills_breakdown", {}) or {}
-                        bills = bb.get("bills", [])
-                        if 0 <= clicked_bill < len(bills):
-                            self.selected_bill_idx = clicked_bill
-                else:
-                    split_x = min(36, max(26, curses.COLS // 3)) if hasattr(curses, "COLS") else 32
-                    if 9 <= my <= 35:
-                        if mx <= split_x:
-                            clicked_day = self.day_scroll_offset + (my - 9)
-                            if 0 <= clicked_day < len(self.finance_days):
-                                self.selected_day_idx = clicked_day
-                                self.finances_focus = "days"
-                                self.selected_item_idx = 0
-                        else:
-                            clicked_item = my - 9
-                            curr_items = self.finance_days[self.selected_day_idx]["items"] if self.finance_days else []
-                            if 0 <= clicked_item < len(curr_items):
-                                self.selected_item_idx = clicked_item
-                                self.finances_focus = "items"
+                self._handle_finance_click(my)
 
             # Trackpad scroll up / down
             if bstate & curses.BUTTON4_PRESSED:  # Scroll Up
                 if self.current_tab == 1:
                     self.selected_email_idx = max(0, self.selected_email_idx - 1)
                 elif self.current_tab == 4:
-                    if getattr(self, "finances_view_mode", "daily") == "bills":
-                        if self.selected_bill_idx > 0:
-                            self.selected_bill_idx -= 1
-                            if self.selected_bill_idx < self.bills_scroll_offset:
-                                self.bills_scroll_offset = self.selected_bill_idx
-                    elif self.finances_focus == "days":
-                        self.selected_day_idx = max(0, self.selected_day_idx - 1)
-                        if self.selected_day_idx < self.day_scroll_offset:
-                            self.day_scroll_offset = self.selected_day_idx
-                    else:
-                        self.selected_item_idx = max(0, self.selected_item_idx - 1)
+                    self._move_finance_selection(-1)
             elif bstate & curses.BUTTON2_PRESSED or bstate & (1 << 21):  # Scroll Down
                 if self.current_tab == 1:
                     self.selected_email_idx = min(len(self.emails) - 1, self.selected_email_idx + 1)
                 elif self.current_tab == 4:
-                    if getattr(self, "finances_view_mode", "daily") == "bills":
-                        bb = getattr(self, "finance_bills_breakdown", {}) or {}
-                        bills = bb.get("bills", [])
-                        if self.selected_bill_idx < len(bills) - 1:
-                            self.selected_bill_idx += 1
-                    elif self.finances_focus == "days":
-                        if self.selected_day_idx < len(self.finance_days) - 1:
-                            self.selected_day_idx += 1
-                    else:
-                        curr_items = self.finance_days[self.selected_day_idx]["items"] if self.finance_days else []
-                        if self.selected_item_idx < len(curr_items) - 1:
-                            self.selected_item_idx += 1
+                    self._move_finance_selection(1)
         except Exception:
             pass
 
@@ -1468,68 +1416,7 @@ class CockpitTUI:
                 elif ch in (ord("t"), ord("T")):
                     self.trigger_opencode_action("Triage my unread emails and summarize urgent items using telemachus-email")
             elif self.current_tab == 4:
-                if ch in (ord("v"), ord("V")):
-                    self.finances_view_mode = "bills" if getattr(self, "finances_view_mode", "daily") == "daily" else "daily"
-                    mode_label = "Recurring Bills & Monthly Budget" if self.finances_view_mode == "bills" else "Daily Ledger"
-                    self.set_notification(f"Switched view to {mode_label}")
-                elif getattr(self, "finances_view_mode", "daily") == "bills":
-                    bb = getattr(self, "finance_bills_breakdown", {}) or {}
-                    bills = bb.get("bills", [])
-                    avail_rows = max(1, max_y - 12)
-                    if ch in (curses.KEY_UP, ord("k")):
-                        if self.selected_bill_idx > 0:
-                            self.selected_bill_idx -= 1
-                            if self.selected_bill_idx < self.bills_scroll_offset:
-                                self.bills_scroll_offset = self.selected_bill_idx
-                    elif ch in (curses.KEY_DOWN, ord("j")):
-                        if self.selected_bill_idx < len(bills) - 1:
-                            self.selected_bill_idx += 1
-                            if self.selected_bill_idx >= self.bills_scroll_offset + avail_rows:
-                                self.bills_scroll_offset += 1
-                    elif ch in (ord("m"), ord("M")):
-                        self.mask_amounts = not self.mask_amounts
-                        status = "masked" if self.mask_amounts else "unmasked"
-                        self.set_notification(f"Finance amounts {status}.")
-                else:
-                    if ch in (9, ord("\t")):  # Tab key toggles focus between Days and Items
-                        self.finances_focus = "items" if self.finances_focus == "days" else "days"
-                        self.set_notification(f"Focus: {self.finances_focus.upper()}")
-                    elif ch in (curses.KEY_RIGHT, ord("l")):
-                        self.finances_focus = "items"
-                    elif ch in (curses.KEY_LEFT, ord("h")):
-                        self.finances_focus = "days"
-                    elif ch in (curses.KEY_UP, ord("k")):
-                        if self.finances_focus == "days":
-                            if self.selected_day_idx > 0:
-                                self.selected_day_idx -= 1
-                                self.selected_item_idx = 0
-                                if self.selected_day_idx < self.day_scroll_offset:
-                                    self.day_scroll_offset = self.selected_day_idx
-                        else:
-                            if self.selected_item_idx > 0:
-                                self.selected_item_idx -= 1
-                    elif ch in (curses.KEY_DOWN, ord("j")):
-                        if self.finances_focus == "days":
-                            if self.selected_day_idx < len(self.finance_days) - 1:
-                                self.selected_day_idx += 1
-                                self.selected_item_idx = 0
-                                avail_day_rows = max(1, max_y - 9)
-                                if self.selected_day_idx >= self.day_scroll_offset + avail_day_rows:
-                                    self.day_scroll_offset += 1
-                        else:
-                            curr_items = self.finance_days[self.selected_day_idx]["items"] if self.finance_days else []
-                            if self.selected_item_idx < len(curr_items) - 1:
-                                self.selected_item_idx += 1
-                    elif ch in (ord("a"), ord("A")):
-                        self.open_add_modal()
-                    elif ch in (ord("e"), ord("E")):
-                        self.open_edit_modal()
-                    elif ch in (ord("d"), ord("D")):
-                        self.delete_selected_finance()
-                    elif ch in (ord("m"), ord("M")):
-                        self.mask_amounts = not self.mask_amounts
-                        status = "masked" if self.mask_amounts else "unmasked"
-                        self.set_notification(f"Finance amounts {status}.")
+                self.handle_finance_key(ch, max_y)
 
 
 def main():
