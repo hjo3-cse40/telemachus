@@ -259,6 +259,22 @@ def cmd_import_text(store: FinanceStore, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_seed_demo(args: argparse.Namespace) -> int:
+    from telemachus.finance.demo import UnsafeDemoTargetError, seed_demo
+
+    target = Path(args.dir).expanduser()
+    try:
+        info = seed_demo(target, force=args.force)
+    except (UnsafeDemoTargetError, FileExistsError) as e:
+        print(f"❌ {e}")
+        return 1
+    print(f"\n✅ Synthetic demo vault created at {info['path']}")
+    print(f"   • {info['transactions']} fake transactions over {info['days']} days (from {info['as_of']})")
+    print("\n💡 Open the cockpit against it (real data is untouched):")
+    print(f"   TELEMACHUS_FINANCE_DIR={info['path']} python3 -m telemachus.cockpit")
+    return 0
+
+
 def cmd_clear_day(store: FinanceStore, args: argparse.Namespace) -> int:
     target_date = args.date or datetime.now().strftime("%Y-%m-%d")
     count = store.delete_day_transactions(target_date)
@@ -468,7 +484,16 @@ def main() -> int:
     p_exp.add_argument("--beancount", action="store_true", help="Export to journal.beancount")
     p_exp.add_argument("--csv", action="store_true", help="Export to finances_export.csv")
 
+    # seed-demo
+    p_demo = subparsers.add_parser("seed-demo", parents=[common_parser], help="Create a synthetic (fake) finance vault for development and screenshots")
+    p_demo.add_argument("--dir", default="demo-finances", help="Where to create the demo vault (default: ./demo-finances)")
+    p_demo.add_argument("--force", action="store_true", help="Replace an existing demo vault in --dir")
+
     args = parser.parse_args()
+
+    # Handled before any store is opened so it can never create or touch the real vault.
+    if args.command == "seed-demo":
+        return cmd_seed_demo(args)
 
     store = FinanceStore(root_dir=args.vault_dir)
     recurring = RecurringEngine(store)

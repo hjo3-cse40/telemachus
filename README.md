@@ -370,6 +370,27 @@ Launch the unified Tokyo Night split cockpit pairing the visual operational dash
 python3 -m telemachus.cockpit
 ```
 
+### Developing with synthetic finance data (no personal info)
+
+The Finances tab normally reads your private vault (`~/.memory/private/finances`, never committed).
+To work on the UI from a fresh clone or another machine, generate a fake vault instead:
+
+```bash
+git clone git@github.com:hjo3-cse40/telemachus.git && cd telemachus
+python3 -m pip install pyyaml    # finance engine dependency (plus your usual venv setup)
+
+# Fake accounts, bills, a paycheck plan, and ~6 weeks of invented spending (dated relative to today)
+python3 -m telemachus.finance seed-demo --dir ./demo-finances
+
+# Point the cockpit at it. Either form works:
+TELEMACHUS_FINANCE_DIR=$PWD/demo-finances python3 -m telemachus.cockpit dashboard   # TUI only
+TELEMACHUS_FINANCE_DIR=$PWD/demo-finances ./bin/telemachus-cockpit                  # full tmux cockpit
+```
+
+`seed-demo` refuses to write into your real vault and never opens it. `demo-finances/` is gitignored.
+Re-run with `--force` to regenerate. On the other machine, do not copy `~/.memory`, and do not export
+`TELEMACHUS_FINANCE_DIR` pointing at real data.
+
 ### Cockpit Controls & Features
 * **Mouse & Trackpad**: Full mouse mode enabled (`set -g mouse on`). Click any email row to view its preview snippet, drag borders to resize panes, and scroll chat histories with trackpad momentum.
 * **Top Telemetry Header**: Real-time monitor displaying active model (`qwen/qwen3.5-9b`), context budget (`14,820 / 65,536 tokens`), unified RAM breakdown (`11.2 / 18.0 GB - MLX 5.8G · Laya 0.8G · OS 4.6G`), and generation speed (`41.5 t/s`).
