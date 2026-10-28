@@ -657,6 +657,32 @@ class RecurringEngine:
             ).fetchone()
             return int(row["cnt"]) > 0 if row else False
 
+    def _paid_amount_for_due_date(self, account_id: str, due_date: str) -> int:
+        """Amount of the payment logged closest to this due date (same window as _is_bill_paid_for_due_date)."""
+        due = datetime.strptime(due_date, "%Y-%m-%d")
+        start_date = (due - timedelta(days=15)).strftime("%Y-%m-%d")
+        end_date = (due + timedelta(days=14)).strftime("%Y-%m-%d")
+        with self.store._get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT p.amount_cents AS amount
+                FROM postings p
+                JOIN transactions t ON p.transaction_id = t.id
+                WHERE p.account_id = ? AND t.date >= ? AND t.date <= ? AND p.amount_cents > 0
+                ORDER BY ABS(julianday(t.date) - julianday(?)) ASC
+                LIMIT 1;
+                """,
+                (account_id, start_date, end_date, due_date),
+            ).fetchone()
+            return int(row["amount"]) if row else 0
+
+    @staticmethod
+    def _previous_paycheck_date(plan: PaycheckPlan, today: datetime) -> datetime:
+        """Most recent payday on or before `today` (the start of the current pay cycle)."""
+        if plan.frequency == "semimonthly":
+            return today.replace(day=15) if today.day >= 15 else today.replace(day=1)
+        return RecurringEngine._next_paycheck_date(plan, today) - timedelta(days=14)
+
     def _is_bill_paid_in_month(self, account_id: str, month: str) -> bool:
         """Checks if any payment transaction was logged for this account in the specified month."""
         start_date = f"{month}-01"
@@ -952,6 +978,33 @@ class RecurringEngine:
                             "is_autopay": True,
                         })
 
+        # 5b. Look back to the last payday for bills that came due earlier in this cycle and were paid,
+        # so they stay visible until the next paycheck. Only per-date-checkable bills are included
+        # (not the Kahram monthly installment or the credit card, which have no per-date paid test).
+        paid_bills = []
+        cycle_start_dt = self._previous_paycheck_date(plan, start_dt)
+        for day_offset in range((start_dt - cycle_start_dt).days):
+            check_date = cycle_start_dt + timedelta(days=day_offset)
+            d_str = check_date.strftime("%Y-%m-%d")
+            for spec in bill_specs:
+                if not spec["is_active"] or spec["key"] in ("kahram", "brother", "credit_card", "visa", "visa_credit_card", "credit_card_payment"):
+                    continue
+                if self._effective_due_day(spec["due_day"], check_date) != check_date.day:
+                    continue
+                if not self._is_bill_paid_for_due_date(spec["account_id"], d_str):
+                    continue
+                paid_amt = self._paid_amount_for_due_date(spec["account_id"], d_str)
+                paid_bills.append({
+                    "name": spec["name"],
+                    "due_date": d_str,
+                    "amount_cents": paid_amt,
+                    "status": "paid",
+                    "note": "Paid earlier this cycle",
+                    "notes": "Paid earlier this cycle",
+                    "account_id": spec["account_id"],
+                    "is_autopay": True,
+                })
+
         # Collect bills outside this 14-day window for clear context
         for spec in bill_specs:
             if not spec["is_active"] or spec["key"] in handled_keys_in_window or spec["key"] == "credit_card":
@@ -1026,6 +1079,8 @@ class RecurringEngine:
             credit_card_reminder=cc_reminder,
             bills=window_bills,
             other_bills=other_bills,
+            paid_bills=paid_bills,
+            cycle_start_date=cycle_start_dt.strftime("%Y-%m-%d"),
             groceries_allocated_cents=groceries_alloc,
             dining_allocated_cents=dining_alloc,
             gas_allocated_cents=gas_alloc,
