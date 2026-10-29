@@ -13,6 +13,8 @@ from unittest.mock import MagicMock, patch
 
 from telemachus.cockpit.finance_panel import FinanceTuiPanel
 from telemachus.cockpit.telemetry import CockpitTelemetry
+from telemachus.cockpit import shell
+from telemachus.cockpit.theme import GLYPHS, money_text
 from telemachus.cockpit.tui import CockpitTUI
 from telemachus.finance.import_text import (
     import_text_document,
@@ -23,6 +25,22 @@ from telemachus.finance.models import Posting, RecurringRule, RuleType, Transact
 from telemachus.finance.recurring import RecurringEngine
 from telemachus.finance.setup import apply_setup_yaml
 from telemachus.finance.store import FinanceStore
+
+
+def modal_key(tui: CockpitTUI, ch: int) -> None:
+    """One key in the open Add or Edit box, applied the way the TUI applies it."""
+    tui._apply_modal_result(tui._get_modals().handle_key(ch))
+
+
+def draw_modal(tui: CockpitTUI, max_y: int, max_x: int) -> None:
+    """Draws the open Add or Edit box for a max_y x max_x screen."""
+    tui._draw_overlay(tui._get_modals().render(max_x, max_y), shell.layout(max_y, max_x))
+
+
+def draw_money(tui: CockpitTUI, max_y: int, max_x: int) -> None:
+    """Draws the Money body for a max_y x max_x screen."""
+    lay = shell.layout(max_y, max_x)
+    tui._draw_body(tui._build_money(lay), lay)
 
 
 class TestImportText(unittest.TestCase):
@@ -154,7 +172,8 @@ class TestImportText(unittest.TestCase):
             """
             res = import_text_document(doc, store=store, default_year=2026)
             self.assertEqual(res["total_days"], 4)
-            self.assertEqual(res["total_transactions"], 7)
+            # "- rent - 0.00" is skipped: a $0 entry is rejected (it used to be saved).
+            self.assertEqual(res["total_transactions"], 6)
             self.assertIn("2026-07-30", res["dates"])
             self.assertIn("2026-08-15", res["dates"])
             self.assertIn("2026-09-12", res["dates"])
@@ -165,7 +184,7 @@ class TestImportText(unittest.TestCase):
 
             # Test delete_all_imported_transactions
             deleted = store.delete_all_imported_transactions()
-            self.assertEqual(deleted, 7)
+            self.assertEqual(deleted, 6)
             self.assertEqual(len(store.list_transactions()), 0)
         finally:
             temp_dir.cleanup()
@@ -273,8 +292,10 @@ class TestFinanceTuiPanel(unittest.TestCase):
         day = days[0]
         # Inflow: payday 1500
         self.assertEqual(day["inflow_cents"], 150000)
-        # Outflow: 50 groceries + 35 dinner + 200 cc payment = 285
-        self.assertEqual(day["outflow_cents"], 28500)
+        # Outflow (spending): 50 groceries + 35 dinner = 85. The 200 card payment moves money from
+        # checking to the card; it is not spending (it used to be counted here, which was the bug).
+        self.assertEqual(day["outflow_cents"], 8500)
+        self.assertEqual(day["card_payment_cents"], 20000)
         # Savings: 400
         self.assertEqual(day["savings_cents"], 40000)
 
@@ -353,38 +374,41 @@ class TestCockpitTUIFinances(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_money_formatting_and_masking(self):
-        self.assertEqual(self.tui._fmt_money(12345, mask=False), "$123.45")
-        self.assertEqual(self.tui._fmt_money(12345, mask=True), "$***.**")
-        self.assertEqual(self.tui._fmt_money(12345, mask=False, signed=True), "+$123.45")
-        self.assertEqual(self.tui._fmt_money(-12345, mask=False, signed=True), "-$123.45")
+        # The TUI formats money with theme.money_text (the old tui._fmt_money wrapper is gone).
+        self.assertEqual(money_text(12345, mask=False), "$123.45")
+        self.assertEqual(money_text(12345, mask=True), "$" + GLYPHS["hidden"])
+        self.assertEqual(money_text(12345, mask=False, signed=True), "+$123.45")
+        self.assertEqual(money_text(-12345, mask=False, signed=True), "-$123.45")
 
     def test_modal_workflow(self):
         self.tui.open_add_modal()
         self.assertTrue(self.tui.is_adding_finances)
-        self.assertEqual(self.tui.modal_stage, "date")
+        # One step: the box opens on the entry lines with today's date prefilled.
+        self.assertEqual(self.tui.modal_stage, "bullets")
+        self.assertEqual(self.tui.modal_date_buffer, datetime.now().strftime("%Y-%m-%d"))
 
-        # Step 1: Type date and press Enter
+        # Step 1: Pick the date; Enter on an empty first line does nothing
         self.tui.modal_date_buffer = "2026-10-23"
-        self.tui.handle_modal_key(10)  # Enter
+        modal_key(self.tui, 10)  # Enter
         self.assertEqual(self.tui.modal_stage, "bullets")
         self.assertEqual(self.tui.modal_date_buffer, "2026-10-23")
 
         # Step 2: Add first item
         for char in "- groceries - 35.50":
-            self.tui.handle_modal_key(ord(char))
+            modal_key(self.tui, ord(char))
         self.assertEqual(self.tui.modal_line_buffer, "- groceries - 35.50")
-        self.tui.handle_modal_key(10)  # Enter adds item
+        modal_key(self.tui, 10)  # Enter adds item
         self.assertEqual(len(self.tui.modal_batch_lines), 1)
         self.assertEqual(self.tui.modal_line_buffer, "")
 
         # Step 3: Add second item
         for char in "gas - 25.00":
-            self.tui.handle_modal_key(ord(char))
-        self.tui.handle_modal_key(10)  # Enter adds item
+            modal_key(self.tui, ord(char))
+        modal_key(self.tui, 10)  # Enter adds item
         self.assertEqual(len(self.tui.modal_batch_lines), 2)
 
         # Step 4: Empty Enter commits all lines
-        self.tui.handle_modal_key(10)
+        modal_key(self.tui, 10)
         self.assertFalse(self.tui.is_adding_finances)
 
         # Check that transactions were saved into store
@@ -398,8 +422,8 @@ class TestCockpitTUIFinances(unittest.TestCase):
         self.tui.refresh_data()
         self.assertEqual(len(self.tui.finance_days), 1)
 
-        # Calling draw_finances_view should render without throwing
-        self.tui.draw_finances_view(35, 90)
+        # Drawing the Money body should render without throwing
+        draw_money(self.tui, 35, 90)
         self.assertTrue(self.mock_stdscr.addstr.called)
 
     @unittest.mock.patch("curses.color_pair", return_value=0)
@@ -409,32 +433,32 @@ class TestCockpitTUIFinances(unittest.TestCase):
         self.panel.log_day_bullets("2026-10-23", bullets)
         self.tui.refresh_data()
         self.tui.finances_view_mode = "day"  # the day screen lists the individual items
-        self.tui.draw_finances_view(35, 90)
+        draw_money(self.tui, 35, 90)
 
         # Inspect addstr calls
         addstr_args = [call[0] for call in self.mock_stdscr.addstr.call_args_list]
 
-        # Verify expense (dinner) is formatted as -$45.00 (not +$45.00)
-        has_negative_dinner = any("-$45.00" in str(arg) for call_arg in addstr_args for arg in call_arg)
-        has_positive_dinner = any("+$45.00" in str(arg) for call_arg in addstr_args for arg in call_arg)
-        self.assertTrue(has_negative_dinner, "Expense should show negative sign: -$45.00")
+        # Day items use plain table amounts like every other Money table ('-45.00', not '-$45.00').
+        has_negative_dinner = any("-45.00" in str(arg) for call_arg in addstr_args for arg in call_arg)
+        has_positive_dinner = any("+45.00" in str(arg) for call_arg in addstr_args for arg in call_arg)
+        self.assertTrue(has_negative_dinner, "Expense should show negative sign: -45.00")
         self.assertFalse(has_positive_dinner, "Expense should NOT show positive sign")
 
-        # Verify savings transfer is formatted as -$600.00 (not arrow ->$600.00)
-        has_negative_savings = any("-$600.00" in str(arg) for call_arg in addstr_args for arg in call_arg)
+        # Verify savings transfer is formatted as -600.00 (not arrow ->600.00)
+        has_negative_savings = any("-600.00" in str(arg) for call_arg in addstr_args for arg in call_arg)
         has_arrow_savings = any("→" in str(arg) for call_arg in addstr_args for arg in call_arg)
-        self.assertTrue(has_negative_savings, "Savings should show negative sign: -$600.00")
+        self.assertTrue(has_negative_savings, "Savings should show negative sign: -600.00")
         self.assertFalse(has_arrow_savings, "Savings should not display arrow symbol")
 
-        # Verify income is formatted as +$1,350.00
-        has_positive_payday = any("+$1,350.00" in str(arg) for call_arg in addstr_args for arg in call_arg)
-        self.assertTrue(has_positive_payday, "Income should show positive sign: +$1,350.00")
+        # Verify income is formatted as +1,350.00
+        has_positive_payday = any("+1,350.00" in str(arg) for call_arg in addstr_args for arg in call_arg)
+        self.assertTrue(has_positive_payday, "Income should show positive sign: +1,350.00")
 
     @unittest.mock.patch("curses.color_pair", return_value=0)
     def test_draw_add_day_modal_both_stages(self, mock_cp):
         # Test stage 1: date
         self.tui.open_add_modal()
-        self.tui.draw_add_day_modal(35, 90)
+        draw_modal(self.tui, 35, 90)
         self.assertTrue(self.mock_stdscr.addstr.called)
 
         # Test stage 2: bullets
@@ -442,7 +466,7 @@ class TestCockpitTUIFinances(unittest.TestCase):
         self.tui.modal_batch_lines = ["- groceries - 25.50", "gas - 40"]
         self.tui.modal_line_buffer = "payday + 1"
         self.mock_stdscr.reset_mock()
-        self.tui.draw_add_day_modal(35, 90)
+        draw_modal(self.tui, 35, 90)
         self.assertTrue(self.mock_stdscr.addstr.called)
 
     @unittest.mock.patch("curses.color_pair", return_value=0)
@@ -457,14 +481,15 @@ class TestCockpitTUIFinances(unittest.TestCase):
         self.assertTrue(self.tui.is_editing_finances)
         self.assertEqual(self.tui.editing_stage, "item")
 
-        # Cycle account with Tab
+        # Tab moves to the Account field; Right picks the next account
         init_acc = self.tui.editing_account_idx
-        self.tui.handle_edit_modal_key(9)  # Tab
+        modal_key(self.tui, 9)  # Tab
+        modal_key(self.tui, curses.KEY_RIGHT)
         self.assertEqual(self.tui.editing_account_idx, (init_acc + 1) % 3)
 
         # Edit buffer and commit
         self.tui.editing_buffer = "- groceries - 22.50"
-        self.tui.handle_edit_modal_key(10)
+        modal_key(self.tui, 10)
         self.assertFalse(self.tui.is_editing_finances)
 
         # Verify update
@@ -474,9 +499,9 @@ class TestCockpitTUIFinances(unittest.TestCase):
         # Test draw edit modal stages
         self.tui.is_editing_finances = True
         self.tui.editing_stage = "day_menu"
-        self.tui.draw_edit_modal(35, 90)
+        draw_modal(self.tui, 35, 90)
         self.tui.editing_stage = "item"
-        self.tui.draw_edit_modal(35, 90)
+        draw_modal(self.tui, 35, 90)
         self.assertTrue(self.mock_stdscr.addstr.called)
 
         # Test delete selected finance
@@ -655,12 +680,14 @@ paycheck_plan:
         self.tui.refresh_data()
         self.tui.current_tab = 4
         self.mock_stdscr.reset_mock()
-        self.tui.draw_finances_view(35, 90)
+        draw_money(self.tui, 35, 90)
 
         addstr_calls = [c[0] for c in self.mock_stdscr.addstr.call_args_list]
         combined_text = " ".join(str(arg) for call in addstr_calls for arg in call)
 
-        self.assertIn("Net worth", combined_text)
+        # Money overview (ClearNumber.dc.html): the accounts line says "Net", not "Net worth".
+        self.assertIn("Net ", combined_text)
+        self.assertIn("Checking", combined_text)
         self.assertIn("UNTIL PAYDAY", combined_text)
         self.assertIn("Savings", combined_text)
         self.assertIn("Brother", combined_text)
@@ -672,7 +699,8 @@ paycheck_plan:
             status_file = Path(f.name)
 
         try:
-            telem = CockpitTelemetry()
+            # Scratch paths only: never the real ~/.memory/llm_status.json or OpenCode DB.
+            telem = CockpitTelemetry(status_path=status_file, opencode_db=status_file.with_suffix(".nodb"))
             # 1. Processing Prompt state
             status_file.write_text(
                 json.dumps({
@@ -725,7 +753,11 @@ paycheck_plan:
                 status_file.unlink()
 
     def test_savings_goal_from_starting_balances_capital_one(self):
-        """Verifies Savings goal progress pulls directly from starting_balances.capital_one_savings."""
+        """The starting savings balance is NOT progress toward the monthly savings goal.
+
+        This test used to expect the $750 starting balance as "saved"; that was the
+        "$4,200 of $600 met" bug. Progress is money moved into savings this month.
+        """
         yaml_path = Path(self.temp_dir.name) / "test_setup.yaml"
         sample_yaml = """
 starting_balances:
@@ -748,11 +780,21 @@ goals:
         savings_goal = [g for g in goals if "Savings" in g.name][0]
         brother_goal = [g for g in goals if "Brother" in g.name or "Kahram" in g.name][0]
 
-        # Savings should go directly off capitol_one_saving starting balance ($750.00)
-        self.assertEqual(savings_goal.saved_cents, 75000)
+        # Nothing moved to savings this month yet: 0 of $1,000 (the $750 balance does not count)
+        self.assertEqual(savings_goal.saved_cents, 0)
         self.assertEqual(savings_goal.target_cents, 100000)
-        self.assertEqual(savings_goal.progress_pct, 75.0)
-        self.assertIn("75.0%", savings_goal.progress_bar)
+        self.assertEqual(savings_goal.status, "open")
+
+        # A transfer this month counts
+        self.panel.log_day_bullets("2026-10-10", "savings + 250")
+        goals = self.store.get_goals_progress("2026-10")
+        savings_goal = [g for g in goals if "Savings" in g.name][0]
+        self.assertEqual(savings_goal.saved_cents, 25000)
+        self.assertEqual(savings_goal.progress_pct, 25.0)
+        # ...but not one from last month
+        self.panel.log_day_bullets("2026-09-30", "savings + 100")
+        goals = self.store.get_goals_progress("2026-10")
+        self.assertEqual([g for g in goals if "Savings" in g.name][0].saved_cents, 25000)
 
         # Brother payment is 100% completed
         self.assertEqual(brother_goal.saved_cents, 15000)
@@ -854,7 +896,7 @@ fixed_bills:
         # 1. Default mode is 'daily'
         self.assertEqual(self.tui.finances_view_mode, "daily")
         self.mock_stdscr.reset_mock()
-        self.tui.draw_finances_view(35, 90)
+        draw_money(self.tui, 35, 90)
         addstr_calls = [c[0] for c in self.mock_stdscr.addstr.call_args_list]
         combined = " ".join(str(arg) for call in addstr_calls for arg in call)
         self.assertIn("UNTIL PAYDAY", combined)
@@ -862,15 +904,16 @@ fixed_bills:
         # 2. Toggle to 'bills' mode
         self.tui.finances_view_mode = "bills"
         self.mock_stdscr.reset_mock()
-        self.tui.draw_finances_view(35, 90)
+        draw_money(self.tui, 35, 90)
         addstr_calls_bills = [c[0] for c in self.mock_stdscr.addstr.call_args_list]
         combined_bills = " ".join(str(arg) for call in addstr_calls_bills for arg in call)
 
+        # Bills screen (Bills.dc.html): plain-English labels replace the old Notion formula names.
         self.assertIn("RECURRING BILLS", combined_bills)
-        self.assertIn("MONTHLY OVERVIEW", combined_bills)
-        self.assertIn("Planned Total Personal", combined_bills)
-        self.assertIn("Remaining Cushion", combined_bills)
-        self.assertIn("Fixed Bills", combined_bills)
+        self.assertIn("THIS MONTH", combined_bills)
+        self.assertIn("Left for spending", combined_bills)
+        self.assertIn("Flex left this month", combined_bills)
+        self.assertIn("Fixed bills", combined_bills)
 
     def test_savings_target_read_from_monthly_targets_in_setup_yaml(self):
         """Verifies get_monthly_overview and get_goals_progress directly read monthly_targets.savings_target."""
@@ -902,9 +945,9 @@ starting_balances:
         goals = self.store.get_goals_progress("2026-10", yaml_path=yaml_path)
         sav_goal = next(g for g in goals if "Savings" in g.name)
         self.assertEqual(sav_goal.target_cents, 85000)
-        self.assertEqual(sav_goal.saved_cents, 42500)
-        self.assertEqual(sav_goal.progress_pct, 50.0)
-        self.assertEqual(sav_goal.remaining_cents, 42500)
+        # The $425 starting balance is not money saved this month (it used to count as 50%).
+        self.assertEqual(sav_goal.saved_cents, 0)
+        self.assertEqual(sav_goal.remaining_cents, 85000)
 
     def test_brother_payment_pulls_monthly_amount_not_total_goal(self):
         """Verifies 2-week paycheck allocation pulls the monthly installment for brother ($150), not total loan goal ($1,000)."""
@@ -963,11 +1006,12 @@ fixed_bills:
         # 1. Checking balance is strictly $1,200.00 (120000 cents), does NOT include $8,000 savings
         self.assertEqual(alloc.checking_balance_cents, 120000)
 
-        # Bills due: wifi (5574) + cc balance (5000) + pge (7500) = 18074 cents ($180.74)
-        self.assertEqual(alloc.bills_due_cents, 18074)
+        # Bills due: wifi (5574) + cc balance (5000) = 10574 cents ($105.74). No PG&E: it is not in
+        # fixed_bills and has no pge_estimate (the old made-up $75.00 default is gone).
+        self.assertEqual(alloc.bills_due_cents, 10574)
 
-        # Checking after due bills: 120000 - 18074 = 101926 ($1,019.26)
-        self.assertEqual(alloc.checking_after_bills_cents, 101926)
+        # Checking after due bills: 120000 - 10574 = 109426 ($1,094.26)
+        self.assertEqual(alloc.checking_after_bills_cents, 109426)
 
         # 2. Credit Card reminder is present for Nov 2
         self.assertIn("2026-11-02", alloc.credit_card_reminder)
@@ -1008,7 +1052,9 @@ fixed_bills:
 
     def test_mcp_tools_with_null_arguments(self):
         """Verifies all finance MCP tools gracefully handle null/None arguments without crashing."""
-        from telemachus.mcp.server import handle_tool_call
+        from tests.cockpit_isolation import import_mcp_server
+
+        handle_tool_call = import_mcp_server().handle_tool_call  # never the real mail index
         null_calls = [
             ("finance_monthly_overview", {"month": None, "income": None, "savings_target": None, "notes": None}),
             ("finance_get_balance", {"as_of_date": None}),

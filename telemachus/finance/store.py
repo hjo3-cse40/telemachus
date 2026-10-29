@@ -381,7 +381,7 @@ class FinanceStore:
     def get_transaction(self, tx_id: str) -> Optional[Transaction]:
         """Retrieves a transaction and its postings by ID."""
         with self._get_connection() as conn:
-            row = conn.execute("SELECT * FROM transactions WHERE id = ?;", (tx_id,)).fetchone()
+            row = conn.execute("SELECT *, rowid AS seq FROM transactions WHERE id = ?;", (tx_id,)).fetchone()
             if not row:
                 return None
 
@@ -409,6 +409,7 @@ class FinanceStore:
                 postings=postings,
                 idempotency_hash=row["idempotency_hash"],
                 created_at=row["created_at"],
+                seq=row["seq"],
             )
 
     def list_transactions(
@@ -422,7 +423,8 @@ class FinanceStore:
         """Lists transactions matching date and/or account criteria."""
         with self._get_connection() as conn:
             query = """
-                SELECT DISTINCT t.id, t.date, t.payee, t.memo, t.source, t.status, t.idempotency_hash, t.created_at
+                SELECT DISTINCT t.id, t.date, t.payee, t.memo, t.source, t.status, t.idempotency_hash, t.created_at,
+                    t.rowid AS seq
                 FROM transactions t
             """
             joins = []
@@ -447,7 +449,8 @@ class FinanceStore:
             if conditions:
                 query += " WHERE " + " AND ".join(conditions)
 
-            query += " ORDER BY t.date DESC, t.created_at DESC LIMIT ? OFFSET ?;"
+            # Newest save first; lines saved in the same second (one Add batch) keep typed order.
+            query += " ORDER BY t.date DESC, t.created_at DESC, t.rowid ASC LIMIT ? OFFSET ?;"
             params.extend([limit, offset])
 
             rows = conn.execute(query, params).fetchall()
@@ -477,6 +480,7 @@ class FinanceStore:
                         postings=postings,
                         idempotency_hash=r["idempotency_hash"],
                         created_at=r["created_at"],
+                        seq=r["seq"],
                     )
                 )
             return results
@@ -486,6 +490,23 @@ class FinanceStore:
         with self._write_lock():
             with self._get_connection() as conn:
                 res = conn.execute("DELETE FROM transactions WHERE id = ?;", (tx_id,))
+                conn.commit()
+                return res.rowcount > 0
+
+    def restore_position(self, tx_id: str, seq: int, created_at: int) -> bool:
+        """Gives a transaction an earlier ledger position (rowid) and creation time.
+
+        edit_transaction logs the new entry and then deletes the old one; this puts the new entry
+        where the old one was, so its order inside the day (a card charge before or after a
+        payment) does not change. Postings point at the id, not the rowid, so they stay attached."""
+        with self._write_lock():
+            with self._get_connection() as conn:
+                try:
+                    res = conn.execute("UPDATE transactions SET rowid = ?, created_at = ? WHERE id = ?;",
+                                       (seq, created_at, tx_id))
+                except sqlite3.IntegrityError:
+                    # The old rowid is still taken: keep at least the creation time.
+                    res = conn.execute("UPDATE transactions SET created_at = ? WHERE id = ?;", (created_at, tx_id))
                 conn.commit()
                 return res.rowcount > 0
 
@@ -514,8 +535,13 @@ class FinanceStore:
     # ==========================================================================
     # Balances & Aggregations (Deterministic Calculations)
     # ==========================================================================
-    def get_account_balance(self, account_id: str, as_of_date: Optional[str] = None) -> int:
+    def get_account_balance(
+        self, account_id: str, as_of_date: Optional[str] = None, setup_always: bool = False
+    ) -> int:
         """Returns the exact net balance of an account in integer cents.
+
+        as_of_date leaves out entries dated later. setup_always=True still counts setup opening
+        balances dated later (setup may be dated on the day it ran).
         
         For ASSETS and EXPENSES: Debits are positive (Balance = sum of postings).
         For LIABILITIES, INCOME, EQUITY: Credits are negative in postings, so we invert sign 
@@ -534,7 +560,7 @@ class FinanceStore:
             """
             params: list[Any] = [account_id]
             if as_of_date:
-                query += " AND t.date <= ?"
+                query += " AND (t.date <= ? OR t.source = 'setup')" if setup_always else " AND t.date <= ?"
                 params.append(as_of_date)
 
             row = conn.execute(query, params).fetchone()
@@ -545,15 +571,17 @@ class FinanceStore:
                 return -raw_cents
             return raw_cents
 
-    def get_all_balances(self, as_of_date: Optional[str] = None) -> Dict[str, Any]:
-        """Computes comprehensive balance summary across all accounts down to the cent."""
+    def get_all_balances(self, as_of_date: Optional[str] = None, setup_always: bool = False) -> Dict[str, Any]:
+        """Computes comprehensive balance summary across all accounts down to the cent.
+
+        setup_always: see get_account_balance (the cockpit reads balances as of today)."""
         accounts = self.list_accounts(active_only=True)
         liquid_assets_cents = 0
         liabilities_cents = 0
         account_balances: Dict[str, int] = {}
 
         for acc in accounts:
-            bal = self.get_account_balance(acc.id, as_of_date)
+            bal = self.get_account_balance(acc.id, as_of_date, setup_always=setup_always)
             account_balances[acc.id] = bal
             if acc.account_type == AccountType.ASSET:
                 liquid_assets_cents += bal
@@ -693,9 +721,14 @@ class FinanceStore:
         return self.get_monthly_overview(month)
 
     def get_monthly_overview(
-        self, month: Optional[str] = None, yaml_path: Optional[Path | str] = None
+        self, month: Optional[str] = None, yaml_path: Optional[Path | str] = None,
+        as_of_date: Optional[str] = None,
     ) -> MonthlyOverview:
-        """Fetches monthly overview with actuals dynamically calculated from postings."""
+        """Fetches monthly overview with actuals dynamically calculated from postings.
+
+        as_of_date: actuals leave out entries dated later (an entry logged ahead is not spent
+        yet), the same rule as the cockpit's "month spent". None counts the whole month.
+        """
         if not month:
             from datetime import datetime
             month = datetime.now().strftime("%Y-%m")
@@ -705,6 +738,8 @@ class FinanceStore:
         y, m = map(int, month.split("-"))
         _, last_day = calendar.monthrange(y, m)
         end_date = f"{month}-{last_day:02d}"
+        if as_of_date and as_of_date < end_date:
+            end_date = as_of_date
 
         # 1. Load setup.yaml live as the primary source of truth for targets and bills!
         setup_data = None
@@ -795,7 +830,13 @@ class FinanceStore:
             fb = setup_data.get("fixed_bills")
             if isinstance(fb, dict):
                 tot_f = 0
+                from telemachus.finance.cards import CARD_BILL_KEYS
+
                 for k, v in fb.items():
+                    clean_k = str(k).lower().replace("-", "_").replace(" ", "_")
+                    if clean_k in CARD_BILL_KEYS:
+                        # The card bill is the live balance; card purchases already count as spending.
+                        continue
                     if isinstance(v, dict) and bool(v.get("active", True)) and not is_variable_bill(k, v):
                         amt = _parse_cents(v.get("amount", 0.0))
                         if amt:
@@ -867,6 +908,20 @@ class FinanceStore:
             ).fetchone()
             pge_actual = int(pge_row["total"])
 
+            # Net money moved into savings this month (opening balances from setup do not count).
+            sav_row = conn.execute(
+                """
+                SELECT COALESCE(SUM(p.amount_cents), 0) as total
+                FROM postings p
+                JOIN transactions t ON p.transaction_id = t.id
+                WHERE p.account_id = 'Assets:Savings:CapitalOne'
+                  AND (t.source IS NULL OR t.source != 'setup')
+                  AND t.date >= ? AND t.date <= ?;
+                """,
+                (start_date, end_date),
+            ).fetchone()
+            savings_actual = max(0, int(sav_row["total"]))
+
             if row:
                 income = yaml_income if yaml_income is not None else (row["income_cents"] or actual_income)
                 savings = yaml_savings if yaml_savings is not None else row["savings_target_cents"]
@@ -892,11 +947,12 @@ class FinanceStore:
                     gas_actual_cents=gas_actual,
                     notes=notes,
                     updated_at=row["updated_at"],
+                    savings_actual_cents=savings_actual,
                 )
             else:
                 income = yaml_income if yaml_income is not None else actual_income
                 savings = yaml_savings if yaml_savings is not None else 0
-                fixed = yaml_fixed if yaml_fixed is not None else 26071
+                fixed = yaml_fixed if yaml_fixed is not None else 0
                 pge = yaml_pge if yaml_pge is not None else pge_actual
                 groceries_planned = yaml_groceries if yaml_groceries is not None else 0
                 dining_planned = yaml_dining if yaml_dining is not None else 0
@@ -918,6 +974,7 @@ class FinanceStore:
                     gas_actual_cents=gas_actual,
                     notes=notes,
                     updated_at=int(time.time()),
+                    savings_actual_cents=savings_actual,
                 )
 
     # ==========================================================================
@@ -950,44 +1007,30 @@ class FinanceStore:
             except Exception:
                 pass
 
-        # 1. Savings Goal Target and Baseline
+        # 1. Savings goal: the monthly target from setup.yaml against money actually moved into
+        # savings this month (from the ledger). The starting savings balance is not progress.
+        # An explicit "already_saved" in setup.yaml (saved this month before the ledger started)
+        # counts as a floor.
         savings_target = overview.savings_target_cents
-        savings_baseline = None
+        savings_baseline: Optional[int] = None
+
+        def _first_cents(cfg: Dict[str, Any], keys: Tuple[str, ...]) -> Optional[int]:
+            for key in keys:
+                if cfg.get(key) is not None:
+                    return _parse_cents(cfg.get(key))
+            return None
 
         if setup_data:
-            # A. Check starting_balances for Capital One Savings balance (as requested)
-            sb = setup_data.get("starting_balances") or {}
-            for k, v in sb.items():
-                clean_k = k.lower().replace("-", "_").replace(" ", "_")
-                if any(term in clean_k for term in ("capital", "capitol", "savings", "hysa")):
-                    if not any(excl in clean_k for excl in ("checking", "visa", "credit")):
-                        val = _parse_cents(v)
-                        if val is not None:
-                            savings_baseline = val
-                            break
-
-            # B. Check monthly_targets for savings_target (as requested: "in my setup yaml, there is a monthly_targets and a savings_target")
             mt = setup_data.get("monthly_targets") or {}
             if isinstance(mt, dict):
                 t = _parse_cents(mt.get("savings_target") or mt.get("savings") or mt.get("monthly_savings"))
                 if t is not None:
                     savings_target = t
-                if savings_baseline is None:
-                    b = _parse_cents(
-                        mt.get("already_saved")
-                        or mt.get("savings_saved")
-                        or mt.get("savings_actual")
-                    )
-                    if b is not None:
-                        savings_baseline = b
-
-            # C. Check top-level setup_data.get("savings_target")
+                savings_baseline = _first_cents(mt, ("already_saved", "savings_saved", "savings_actual"))
             if setup_data.get("savings_target") is not None:
                 t = _parse_cents(setup_data["savings_target"])
                 if t is not None:
                     savings_target = t
-
-            # D. Check goals.savings
             goals_cfg = setup_data.get("goals") or {}
             sav_cfg = goals_cfg.get("savings") or goals_cfg.get("saving") or {}
             if isinstance(sav_cfg, dict):
@@ -995,45 +1038,33 @@ class FinanceStore:
                 if t is not None:
                     savings_target = t
                 if savings_baseline is None:
-                    b = _parse_cents(
-                        sav_cfg.get("already_saved")
-                        or sav_cfg.get("saved")
-                        or sav_cfg.get("current")
-                        or sav_cfg.get("already_paid")
-                        or sav_cfg.get("paid")
-                        or sav_cfg.get("actual")
-                    )
-                    if b is not None:
-                        savings_baseline = b
+                    savings_baseline = _first_cents(sav_cfg, ("already_saved", "saved"))
             elif isinstance(sav_cfg, (int, float, str)):
                 t = _parse_cents(sav_cfg)
                 if t is not None:
                     savings_target = t
-
-            # E. Check top-level setup_data.get("savings") or setup_data.get("savings_goal")
             top_sav = setup_data.get("savings") or setup_data.get("savings_goal") or {}
             if isinstance(top_sav, dict):
                 t = _parse_cents(top_sav.get("target") or top_sav.get("amount"))
                 if t is not None:
                     savings_target = t
-                if savings_baseline is None:
-                    b = _parse_cents(
-                        top_sav.get("already_saved")
-                        or top_sav.get("saved")
-                        or top_sav.get("current")
-                        or top_sav.get("already_paid")
-                        or top_sav.get("paid")
-                        or top_sav.get("actual")
-                    )
-                    if b is not None:
-                        savings_baseline = b
 
-        if savings_target <= 0:
-            savings_target = 100000  # Default $1,000.00 monthly savings target
+        saved_cents = max(0, overview.savings_actual_cents, savings_baseline or 0)
+        # No target configured: no savings goal (never a made-up target).
+        if savings_target and savings_target > 0:
+            goals.append(
+                GoalProgress(
+                    name="💰 Savings Target",
+                    target_cents=savings_target,
+                    saved_cents=saved_cents,
+                    status="completed" if saved_cents >= savings_target else "open",
+                )
+            )
 
-        # 2. Brother / Kahram Payment Goal Target and Baseline
-        kahram_target = 10000
+        # 2. Brother / Kahram payment: only when setup.yaml sets an amount.
+        kahram_target: Optional[int] = None
         kahram_baseline = None
+        kahram_active = True
         if setup_data:
             goals_cfg = setup_data.get("goals") or {}
             bro_cfg = (
@@ -1046,6 +1077,8 @@ class FinanceStore:
                 t = _parse_cents(bro_cfg.get("target") or bro_cfg.get("amount") or bro_cfg.get("goal"))
                 if t is not None:
                     kahram_target = t
+                if bro_cfg.get("active") is not None and not bool(bro_cfg.get("active")):
+                    kahram_active = False
                 b = _parse_cents(
                     bro_cfg.get("already_paid")
                     or bro_cfg.get("paid")
@@ -1064,8 +1097,10 @@ class FinanceStore:
             # Fallback to fixed_bills.kahram or fixed_bills.brother if not in goals section
             fb = setup_data.get("fixed_bills") or {}
             k_bill = fb.get("kahram") or fb.get("brother") or {}
-            if isinstance(k_bill, dict):
-                if kahram_target == 10000:
+            if isinstance(k_bill, dict) and k_bill:
+                if not bool(k_bill.get("active", True)):
+                    kahram_active = False
+                if kahram_target is None:
                     t = _parse_cents(k_bill.get("amount") or k_bill.get("target"))
                     if t is not None:
                         kahram_target = t
@@ -1082,7 +1117,7 @@ class FinanceStore:
             # Also check top-level setup_data.get("brother") or setup_data.get("kahram")
             top_bro = setup_data.get("brother") or setup_data.get("kahram") or {}
             if isinstance(top_bro, dict):
-                if kahram_target == 10000:
+                if kahram_target is None:
                     t = _parse_cents(top_bro.get("target") or top_bro.get("amount"))
                     if t is not None:
                         kahram_target = t
@@ -1096,34 +1131,8 @@ class FinanceStore:
                     if b is not None:
                         kahram_baseline = b
 
-        # 3. Determine Progress Amounts (Prioritizing setup.yaml source of truth)
-        if savings_baseline is not None:
-            saved_cents = max(0, savings_baseline)
-        else:
-            try:
-                saved_cents = max(0, self.get_account_balance("Assets:Savings:CapitalOne"))
-            except Exception:
-                with self._get_connection() as conn:
-                    sav_row = conn.execute(
-                        """
-                        SELECT COALESCE(SUM(p.amount_cents), 0) as total
-                        FROM postings p
-                        JOIN transactions t ON p.transaction_id = t.id
-                        WHERE p.account_id = 'Assets:Savings:CapitalOne'
-                          AND t.date >= ? AND t.date <= ?;
-                        """,
-                        (start_date, end_date),
-                    ).fetchone()
-                    saved_cents = max(0, int(sav_row["total"]))
-
-        goals.append(
-            GoalProgress(
-                name="💰 Savings Target",
-                target_cents=savings_target,
-                saved_cents=saved_cents,
-                status="completed" if saved_cents >= savings_target else "open",
-            )
-        )
+        if not kahram_target or kahram_target <= 0 or not kahram_active:
+            return goals
 
         if kahram_baseline is not None:
             total_kahram_paid = max(0, kahram_baseline)
@@ -1140,12 +1149,6 @@ class FinanceStore:
                     (start_date, end_date),
                 ).fetchone()
                 total_kahram_paid = max(0, int(kahram_row["total"]))
-
-        if kahram_target == 10000:
-            with self._get_connection() as conn:
-                rule_row = conn.execute("SELECT base_amount_cents FROM recurring_rules WHERE id = 'rule_kahram';").fetchone()
-                if rule_row:
-                    kahram_target = int(rule_row["base_amount_cents"])
 
         goals.append(
             GoalProgress(
@@ -1165,8 +1168,18 @@ class FinanceStore:
         self,
         items: List[Dict[str, Any]],
         default_date: Optional[str] = None,
+        allow_duplicates: bool = False,
     ) -> List[Transaction]:
-        """Atomically ingests a batch of daily spending and income bullet items."""
+        """Ingests a batch of daily spending and income bullet items.
+
+        Each item may set from_account (who pays: Checking, Visa or Savings) and to_account.
+        A card purchase is {"category": "groceries", "from_account": Visa}; a card payment is
+        {"category": "credit_card_payment"} (Visa +X, Checking -X).
+
+        allow_duplicates=False (imports): an identical line on the same day is logged once, so
+        re-importing a document is safe. allow_duplicates=True (typed entries in the cockpit):
+        every line is a new transaction, so two identical coffees on one day both count.
+        """
         from datetime import datetime
         today_str = default_date or datetime.now().strftime("%Y-%m-%d")
 
@@ -1192,6 +1205,7 @@ class FinanceStore:
             "wifi": ("Expenses:Utilities:WiFi", "Assets:Checking:WellsFargo"),
             "pge": ("Expenses:Utilities:PGE", "Assets:Checking:WellsFargo"),
             "personal": ("Expenses:Personal:Discretionary", "Assets:Checking:WellsFargo"),
+            "rent": ("Expenses:Housing:Rent", "Assets:Checking:WellsFargo"),
             "savings": ("Assets:Savings:CapitalOne", "Assets:Checking:WellsFargo"),
             "saving": ("Assets:Savings:CapitalOne", "Assets:Checking:WellsFargo"),
             "hysa": ("Assets:Savings:CapitalOne", "Assets:Checking:WellsFargo"),
@@ -1226,16 +1240,14 @@ class FinanceStore:
             if item.get("to_account"):
                 target_acc = item["to_account"]
 
-            if raw_cat in ("payday", "salary", "income") or (amount_val > 0 and target_acc == "Assets:Checking:WellsFargo"):
-                postings = [
-                    Posting(account_id=source_acc, amount_cents=-amount_cents, memo=memo),
-                    Posting(account_id=target_acc, amount_cents=amount_cents, memo=memo),
-                ]
-            else:
-                postings = [
-                    Posting(account_id=source_acc, amount_cents=-amount_cents, memo=memo),
-                    Posting(account_id=target_acc, amount_cents=amount_cents, memo=memo),
-                ]
+            if source_acc == target_acc:
+                raise ValueError(f"Item '{payee}' moves money from {source_acc} to itself.")
+            # Money flows from the source to the target: purchase = Expense +X / payer -X,
+            # card payment = Visa +X / Checking -X, income = Checking +X / Income -X.
+            postings = [
+                Posting(account_id=source_acc, amount_cents=-amount_cents, memo=memo),
+                Posting(account_id=target_acc, amount_cents=amount_cents, memo=memo),
+            ]
 
             tx = Transaction.create(
                 date=date,
@@ -1244,6 +1256,8 @@ class FinanceStore:
                 memo=memo,
                 source="batch_bullet_ingestion",
             )
+            if allow_duplicates:
+                tx.idempotency_hash = None
             logged = self.log_transaction(tx)
             logged_txs.append(logged)
 

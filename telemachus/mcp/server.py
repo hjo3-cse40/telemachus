@@ -123,7 +123,17 @@ class WarmLayaBridge:
 
 # Global warm bridge & SQLite index store
 laya_bridge = WarmLayaBridge()
-index_store = EmailIndexStore()
+# The email index opens on first use, not on import: importing this module (tests do) must not
+# open or write data/email_index.sqlite3. TELEMACHUS_EMAIL_DB points it at another file.
+_INDEX_STORE: Optional[EmailIndexStore] = None
+
+
+def _index_store() -> EmailIndexStore:
+    global _INDEX_STORE
+    if _INDEX_STORE is None:
+        env = os.environ.get("TELEMACHUS_EMAIL_DB")
+        _INDEX_STORE = EmailIndexStore(db_path=Path(env).expanduser() if env else None)
+    return _INDEX_STORE
 
 TOOLS_DEFINITIONS = [
     {
@@ -955,7 +965,7 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
                 folder=folder,
                 max_count=max_count,
                 predictor=laya_bridge.predict,
-                store=index_store,
+                store=_index_store(),
             )
             return (
                 f"Mailbox Indexing Complete for [{res['account_id']}] (Folder: {res['folder']}):\n"
@@ -975,7 +985,7 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
         attention = arguments.get("attention")
         limit = min(50, max(1, int(arguments.get("limit", 10))))
 
-        results = index_store.search(
+        results = _index_store().search(
             account_id=acc_id,
             query=query,
             category=category,
@@ -998,7 +1008,7 @@ def handle_tool_call(name: str, arguments: Dict[str, Any]) -> str:
 
     elif name == "email_index_stats":
         acc_id = arguments.get("account")
-        stats = index_store.get_stats(account_id=acc_id)
+        stats = _index_store().get_stats(account_id=acc_id)
 
         if stats["total_indexed"] == 0:
             return "No emails indexed in local SQLite yet. Run 'email_index' to start caching and tagging emails."

@@ -10,8 +10,16 @@ from telemachus.cockpit.telemetry import CockpitTelemetry
 
 
 class TestCockpitTelemetry(unittest.TestCase):
+    # Scratch status file and OpenCode DB: the tests never open ~/.memory/llm_status.json or
+    # ~/.local/share/opencode/opencode.db (Sam's real OpenCode history).
     def setUp(self):
-        self.telemetry = CockpitTelemetry()
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.telemetry = CockpitTelemetry(status_path=root / "llm_status.json",
+                                          opencode_db=root / "opencode.db")
+
+    def tearDown(self):
+        self._tmp.cleanup()
 
     def test_active_model(self):
         model = self.telemetry.get_active_model()
@@ -39,10 +47,16 @@ class TestCockpitTelemetry(unittest.TestCase):
         self.assertLessEqual(mem["used_pct"], 100)
 
     def test_context_budget(self):
+        # Real numbers only: each field is None unless it was measured (the old fixed 14,820 of
+        # 65,536 was a made-up number shown as if it were real).
         ctx = self.telemetry.get_context_budget()
-        self.assertEqual(ctx["max_tokens"], 65536)
-        self.assertGreater(ctx["used_tokens"], 0)
-        self.assertLessEqual(ctx["used_pct"], 100)
+        self.assertIn("used_tokens", ctx)
+        self.assertIn("max_tokens", ctx)
+        if ctx["used_pct"] is not None:
+            self.assertGreater(ctx["max_tokens"], 0)
+            self.assertLessEqual(ctx["used_pct"], 100)
+        else:
+            self.assertTrue(ctx["used_tokens"] is None or ctx["max_tokens"] is None)
 
     def test_thinking_tokens(self):
         think = self.telemetry.get_thinking_tokens()
@@ -63,8 +77,27 @@ class TestCockpitTelemetry(unittest.TestCase):
 
 
 class TestEmailTriagePanel(unittest.TestCase):
+    # A small synthetic index: the tests never open the real data/email_index.sqlite3.
     def setUp(self):
-        self.panel = EmailTriagePanel()
+        from telemachus.email.store import EmailIndexStore
+
+        self._tmp = tempfile.TemporaryDirectory()
+        db = Path(self._tmp.name) / "email.sqlite3"
+        rows = [("Dana <d@example.test>", "Lease", "important_documents", "urgent_review"),
+                ("CI <ci@example.test>", "Build failed", "transactional", "action_needed"),
+                ("News <n@example.test>", "Digest", "newsletter_marketing", "routine"),
+                ("Spam <s@example.test>", "Prize", "suspicious_spam", "none")]
+        EmailIndexStore(db_path=db).save_classified_batch([
+            {"account_id": "t", "folder": "INBOX", "uid": str(i), "sender": snd, "subject": subj,
+             "date_str": "2026-10-28 09:00", "date_epoch": 1_790_000_000 - i, "snippet": "x",
+             "has_attachments": False, "flags": [], "list_id": "", "category": cat, "attention": att,
+             "preservation": "preserve", "confidence": 0.9, "reasons": "[]"}
+            for i, (snd, subj, cat, att) in enumerate(rows)
+        ])
+        self.panel = EmailTriagePanel(db_path=db)
+
+    def tearDown(self):
+        self._tmp.cleanup()
 
     def test_summary_stats(self):
         stats = self.panel.get_summary_stats()
@@ -82,11 +115,22 @@ class TestEmailTriagePanel(unittest.TestCase):
             self.assertIn("sender", first)
             self.assertIn("subject", first)
             self.assertIn(first["badge"], ["URGENT", "ACTION", "DIGEST", "INFO"])
+        self.assertEqual([i["kind"] for i in items], ["urgent", "action", "fyi", "spam"])
+
+    def test_missing_index_is_empty(self):
+        panel = EmailTriagePanel(db_path=Path(self._tmp.name) / "none.sqlite3")
+        self.assertFalse(panel.index_exists())
+        self.assertEqual(panel.get_triage_items(), [])
+        self.assertEqual(panel.get_summary_stats()["total"], 0)
 
 
 class TestSafetyMemoryPanel(unittest.TestCase):
+    # Scratch vault and audit log: the tests never read ~/.memory or data/trash_audit.jsonl.
     def setUp(self):
-        self.panel = SafetyMemoryPanel()
+        self._tmp = tempfile.TemporaryDirectory()
+        root = Path(self._tmp.name)
+        self.panel = SafetyMemoryPanel(vault_root=root / "vault", audit_log=root / "trash_audit.jsonl",
+                                       guard_events=root / "guard_events.jsonl")
 
     def test_guard_status(self):
         status = self.panel.get_guard_status()
@@ -100,6 +144,9 @@ class TestSafetyMemoryPanel(unittest.TestCase):
         self.assertIn("total_memories", stats)
         self.assertGreaterEqual(stats["total_memories"], 0)
 
+    def tearDown(self):
+        self._tmp.cleanup()
+
     def test_recent_events(self):
         events = self.panel.get_recent_events(limit=5)
         self.assertIsInstance(events, list)
@@ -111,15 +158,21 @@ class TestSafetyMemoryPanel(unittest.TestCase):
 
 
 class TestCockpitLauncher(unittest.TestCase):
+    # A scratch settings path: the test never reads ~/.config/telemachus/cockpit.json.
     def setUp(self):
-        self.launcher = CockpitLauncher(session_name="test-session")
+        self._tmp = tempfile.TemporaryDirectory()
+        self.launcher = CockpitLauncher(session_name="test-session",
+                                        settings_path=Path(self._tmp.name) / "cockpit.json")
+
+    def tearDown(self):
+        self._tmp.cleanup()
 
     def test_tmux_available(self):
         avail = self.launcher.is_tmux_available()
         self.assertTrue(avail, "tmux should be available in test environment")
 
-    def test_build_tmux_config_commands(self):
-        cmds = self.launcher.build_tmux_config_commands()
+    def test_server_option_commands(self):
+        cmds = self.launcher.server_option_commands()
         self.assertIsInstance(cmds, list)
         self.assertGreater(len(cmds), 0)
         flat = [arg for cmd in cmds for arg in cmd]

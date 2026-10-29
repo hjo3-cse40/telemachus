@@ -18,6 +18,27 @@ from telemachus.memory.extractor import MemoryExtractor  # noqa: E402
 from telemachus.memory.intake import MemoryIntake  # noqa: E402
 from telemachus.memory.vault import MemoryVault  # noqa: E402
 
+_MODULE_TMP = None
+_MODULE_ORIG = None
+
+
+def setUpModule():
+    """Every test in this module (not only TestProxyIntake) starts the proxy, and the proxy writes
+    LLMStreamMonitor's status file and the router's embedding cache. Point both at a temp folder for
+    the whole module, so a suite run never rewrites the real ~/.memory/llm_status.json that the
+    cockpit header and the tmux status line read."""
+    global _MODULE_TMP, _MODULE_ORIG
+    from telemachus.ingress.router import IngressToolRouter
+    _MODULE_TMP = tempfile.mkdtemp(prefix="test_proxy_module_")
+    _MODULE_ORIG = (proxy_mod.LLMStreamMonitor._instance, proxy_mod.IngressProxyHandler.router)
+    proxy_mod.LLMStreamMonitor._instance = proxy_mod.LLMStreamMonitor(status_path=Path(_MODULE_TMP) / "llm_status.json")
+    proxy_mod.IngressProxyHandler.router = IngressToolRouter(cache_path=Path(_MODULE_TMP) / "tool_embeddings.json")
+
+
+def tearDownModule():
+    proxy_mod.LLMStreamMonitor._instance, proxy_mod.IngressProxyHandler.router = _MODULE_ORIG
+    shutil.rmtree(_MODULE_TMP, ignore_errors=True)
+
 
 class TestProxyIntake(unittest.TestCase):
     def setUp(self):
@@ -31,6 +52,12 @@ class TestProxyIntake(unittest.TestCase):
         )
         self._orig_queue = proxy_mod.memory_intake_queue
         proxy_mod.memory_intake_queue = self.queue
+        # Keep the proxy off the real data/tool_embeddings.json and ~/.memory/llm_status.json.
+        from telemachus.ingress.router import IngressToolRouter
+        self._orig_router = proxy_mod.IngressProxyHandler.router
+        proxy_mod.IngressProxyHandler.router = IngressToolRouter(cache_path=Path(self.dir) / "tool_embeddings.json")
+        self._orig_monitor = proxy_mod.LLMStreamMonitor._instance
+        proxy_mod.LLMStreamMonitor._instance = proxy_mod.LLMStreamMonitor(status_path=Path(self.dir) / "llm_status.json")
         self.submitted = []
         real_submit = self.queue.submit
         self.queue.submit = lambda messages: (self.submitted.append(messages), real_submit(messages))
@@ -42,6 +69,8 @@ class TestProxyIntake(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         proxy_mod.memory_intake_queue = self._orig_queue
+        proxy_mod.IngressProxyHandler.router = self._orig_router
+        proxy_mod.LLMStreamMonitor._instance = self._orig_monitor
         self.lm.close()
         shutil.rmtree(self.dir, ignore_errors=True)
 
@@ -172,6 +201,14 @@ class TestProxyUpstreamStall(unittest.TestCase):
             server.server_close()
             upstream.shutdown()
             upstream.server_close()
+
+
+class TestStatusFileStaysInTemp(unittest.TestCase):
+    def test_every_class_uses_the_module_temp_status_file(self):
+        # A class without its own swap (like the two below) must still not reach ~/.memory.
+        monitor = proxy_mod.LLMStreamMonitor.get_instance()
+        self.assertTrue(str(monitor.status_path).startswith(_MODULE_TMP), monitor.status_path)
+        self.assertNotEqual(monitor.status_path, Path.home() / ".memory" / "llm_status.json")
 
 
 class TestProxyNoDelay(unittest.TestCase):

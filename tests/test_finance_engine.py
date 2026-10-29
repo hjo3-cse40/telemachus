@@ -338,8 +338,9 @@ class TestFinanceEngine(unittest.TestCase):
         self.assertEqual(overview.all_bills_cents, 35071) # 26071 + 9000
         # Total Personal = 320000 - 100000 - 26071 - 9000 - 40000 - 10000 = 134929 ($1,349.29)
         self.assertEqual(overview.total_personal_cents, 134929)
-        # Remaining Cushion starts at 0 when no actual spend yet
-        self.assertEqual(overview.remaining_cushion_cents, 0)
+        # Flex left starts at the full plan when nothing is spent yet ($400 + $100). It used to
+        # start at 0, which did not match the budget rows the cockpit lists above it.
+        self.assertEqual(overview.remaining_cushion_cents, 50000)
 
         # 2. Log Groceries: $150.00 (under budget)
         self.store.log_transaction(
@@ -409,16 +410,15 @@ class TestFinanceEngine(unittest.TestCase):
 
         goals = self.store.get_goals_progress("2026-10")
         savings_goal = [g for g in goals if "Savings" in g.name][0]
-        kahram_goal = [g for g in goals if "Kahram" in g.name][0]
 
         self.assertEqual(savings_goal.target_cents, 100000)
         self.assertEqual(savings_goal.saved_cents, 50000)
         self.assertEqual(savings_goal.progress_pct, 50.0)
         self.assertIn("50.0%", savings_goal.progress_bar)
 
-        self.assertEqual(kahram_goal.saved_cents, 10000)
-        self.assertEqual(kahram_goal.progress_pct, 100.0)
-        self.assertIn("100.0%", kahram_goal.progress_bar)
+        # No setup.yaml sets a brother payment amount, so there is no Kahram goal (it used to show
+        # a made-up default target).
+        self.assertEqual([g for g in goals if "Kahram" in g.name], [])
 
     def test_12_batch_bullet_ingestion(self):
         """Tests quick batch bullet-point logging matching user's daily habits."""
@@ -446,7 +446,9 @@ class TestFinanceEngine(unittest.TestCase):
 
     def test_13_mcp_tool_execution(self):
         """Tests that handle_tool_call executes all 5 finance tools successfully."""
-        from telemachus.mcp.server import handle_tool_call
+        from tests.cockpit_isolation import import_mcp_server
+
+        handle_tool_call = import_mcp_server().handle_tool_call  # never the real mail index
         os.environ["TELEMACHUS_FINANCE_DIR"] = str(self.vault_path)
 
         # 1. finance_log_entry

@@ -15,6 +15,7 @@ from telemachus.finance.export import FinanceExporter
 from telemachus.finance.models import (
     DEFAULT_USER_RECURRING_RULES,
     is_variable_bill,
+    Account,
     AccountType,
     Frequency,
     PaycheckPlan,
@@ -23,7 +24,13 @@ from telemachus.finance.models import (
     RuleType,
     Transaction,
 )
-from telemachus.finance.recurring import RecurringEngine
+from telemachus.finance.recurring import (
+    RENT_ACCOUNT,
+    RecurringEngine,
+    bill_key,
+    custom_bill_account,
+    parse_due_day,
+)
 from telemachus.finance.store import DEFAULT_FINANCE_ROOT, FinanceStore
 
 logger = logging.getLogger(__name__)
@@ -212,16 +219,46 @@ def _resolve_account_id(key: str, store: FinanceStore) -> Optional[str]:
 
 
 def load_setup_yaml(yaml_path: Optional[Path | str] = None) -> Optional[Dict[str, Any]]:
-    """Safely loads configuration data directly from setup.yaml if available."""
+    """Safely loads configuration data directly from setup.yaml if available.
+
+    None when the file is missing or cannot be read; setup_yaml_error() says why.
+    """
     path = Path(yaml_path).expanduser().resolve() if yaml_path else DEFAULT_SETUP_YAML_PATH
     if not path.exists():
         return None
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
+            data = yaml.safe_load(f) or {}
     except Exception as e:
         logger.debug(f"Failed to load setup.yaml from {path}: {e}")
         return None
+    if not isinstance(data, dict):
+        logger.debug(f"setup.yaml at {path} is not settings written as key: value")
+        return None
+    return data
+
+
+def setup_yaml_error(yaml_path: Optional[Path | str] = None) -> Optional[str]:
+    """One short line saying why setup.yaml cannot be read, or None when it reads fine (or is missing).
+
+    The cockpit shows it, because a broken file would otherwise drop the bills from the math.
+    """
+    path = Path(yaml_path).expanduser().resolve() if yaml_path else DEFAULT_SETUP_YAML_PATH
+    if not path.exists():
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        mark = getattr(e, "problem_mark", None)
+        problem = getattr(e, "problem", None) or str(e).splitlines()[0]
+        where = f"line {mark.line + 1}: " if mark is not None else ""
+        return f"setup.yaml {where}{problem}"
+    except (OSError, UnicodeDecodeError) as e:
+        return f"setup.yaml cannot be read: {e}"
+    if data is not None and not isinstance(data, dict):
+        return "setup.yaml must be settings written as key: value"
+    return None
 
 
 def apply_setup_yaml(yaml_path: Optional[Path | str] = None, store: Optional[FinanceStore] = None) -> Dict[str, Any]:
@@ -346,7 +383,9 @@ def apply_setup_yaml(yaml_path: Optional[Path | str] = None, store: Optional[Fin
         summary["balances_set"] += 1
         summary["balances_details"].append({"account": acc_id, "amount_cents": cents})
     # 2. Process Fixed Recurring Bills
-    fixed_bills = data.get("fixed_bills", {})
+    fixed_bills = data.get("fixed_bills") or {}
+    if not isinstance(fixed_bills, dict):
+        fixed_bills = {}
     rule_map = {
         "kahram": ("rule_kahram", "Expenses:Family:Kahram"),
         "brother": ("rule_kahram", "Expenses:Family:Kahram"),
@@ -354,7 +393,7 @@ def apply_setup_yaml(yaml_path: Optional[Path | str] = None, store: Optional[Fin
         "apple_icloud": ("rule_apple_cloud", "Expenses:Subscriptions:AppleCloud"),
         "spotify": ("rule_spotify", "Expenses:Subscriptions:Spotify"),
         "wifi": ("rule_wifi", "Expenses:Utilities:WiFi"),
-        "rent": ("rule_rent", "Expenses:Home:Rent"),
+        "rent": ("rule_rent", RENT_ACCOUNT),
         "credit_card": ("rule_credit_card", "Liabilities:CreditCard:Visa"),
         "visa": ("rule_credit_card", "Liabilities:CreditCard:Visa"),
         "visa_credit_card": ("rule_credit_card", "Liabilities:CreditCard:Visa"),
@@ -367,11 +406,10 @@ def apply_setup_yaml(yaml_path: Optional[Path | str] = None, store: Optional[Fin
     for key, cfg in fixed_bills.items():
         if not isinstance(cfg, dict):
             continue
-        rule_info = rule_map.get(key, (f"rule_{key}", f"Expenses:{key.replace('_', ' ').title()}"))
-        rule_id = rule_info[0] if isinstance(rule_info, tuple) else rule_info
+        clean_key = bill_key(key)
+        rule_id, to_acc = rule_map.get(clean_key, (f"rule_{clean_key}", custom_bill_account(clean_key)))
         configured_rule_ids.add(rule_id)
-        to_acc = rule_info[1] if isinstance(rule_info, tuple) else f"Expenses:{key.replace('_', ' ').title()}"
-        due_day = int(cfg.get("due_day", 1))
+        due_day = parse_due_day(cfg.get("due_day"), 1)
         is_active = bool(cfg.get("active", True))
         amount_cents = _parse_cents(cfg.get("amount", 0.0)) or 0
 
@@ -398,10 +436,13 @@ def apply_setup_yaml(yaml_path: Optional[Path | str] = None, store: Optional[Fin
         else:
             cat = cfg.get("category", "Fixed Bill")
             if not store.get_account(to_acc):
-                store.create_account(to_acc, AccountType.EXPENSE, name=key.replace("_", " ").title())
+                store.add_account(Account(
+                    to_acc, AccountType.EXPENSE,
+                    description=f"{clean_key.replace('_', ' ').title()} bill (setup.yaml)",
+                ))
             new_rule = RecurringRule(
                 id=rule_id,
-                name=cfg.get("name", key.replace("_", " ").title()),
+                name=cfg.get("name") or clean_key.replace("_", " ").title(),
                 rule_type=RuleType.FIXED,
                 frequency=Frequency.MONTHLY,
                 due_day_of_month=due_day,

@@ -22,7 +22,11 @@ from telemachus.finance.store import FinanceStore
 HISTORY_DAYS = 45
 PAY_INTERVAL_DAYS = 14
 PAYCHECK_DOLLARS = 1480.00
+SAVINGS_PER_PAYCHECK = 200.00
 DEMO_SEED = 7
+CARD_SEED = 11
+CARD_SHARE = 0.35  # share of everyday purchases put on the Visa card
+CARD_PAYOFF_DAYS_AGO = 21  # one full card payoff from checking, mid-history
 
 # (due_day, payee, dollars) paid on their due day when it falls inside the history window.
 DEMO_BILLS = [(1, "gym", 25.00), (11, "icloud", 0.99), (25, "spotify", 11.99), (15, "wifi", 40.00)]
@@ -79,7 +83,7 @@ monthly_targets:
   notes: "Synthetic demo vault"
 paycheck_plan:
   paycheck_amount: {paycheck:.2f}
-  savings_per_paycheck: 200.00
+  savings_per_paycheck: {savings:.2f}
   frequency: "biweekly"
   anchor_date: "{anchor}"
 """
@@ -117,23 +121,43 @@ def _last_payday(today: date) -> date:
     return today - timedelta(days=5)
 
 
-def build_demo_text(today: date, rng: random.Random) -> str:
-    """Daily bullet notes in the importer's format, oldest day first."""
+def build_demo_text(today: date, rng: random.Random, card_rng: Optional[random.Random] = None) -> str:
+    """Daily bullet notes in the importer's format, oldest day first.
+
+    About a third of everyday purchases go on the Visa card ("... visa"). The card is paid off in
+    full from checking once, CARD_PAYOFF_DAYS_AGO days ago ("visa payment ..."), so the vault has
+    card purchases before and after a payment and a balance owed today.
+    The card choices use their own random stream, so the checking purchases keep their amounts.
+    """
+    card_rng = card_rng or random.Random(CARD_SEED)
     start = today - timedelta(days=HISTORY_DAYS)
     anchor = _last_payday(today)
+    payoff_day = today - timedelta(days=CARD_PAYOFF_DAYS_AGO)
+    owed_cents = 0
     lines: List[str] = []
     day = start + timedelta(days=1)
     while day <= today:
         entries: List[str] = []
         if (anchor - day).days % PAY_INTERVAL_DAYS == 0:
             entries.append(f"+ {PAYCHECK_DOLLARS:.2f} payday")
+            # The plan's savings_per_paycheck moves to savings on payday, so the savings goal has
+            # real transfers to count.
+            entries.append(f"savings + {SAVINGS_PER_PAYCHECK:.2f}")
         for due_day, payee, amount in DEMO_BILLS:
             if day.day == due_day:
                 entries.append(f"- {payee} - {amount:.2f}")
+        if day == payoff_day and owed_cents > 0:
+            entries.append(f"visa payment {owed_cents / 100:.2f}")
+            owed_cents = 0
         menu = [m for m in DEMO_SPEND for _ in range(m[3])]
         for _ in range(rng.choice([0, 1, 1, 2, 2, 3])):
             payee, low, high, _w = rng.choice(menu)
-            entries.append(f"- {payee} - {rng.uniform(low, high):.2f}")
+            amount = f"{rng.uniform(low, high):.2f}"
+            if card_rng.random() < CARD_SHARE:
+                entries.append(f"- {payee} - {amount} visa")
+                owed_cents += int(round(float(amount) * 100))
+            else:
+                entries.append(f"- {payee} - {amount}")
         if entries:
             lines.append(day.isoformat())
             lines.extend(entries)
@@ -160,6 +184,7 @@ def seed_demo(target: Path | str, today: Optional[date] = None, force: bool = Fa
             as_of=start.isoformat(),
             month=today.strftime("%Y-%m"),
             paycheck=PAYCHECK_DOLLARS,
+            savings=SAVINGS_PER_PAYCHECK,
             anchor=_last_payday(today).isoformat(),
         ),
         encoding="utf-8",
@@ -167,7 +192,7 @@ def seed_demo(target: Path | str, today: Optional[date] = None, force: bool = Fa
 
     store = FinanceStore(root_dir=target)
     apply_setup_yaml(yaml_path=yaml_path, store=store)
-    text = build_demo_text(today, random.Random(DEMO_SEED))
+    text = build_demo_text(today, random.Random(DEMO_SEED), random.Random(CARD_SEED))
     result = import_text_document(text, store=store, default_year=today.year)
     return {
         "path": str(target.resolve()),

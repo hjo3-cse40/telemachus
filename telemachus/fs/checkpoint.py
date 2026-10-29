@@ -11,6 +11,7 @@ import subprocess
 import time
 from typing import Optional
 
+from telemachus.fs import guard_log
 from telemachus.fs.boundaries import resolve_clean_path
 from telemachus.fs.models import GitCheckpointResult
 
@@ -32,7 +33,34 @@ def find_git_root(path: str | Path) -> Optional[Path]:
 def create_git_checkpoint(
     path: str | Path, message: Optional[str] = None
 ) -> GitCheckpointResult:
-    """Takes a lightweight Git stash or temporary checkpoint tag if inside a git repository."""
+    """Takes a lightweight Git stash or temporary checkpoint tag if inside a git repository.
+
+    A successful checkpoint is also written to the guard event log (never raises).
+    """
+    result = _create_git_checkpoint(path, message)
+    _log_checkpoint(result, message)
+    return result
+
+
+def _log_checkpoint(result: GitCheckpointResult, message: Optional[str]) -> None:
+    if not result.success or not result.checkpoint_id:
+        return
+    try:
+        repo = Path(result.repo_path).name or result.repo_path
+        clean = "clean" in (result.message or "").lower()
+        note = (message or "").strip() or "checkpoint"
+        guard_log.record(
+            "CHECKPOINT",
+            target=f"{repo} @ {result.checkpoint_id[:7]}",
+            rule=guard_log.RULE_CHECKPOINT,
+            detail=f"{note} (tree clean)" if clean else note,
+            action="checkpoint",
+        )
+    except Exception:
+        pass
+
+
+def _create_git_checkpoint(path: str | Path, message: Optional[str] = None) -> GitCheckpointResult:
     git_root = find_git_root(path)
     if not git_root:
         return GitCheckpointResult(

@@ -360,15 +360,75 @@ opencode -c
 
 ## 🎛️ Telemachus Terminal Cockpit (v1)
 
-Launch the unified Tokyo Night split cockpit pairing the visual operational dashboard with the OpenCode CLI harness:
+The cockpit is one tmux window: the dashboard (a curses TUI) on the left and the OpenCode CLI on the right.
 
 ```bash
-# Launch the full split tmux cockpit (interactive dashboard + OpenCode harness)
-./bin/telemachus-cockpit
-
-# Or via Python module:
-python3 -m telemachus.cockpit
+./bin/telemachus-cockpit                 # build the split and attach
+./bin/telemachus-cockpit --split 35      # dashboard takes 35% of the width (15-85)
+./bin/telemachus-cockpit --stacked       # dashboard on top, OpenCode below (--side goes back)
+./bin/telemachus-cockpit --no-attach     # build it in the background; attach later
+python -m telemachus.cockpit dashboard   # only the dashboard, in this terminal
 ```
+
+`bin/telemachus-cockpit` uses the project's `.venv/bin/python` when it exists, else `python3`.
+Without a subcommand, `python -m telemachus.cockpit` runs `launch` (same flags).
+
+### Its own tmux server
+
+The cockpit runs on a private tmux server (`tmux -L telemachus`). Its mouse mode, status bar and
+Alt keys stay there and never change your other tmux sessions. To reattach or to list it:
+
+```bash
+tmux -L telemachus attach -t telemachus-cockpit
+tmux -L telemachus ls
+```
+
+Each launch replaces the previous cockpit (and the OpenCode session in it). The private server
+still reads your `~/.tmux.conf`, so your prefix key and habits work there too.
+
+When you start the launcher from inside tmux, it opens the cockpit as a new window in your current
+session instead. It then sets only that window's border colors and layout memory, plus `mouse on` for
+that session when it was off (tmux has no per-window mouse setting). A session hook turns mouse back
+off when the last cockpit window in that session closes. It adds no key bindings and changes no global
+option, so the Alt keys and the status bar below are not set up there. Drag the border, or use your
+usual prefix keys, to resize.
+
+### Resizing the panes
+
+| Keys (no prefix) | What it does |
+|---|---|
+| mouse drag on the border | resize freely; click a pane to focus it |
+| `Alt+←` `Alt+→` `Alt+↑` `Alt+↓` | move the split by 5 cells |
+| `Shift+Alt+arrows` | move the split by 1 cell |
+| `Alt+h` / `Alt+l` (or `Alt+[` / `Alt+]`) | focus the dashboard / OpenCode |
+| `Alt+z` | zoom the active pane to full screen, press again to go back |
+| `Alt+1` `Alt+2` `Alt+3` | dashboard at 35% / 50% / 65% |
+| `Alt+=` | even split |
+| `Alt+Space` | switch side by side and stacked (dashboard on top) |
+
+These keys are shown on the right of the status bar for 8 seconds after each launch (not as a tmux
+message: tmux draws no pane output while a message is up). The dashboard redraws itself for every
+new size.
+
+On a Mac, the Option key must act as Meta for the Alt keys to reach tmux:
+Terminal.app: Settings > Profiles > Keyboard > "Use Option as Meta key";
+iTerm2: Settings > Profiles > Keys > Left Option key: "Esc+". Mouse resizing works without this.
+While the cockpit is focused, these keys go to tmux, so OpenCode does not get Alt+arrows (word jumps).
+
+The last split is remembered: a tmux hook writes the dashboard's share (side by side and stacked are
+kept separately) and the current mode to `~/.config/telemachus/cockpit.json` after every change, and
+the next launch starts from it. `--split`, `--stacked` and `--side` override it for that launch (and the
+new size is then remembered). Set `TELEMACHUS_COCKPIT_SETTINGS=/path/file.json` to use another file.
+
+### Status bar
+
+Top line, refreshed every 2 seconds: `telemachus`, the focused pane (`dashboard` / `opencode`, plus
+`zoomed`), and on the right the LM Studio state (`○ LM Studio offline`, `○ no model loaded`,
+`● <model> ready`, `● reading prompt 12s`, `● writing 482 tok · 38 t/s`), RAM in use, and the clock.
+Every number is measured; anything that cannot be measured is left out. The line comes from
+`python -m telemachus.cockpit telemetry --tmux`; tmux runs the same code as
+`telemachus/cockpit/tmux_helper.py` directly so each refresh stays under about 0.1 s. The LM Studio
+answer is cached for 4 s, network calls time out after 0.5 s, and the command stops itself after 2 s.
 
 ### Developing with synthetic finance data (no personal info)
 
@@ -383,27 +443,53 @@ python3 -m pip install pyyaml    # finance engine dependency (plus your usual ve
 python3 -m telemachus.finance seed-demo --dir ./demo-finances
 
 # Point the cockpit at it. Either form works:
-TELEMACHUS_FINANCE_DIR=$PWD/demo-finances python3 -m telemachus.cockpit dashboard   # TUI only
-TELEMACHUS_FINANCE_DIR=$PWD/demo-finances ./bin/telemachus-cockpit                  # full tmux cockpit
+TELEMACHUS_DEMO=1 TELEMACHUS_FINANCE_DIR=$PWD/demo-finances python3 -m telemachus.cockpit dashboard   # TUI only
+TELEMACHUS_DEMO=1 TELEMACHUS_FINANCE_DIR=$PWD/demo-finances ./bin/telemachus-cockpit                  # full tmux cockpit
 ```
+
+TELEMACHUS_DEMO=1 (or a fake HOME) keeps the cockpit off data/email_index.sqlite3 and data/trash_audit.jsonl.
 
 `seed-demo` refuses to write into your real vault and never opens it. `demo-finances/` is gitignored.
 Re-run with `--force` to regenerate. On the other machine, do not copy `~/.memory`, and do not export
 `TELEMACHUS_FINANCE_DIR` pointing at real data.
 
-### Cockpit Controls & Features
-* **Mouse & Trackpad**: Full mouse mode enabled (`set -g mouse on`). Click any email row to view its preview snippet, drag borders to resize panes, and scroll chat histories with trackpad momentum.
-* **Top Telemetry Header**: Real-time monitor displaying active model (`qwen/qwen3.5-9b`), context budget (`14,820 / 65,536 tokens`), unified RAM breakdown (`11.2 / 18.0 GB - MLX 5.8G · Laya 0.8G · OS 4.6G`), and generation speed (`41.5 t/s`).
-* **Interactive Views**:
-  - `[1] Daily Ops`: Split view with the Email Triage Queue on top, and Laya Safety Guard + Odysseus Continual Memory feed on bottom.
-  - `[2] Memory Vault`: Browse and inspect the 59+ categorized memories across Privacy Tiers (`Private (0700)`, `Project`, `Public`).
-  - `[3] Safety Guard`: Deep inspection of protected path shields, trash audit history, and git auto-checkpoints.
-* **Hotkeys**:
-  - `[j] / [k]` or `[↑] / [↓]`: Navigate table rows.
-  - `[1] / [2] / [3]`: Switch view tabs.
-  - `[t]`: Dispatch an email triage prompt turn directly to the adjacent OpenCode pane.
-  - `[r]`: Refresh data from local stores.
-  - `[q]`: Quit cockpit.
+### Dashboard keys
+
+Inside the dashboard: `1`-`4` or `Tab` / `Shift+Tab` switch tabs (Home, Money, Memory, Guard), `r`
+refreshes, `?` shows every key for the current screen (`j`/`k` scroll it when the pane is short),
+`q` quits the dashboard. `Ctrl+C` never quits: in the Add / Edit box, the help or the Memory search it
+works like `esc` (an Add box with typed lines asks "esc again" first); anywhere else it only shows a
+hint. If the dashboard stops with an error in the launcher's split, its pane stays open with the
+error until you press enter.
+
+If the money ledger (`finances.sqlite3`) is damaged or another program holds it locked, the dashboard
+still starts: Money shows the reason, Home says the finance vault could not be read, and the other
+tabs work. Press `r` (or wait 30 s) to try again.
+
+On Home, `t` sends the email triage prompt to the OpenCode pane next to it:
+into the OpenCode chat when OpenCode runs there, or as `opencode run '...'` at a shell prompt. It
+only works in the launcher's split (the launcher tells the dashboard which pane is OpenCode); in
+`dashboard` mode, or when another program runs in that pane, nothing is typed and a note says why.
+
+Env vars that pick which data the dashboard reads (`TELEMACHUS_FINANCE_DIR`, `TELEMACHUS_SETUP_YAML`,
+`TELEMACHUS_EMAIL_DB`, `TELEMACHUS_TRASH_AUDIT`, `TELEMACHUS_MEMORY_DIR`, `TELEMACHUS_GUARD_LOG`,
+`TELEMACHUS_LMSTUDIO_URL`, `TELEMACHUS_COLORS`, `TELEMACHUS_TUI_DEBUG`, `TELEMACHUS_DEMO`) are passed into the tmux panes
+by the launcher, so a test run never falls back to your real data. `HOME` is passed too when it is not
+your real home folder (a new tmux window would otherwise take the tmux server's `HOME`).
+
+A test or screenshot run with a fake `HOME` reads only that folder. The mail index and trash log
+normally live in the repo's `data/` folder, which `HOME` does not move, so with a fake `HOME` and no
+`TELEMACHUS_EMAIL_DB` / `TELEMACHUS_TRASH_AUDIT` the dashboard reads `$HOME/.telemachus/data/`
+instead (empty until you put synthetic files there). A full synthetic run:
+
+```bash
+HOME=/tmp/fakehome TELEMACHUS_DEMO=1 TELEMACHUS_FINANCE_DIR=$PWD/demo-finances \
+TELEMACHUS_EMAIL_DB=/tmp/synthetic/email.sqlite3 TELEMACHUS_TRASH_AUDIT=/tmp/synthetic/trash_audit.jsonl \
+  python3 -m telemachus.cockpit dashboard
+```
+
+Trackpad and wheel scrolling work in both directions, also with the macOS system ncurses (which
+cannot decode a wheel-down report; the dashboard reads that failure as a scroll down).
 
 ---
 
