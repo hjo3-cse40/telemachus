@@ -3,21 +3,26 @@ from __future__ import annotations
 
 import curses
 import unittest
-from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 from telemachus.cockpit.finance_panel import _rounded_div, compute_runway
 from telemachus.cockpit.finance_view import (
     FinanceViewData,
-    big_digits,
-    build_cycle_detail,
     build_day,
     build_math,
     build_overview,
     money,
-    runway_track,
+    runway_strip,
 )
 from telemachus.cockpit.tui import CockpitTUI
+
+try:
+    from tests.cockpit_isolation import isolate_module
+except ImportError:  # run from inside tests/
+    from cockpit_isolation import isolate_module
+
+# CockpitTUI() opens the finance ledger and memory vault: keep them in a temp dir, never Sam's.
+setUpModule, tearDownModule = isolate_module()
 from telemachus.finance.models import PaycheckWindowAllocation
 
 
@@ -125,56 +130,74 @@ def _data(checking: int = 59036, mask: bool = False) -> FinanceViewData:
 
 
 class TestLayout(unittest.TestCase):
-    def test_hero_reads_as_a_sentence(self):
-        text = _flat(build_overview(_data(), 112, 36).lines)
-        self.assertIn("You have", text)
-        self.assertIn("to last 11 days, until payday on Thu, Nov 5.", text)
-        self.assertIn("$29.56 a day", text)
-        self.assertIn("Lately $39.58/day, which hits $0 by Tue Nov 3", text)
+    """The overview reads as plain sentences (ClearNumber.dc.html): no block digits, no boxes."""
 
-    def test_every_line_fits_the_requested_width(self):
-        for cols in (80, 90, 100, 112, 140):
+    def test_big_number_is_plain_text_with_days_and_payday(self):
+        text = _flat(build_overview(_data(), 112, 36).lines)
+        self.assertIn("$325.14   left for 11 days", text)
+        self.assertIn("payday Thu Nov 5", text)
+        self.assertIn("$29.56 a day after bills", text)
+        self.assertNotIn("█", text)  # the old block digits are gone
+
+    def test_status_says_over_when_the_pace_runs_out_before_payday(self):
+        text = _flat(build_overview(_data(), 112, 36).lines)
+        self.assertIn("lately $39.58 a day", text)
+        self.assertIn("over, $0 by Tue Nov 3", text)
+
+    def test_status_says_on_track_when_the_pace_fits(self):
+        data = _data()
+        # The days must match the runway: the status also checks the days' groceries, dining and
+        # gas against the daily allowance (the bar colors), so a $1-a-day runway over days that
+        # spent $39.58 a day would be over the allowance.
+        data.days = [{"date": "2026-10-25", "outflow_cents": 700, "inflow_cents": 0, "savings_cents": 0}]
+        data.runway = compute_runway("2026-10-25", _paycheck(), data.days)
+        self.assertIn("● on track", _flat(build_overview(data, 112, 36).lines))
+
+    def test_lines_never_exceed_the_width(self):
+        for cols in (60, 79, 90, 112, 130, 160):
             for line in build_overview(_data(), cols, 40).lines:
                 self.assertLessEqual(sum(len(t) for t, _ in line), cols, f"cols={cols}")
 
-    def test_wide_layout_has_runway_and_narrow_does_not(self):
-        self.assertIn("RUNWAY", _flat(build_overview(_data(), 112, 36).lines))
-        self.assertNotIn("RUNWAY", _flat(build_overview(_data(), 90, 36).lines))
+    def test_runway_strip_is_shown_at_every_width(self):
+        for cols in (60, 90, 112, 140):
+            text = _flat(build_overview(_data(), cols, 40).lines)
+            self.assertIn("◆", text, f"cols={cols}")
+            self.assertIn("●", text, f"cols={cols}")
 
-    def test_paid_bills_move_below_the_due_list(self):
+    def test_bills_before_payday_list_due_then_paid_with_full_amounts(self):
         text = _flat(build_overview(_data(), 112, 36).lines)
-        self.assertIn("Spotify", text)
-        self.assertIn("paid", text)
+        self.assertIn("BILLS BEFORE PAYDAY", text)
         self.assertIn("$265.22 due", text)
+        self.assertIn("200.00", text)
+        self.assertIn("Spotify", text)  # the paid $0 row
+        self.assertIn("✓", text)
 
-    def test_negative_left_switches_the_sentence(self):
+    def test_short_when_bills_exceed_checking(self):
         text = _flat(build_overview(_data(checking=10000), 112, 36).lines)
-        self.assertIn("Bills before payday are more than checking by", text)
-        self.assertNotIn("You have", text)
+        self.assertIn("$165.22 short", text)
+        self.assertIn("bills before payday are more than checking", text)
+        self.assertNotIn("left for", text)
 
     def test_masking_hides_every_amount(self):
         text = _flat(build_overview(_data(mask=True), 112, 36).lines)
-        for secret in ("590.36", "325.14", "265.22", "3,303.67"):
+        for secret in ("325.14", "590.36", "29.56", "39.58", "265.22", "3,303.67"):
             self.assertNotIn(secret, text)
-        self.assertIn("***.**", text)
+        self.assertIn("•••", text)
+        self.assertIn("amounts hidden", text)
 
-    def test_math_screen_explains_both_cushion_numbers(self):
+    def test_math_screen_shows_the_working(self):
         text = _flat(build_math(_data(), 112, 30).lines)
+        self.assertIn("Money ▸ Math", text)
         self.assertIn("Left until payday", text)
         self.assertIn("325.14", text)
         self.assertIn("-37.36", text)
         self.assertIn("allowances add up to more than is left", text)
 
-    def test_block_digits_are_three_rows_and_equal_width(self):
-        rows = big_digits("325.14")
-        self.assertEqual(len(rows), 3)
-        self.assertEqual(len({len(r) for r in rows}), 1)
-
     def test_money_formats(self):
         self.assertEqual(money(-1500), "-$15.00")
         self.assertEqual(money(123456, signed=True), "+$1,234.56")
         self.assertEqual(money(123456, whole=True), "$1,235")
-        self.assertEqual(money(5, mask=True), "$***.**")
+        self.assertEqual(money(5, mask=True), "$•••")
 
     def test_empty_day_screen_does_not_crash(self):
         data = _data()
@@ -182,77 +205,35 @@ class TestLayout(unittest.TestCase):
         self.assertIn("No day selected", _flat(build_day(data, 100, 30).lines))
 
 
-def _cycle_data(width_mask: bool = False) -> FinanceViewData:
-    pc = _paycheck()
-    pc.cycle_start_date = "2026-10-22"
-    pc.paid_bills = [{"name": "Spotify", "due_date": "2026-10-25", "amount_cents": 950, "status": "paid"}]
-    pc.bills = [dict(b) for b in pc.bills if b["name"] != "Spotify"]
-    data = _data(mask=width_mask)
-    data.paycheck = pc
-    data.runway = compute_runway("2026-10-26", pc, _DAYS)
-    return data
-
-
-class TestCycleDetail(unittest.TestCase):
-    def test_title_shows_the_whole_date_range(self):
-        text = _flat(build_cycle_detail(_cycle_data(), 100, 30))
-        self.assertIn("Bills Due Before Paycheck (Thu Oct 22 → Thu Nov 5)", text)
-
-    def test_each_day_lists_the_bills_that_add_up_to_its_total(self):
-        text = _flat(build_cycle_detail(_cycle_data(), 100, 30))
-        self.assertIn("$38.23", text)
-        self.assertIn("WiFi $23.23 + PG&E $15.00", text)
-        self.assertIn("$226.99", text)
-        self.assertIn("Kahram $200.00 + Gym $26.99", text)
-
-    def test_paid_bill_before_today_is_shown_with_what_was_paid(self):
-        text = _flat(build_cycle_detail(_cycle_data(), 100, 30))
-        self.assertIn("Sun Oct 25", text)
-        self.assertIn("✓ $9.50", text)
-
-    def test_totals_line_splits_due_and_paid(self):
-        text = _flat(build_cycle_detail(_cycle_data(), 100, 30))
-        self.assertIn("Still due $265.22", text)
-        self.assertIn("Paid this cycle $9.50", text)
-
-    def test_chart_covers_the_full_cycle_and_drops_when_there_is_no_room(self):
-        with_chart = _flat(build_cycle_detail(_cycle_data(), 100, 30))
-        self.assertIn("◆", with_chart)  # payday markers
-        self.assertIn("✓", with_chart)  # paid marker on the track
-        tight = build_cycle_detail(_cycle_data(), 100, 9)
-        self.assertNotIn("●", _flat(tight))  # no chart (today dot) when rows are short
-        self.assertIn("WiFi $23.23", _flat(tight))  # but the breakdown is kept
-
-    def test_long_bill_lists_wrap_instead_of_overflowing(self):
-        for line in build_cycle_detail(_cycle_data(), 48, 30):
-            self.assertLessEqual(sum(len(t) for t, _ in line), 48)
-
-    def test_masking_hides_amounts(self):
-        text = _flat(build_cycle_detail(_cycle_data(width_mask=True), 100, 30))
-        for secret in ("38.23", "226.99", "9.50", "265.22"):
-            self.assertNotIn(secret, text)
-
-    def test_no_paycheck_plan_returns_nothing(self):
-        data = _cycle_data()
-        data.paycheck = None
-        self.assertEqual(build_cycle_detail(data, 100, 30), [])
-
-
-class TestRunwayTrack(unittest.TestCase):
-    def test_track_spans_every_day_and_marks_today_paid_and_due(self):
-        start, end, today = datetime(2026, 10, 22), datetime(2026, 11, 5), datetime(2026, 10, 26)
-        lines = runway_track(start, end, today, {"2026-10-30": 3823}, {"2026-10-25": 950}, 60, False)
+class TestRunwayStrip(unittest.TestCase):
+    def test_strip_marks_today_due_days_and_payday(self):
+        lines = runway_strip(_data(), 90, 4)
         self.assertEqual(len(lines), 4)
-        track = "".join(t for t, _ in lines[2])
-        self.assertEqual(track.count("◆"), 2)  # both paydays
+        track = "".join(t for t, _ in lines[1])
         self.assertEqual(track.count("●"), 1)  # today
-        self.assertEqual(track.count("▼"), 1)  # one due date
-        self.assertEqual(track.count("✓"), 1)  # one paid date
-        self.assertIn("-38", "".join(t for t, _ in lines[3]))
+        self.assertEqual(track.count("▼"), 2)  # Oct 30 and Nov 1
+        self.assertEqual(track.count("◆"), 1)  # payday
+        amounts = "".join(t for t, _ in lines[3])
+        self.assertIn("-38", amounts)
+        self.assertIn("+1,247", amounts)
 
-    def test_returns_nothing_when_too_narrow(self):
-        start, end = datetime(2026, 10, 22), datetime(2026, 11, 5)
-        self.assertEqual(runway_track(start, end, start, {}, {}, 20, False), [])
+    def test_fewer_rows_drop_months_then_amounts(self):
+        self.assertEqual(len(runway_strip(_data(), 90, 3)), 3)
+        two = runway_strip(_data(), 90, 2)
+        self.assertEqual(len(two), 2)
+        self.assertIn("◆", "".join(t for t, _ in two[0]))
+
+    def test_strip_squeezes_instead_of_disappearing(self):
+        for cols in (30, 40, 60):
+            lines = runway_strip(_data(), cols, 4)
+            self.assertTrue(lines, f"cols={cols}")
+            for line in lines:
+                self.assertLessEqual(sum(len(t) for t, _ in line), cols)
+
+    def test_masked_strip_hides_amounts(self):
+        amounts = "".join(t for t, _ in runway_strip(_data(mask=True), 90, 4)[3])
+        self.assertNotIn("38", amounts)
+        self.assertIn("•••", amounts)
 
 
 class TestKeyNavigation(unittest.TestCase):
@@ -282,10 +263,13 @@ class TestKeyNavigation(unittest.TestCase):
         self.assertEqual(self.tui.finances_view_mode, "daily")
         self.assertEqual(self.tui.finances_focus, "days")
 
-    def test_i_toggles_the_math_screen(self):
+    def test_i_opens_the_math_screen_and_escape_leaves_it(self):
+        # i used to toggle (open and back); only esc goes back now.
         self.key(ord("i"))
         self.assertEqual(self.tui.finances_view_mode, "math")
         self.key(ord("i"))
+        self.assertEqual(self.tui.finances_view_mode, "math")
+        self.key(27)
         self.assertEqual(self.tui.finances_view_mode, "daily")
 
     def test_v_toggles_bills_and_escape_leaves_it(self):
@@ -318,6 +302,9 @@ class TestKeyNavigation(unittest.TestCase):
         self.key(10)
         self.key(ord("j"))
         with patch.object(CockpitTUI, "refresh_data"):
+            self.key(ord("d"))  # first press only asks (it used to delete at once, with no undo)
+            self.tui.finance_panel.delete_transaction.assert_not_called()
+            self.assertIn("Press d again", self.tui.notification)
             self.key(ord("d"))
         self.tui.finance_panel.delete_transaction.assert_called_once_with("b")
 

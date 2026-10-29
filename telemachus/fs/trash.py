@@ -12,10 +12,15 @@ import subprocess
 import time
 from typing import Optional
 
+from telemachus.fs import guard_log
 from telemachus.fs.boundaries import resolve_clean_path
 from telemachus.fs.models import TrashResult
 
-DEFAULT_AUDIT_LOG = Path(__file__).resolve().parent.parent.parent / "data" / "trash_audit.jsonl"
+# TELEMACHUS_TRASH_AUDIT moves the audit log (tests and screenshots use a scratch file).
+DEFAULT_AUDIT_LOG = Path(
+    os.environ.get("TELEMACHUS_TRASH_AUDIT")
+    or (Path(__file__).resolve().parent.parent.parent / "data" / "trash_audit.jsonl")
+).expanduser()
 
 
 def move_to_trash(target: str | Path, audit_log: Optional[Path] = None) -> TrashResult:
@@ -108,10 +113,18 @@ def move_to_trash(target: str | Path, audit_log: Optional[Path] = None) -> Trash
 
 
 def _record_audit(result: TrashResult, log_path: Path):
-    """Appends trash action to audit log."""
+    """Appends trash action to audit log and to the guard event log (neither ever raises)."""
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(result.to_dict()) + "\n")
     except Exception:
         pass
+    guard_log.record(
+        "TRASH",
+        target=result.original_path,
+        rule=guard_log.RULE_SOFT_DELETE,
+        detail="moved to Trash",
+        action="delete",
+        ts=result.timestamp or None,
+    )

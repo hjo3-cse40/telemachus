@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 from telemachus.fs.boundaries import (
     evaluate_tier0_command,
@@ -16,12 +17,45 @@ from telemachus.fs.boundaries import (
     resolve_clean_path,
 )
 from telemachus.fs.checkpoint import create_git_checkpoint, find_git_root
+from telemachus.fs import editor as editor_module
 from telemachus.fs.editor import edit_file, run_command, safe_delete, write_file
 from telemachus.fs.explorer import grep_text, list_dir, read_file, search_files, stat_path
 from telemachus.fs.guard import LayaGuard
 from telemachus.fs.models import FileActionType, GuardVerdict, TierLevel
 from telemachus.fs.trash import move_to_trash
 from telemachus.mcp.server import TOOLS_DEFINITIONS, handle_tool_call
+from telemachus.fs import guard_log
+
+# Guard events and trash audit lines from these tests go to a scratch folder, never to
+# ~/.memory or data/trash_audit.jsonl.
+_SCRATCH = None
+_OLD_ENV = {}
+
+
+def setUpModule():
+    global _SCRATCH
+    _SCRATCH = tempfile.TemporaryDirectory()
+    for key, value in (("TELEMACHUS_GUARD_LOG", str(Path(_SCRATCH.name) / "guard_events.jsonl")),):
+        _OLD_ENV[key] = os.environ.get(key)
+        os.environ[key] = value
+
+
+def tearDownModule():
+    for key, value in _OLD_ENV.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
+    if _SCRATCH is not None:
+        _SCRATCH.cleanup()
+
+
+def _git(repo, *args):
+    return subprocess.run(
+        ["git", "-c", "user.name=test", "-c", "user.email=test@example.test", "-c", "commit.gpgsign=false",
+         "-C", str(repo), *args],
+        capture_output=True, text=True, check=False,
+    )
 
 
 class TestTier0Boundaries(unittest.TestCase):
@@ -100,10 +134,13 @@ class TestTier2TrashRecovery(unittest.TestCase):
 
     def test_move_to_trash_success(self):
         self.assertTrue(self.test_file.exists())
-        result = move_to_trash(self.test_file)
+        audit = Path(_SCRATCH.name) / "trash_audit.jsonl"
+        result = move_to_trash(self.test_file, audit_log=audit)
         self.assertTrue(result.success)
         self.assertFalse(self.test_file.exists())
         self.assertIn("macOS Trash", result.message)
+        kinds = [e["kind"] for e in guard_log.read_recent(5)]
+        self.assertIn("TRASH", kinds)
 
     def test_nonexistent_trash_fails_gracefully(self):
         fake = Path("/tmp/does_not_exist_9999.xyz")
@@ -120,9 +157,23 @@ class TestGitCheckpoint(unittest.TestCase):
         self.assertTrue((root / ".git").is_dir())
 
     def test_checkpoint_execution(self):
-        res = create_git_checkpoint(Path.cwd(), message="Unit test checkpoint")
-        self.assertTrue(res.success)
-        self.assertIn("Git", res.message)
+        # A throwaway repo: a checkpoint in the project repo would add a stash entry there.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            _git(repo, "init", "-q")
+            (repo / "a.txt").write_text("one\n", encoding="utf-8")
+            _git(repo, "add", "a.txt")
+            _git(repo, "commit", "-q", "-m", "init")
+            res = create_git_checkpoint(repo, message="Unit test checkpoint")
+            self.assertTrue(res.success)
+            self.assertIn("Git", res.message)
+            (repo / "a.txt").write_text("two\n", encoding="utf-8")
+            res = create_git_checkpoint(repo, message="Unit test checkpoint")
+            self.assertTrue(res.success)
+            self.assertTrue(res.checkpoint_id)
+            events = [e for e in guard_log.read_recent(10) if e["kind"] == "CHECKPOINT"]
+            self.assertTrue(events)
+            self.assertIn(res.checkpoint_id[:7], events[0]["target"])
 
 
 class TestFilesystemExplorer(unittest.TestCase):
@@ -175,6 +226,22 @@ class TestFilesystemExplorer(unittest.TestCase):
         self.assertGreater(res["size_bytes"], 0)
 
 
+class _AlignedBridge:
+    """Stands in for the Laya worker: every request matches the stated intent.
+
+    The editor tests check the editor (atomic edit, run, output), not the model. The real model
+    scores some harmless commands near its threshold (echo in a temp folder came back as
+    "destructive deletion 0.48"), which made these tests pass or fail by chance.
+    """
+
+    calls = 0
+
+    def evaluate_record(self, action_type, target, user_intent, details=""):
+        type(self).calls += 1
+        return {"intent_alignment": "aligned", "alignment_confidence": 0.95,
+                "blast_radius": "contained", "action_risk": "safe"}
+
+
 class TestGuardedEditor(unittest.TestCase):
     """Verifies atomic editing, writing, and safe deletions."""
 
@@ -182,6 +249,10 @@ class TestGuardedEditor(unittest.TestCase):
         self.test_dir = tempfile.TemporaryDirectory()
         self.test_path = Path(self.test_dir.name) / "test_doc.txt"
         self.test_path.write_text("Hello World\nLine 2\nLine 3\n", encoding="utf-8")
+        # cwd stays the temp folder (never the project repo: run_command may take a checkpoint)
+        patcher = mock.patch.object(editor_module._guard, "bridge", _AlignedBridge())
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def tearDown(self):
         self.test_dir.cleanup()
@@ -219,15 +290,19 @@ class TestGuardedEditor(unittest.TestCase):
         self.assertEqual(self.test_path.read_text(encoding="utf-8"), "New content")
 
     def test_guarded_run_command_safe(self):
-        res = run_command("echo 'hello telemachus'", user_intent="test echo")
+        before = _AlignedBridge.calls
+        res = run_command("echo 'hello telemachus'", cwd=self.test_dir.name, user_intent="test echo")
+        self.assertGreater(_AlignedBridge.calls, before)  # the intent check still ran
         self.assertTrue(res["success"])
         self.assertEqual(res["exit_code"], 0)
         self.assertIn("hello telemachus", res["stdout"])
 
     def test_guarded_run_command_blocked(self):
-        res = run_command("mkfs /dev/sda1", user_intent="format drive")
+        res = run_command("mkfs /dev/sda1", cwd=self.test_dir.name, user_intent="format drive")
         self.assertFalse(res["success"])
         self.assertIn("blocked by guard", res["error"])
+        last = guard_log.read_recent(1)[0]
+        self.assertEqual((last["kind"], last["rule"]), ("BLOCK", "command shield"))
 
 
 class TestMCPServerIntegration(unittest.TestCase):
@@ -273,7 +348,9 @@ class TestMCPServerIntegration(unittest.TestCase):
         self.assertGreater(data["size_bytes"], 0)
 
     def test_fs_run_tool_call(self):
-        out = handle_tool_call("fs_run", {"command": "echo 'mcp fs test'"})
+        # cwd outside any repo: "mcp" contains "cp", which makes run_command take a git checkpoint.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = handle_tool_call("fs_run", {"command": "echo 'mcp fs test'", "cwd": tmp})
         data = json.loads(out)
         self.assertTrue(data["success"])
         self.assertIn("mcp fs test", data["stdout"])

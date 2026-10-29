@@ -6,7 +6,7 @@ import unittest
 
 from telemachus.cockpit.finance_panel import EDIT_CATEGORIES
 from telemachus.finance.import_text import parse_bullet_line
-from tests.test_cockpit_finances import TestCockpitTUIFinances
+from tests.test_cockpit_finances import TestCockpitTUIFinances, modal_key
 
 
 class TestKeywordMatching(unittest.TestCase):
@@ -47,51 +47,61 @@ class TestEditModalCategoryAndDelete(unittest.TestCase):
     def _categories_for(self, payee: str):
         return [it["category"] for it in self.panel.get_daily_ledger()[0]["items"] if it["payee"] == payee]
 
-    def test_modal_shows_current_category_and_defaults_to_auto(self):
+    def test_modal_shows_current_category_and_opens_on_it(self):
+        # The text alone gives Discretionary, so WiFi counts as picked by hand: the box opens on it,
+        # and Enter keeps it (it used to open on Auto and silently re-derive the category).
         self._open("amazon air mattress")
         self.assertEqual(self.tui.editing_current_category, "WiFi")
-        self.assertEqual(self.tui.editing_category_idx, 0)
+        self.assertEqual(EDIT_CATEGORIES[self.tui.editing_category_idx][0], "WiFi")
 
     def test_arrow_keys_cycle_categories_both_ways(self):
         self._open("amazon air mattress")
-        self.tui.handle_edit_modal_key(curses.KEY_RIGHT)
-        self.assertEqual(EDIT_CATEGORIES[self.tui.editing_category_idx][0], "Discretionary")
-        self.tui.handle_edit_modal_key(curses.KEY_LEFT)
+        wifi = self.tui.editing_category_idx
+        modal_key(self.tui, curses.KEY_RIGHT)
+        self.assertEqual(self.tui.editing_category_idx, wifi + 1)
+        modal_key(self.tui, curses.KEY_LEFT)
+        self.assertEqual(self.tui.editing_category_idx, wifi)
+        for _ in range(wifi):
+            modal_key(self.tui, curses.KEY_LEFT)
         self.assertEqual(self.tui.editing_category_idx, 0)
-        self.tui.handle_edit_modal_key(curses.KEY_LEFT)
+        modal_key(self.tui, curses.KEY_LEFT)
         self.assertEqual(self.tui.editing_category_idx, len(EDIT_CATEGORIES) - 1)
 
     def test_switch_wifi_to_discretionary(self):
         self._open("amazon air mattress")
-        self.tui.handle_edit_modal_key(curses.KEY_RIGHT)  # Auto -> Discretionary
-        self.tui.handle_edit_modal_key(10)  # Enter
+        for _ in range(self.tui.editing_category_idx):  # back up to Auto: the text gives Discretionary
+            modal_key(self.tui, curses.KEY_LEFT)
+        modal_key(self.tui, 10)  # Enter
         self.assertEqual(self._categories_for("amazon air mattress"), ["Discretionary"])
 
     def test_explicit_category_beats_text_keywords(self):
         self._open("amazon air mattress")
         self.tui.editing_buffer = "- savings gift - 32.88"
         self.tui.editing_category_idx = 1  # Discretionary
-        self.tui.handle_edit_modal_key(10)
+        modal_key(self.tui, 10)
         self.assertEqual(self._categories_for("savings gift"), ["Discretionary"])
 
     def test_plain_d_types_when_buffer_has_text(self):
         self._open("Expense")
         before = self.tui.editing_buffer
-        self.tui.handle_edit_modal_key(ord("d"))
+        modal_key(self.tui, ord("d"))
         self.assertEqual(self.tui.editing_buffer, before + "d")
         self.assertEqual(len(self.panel.get_daily_ledger()[0]["items"]), 2)
 
     def test_ctrl_d_deletes_even_with_prefilled_buffer(self):
         self._open("Expense")
         self.assertTrue(self.tui.editing_buffer)
-        self.tui.handle_edit_modal_key(4)  # Ctrl+D
+        modal_key(self.tui, 4)  # Ctrl+D asks first
+        self.assertTrue(self.tui.is_editing_finances)
+        modal_key(self.tui, 4)  # Ctrl+D again deletes
         self.assertFalse(self.tui.is_editing_finances)
         payees = [it["payee"] for it in self.panel.get_daily_ledger()[0]["items"]]
         self.assertEqual(payees, ["amazon air mattress"])
 
     def test_delete_key_also_deletes(self):
         self._open("Expense")
-        self.tui.handle_edit_modal_key(curses.KEY_DC)
+        modal_key(self.tui, curses.KEY_DC)  # asks first
+        modal_key(self.tui, curses.KEY_DC)
         payees = [it["payee"] for it in self.panel.get_daily_ledger()[0]["items"]]
         self.assertNotIn("Expense", payees)
 

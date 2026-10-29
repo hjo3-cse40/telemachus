@@ -117,6 +117,9 @@ class Transaction:
     postings: List[Posting] = field(default_factory=list)
     idempotency_hash: Optional[str] = None
     created_at: int = 0
+    # Insertion order in the ledger (SQLite rowid). created_at is whole seconds, so lines saved in
+    # the same second (one Add batch) need this to keep the order they were typed in.
+    seq: int = 0
 
     @classmethod
     def create(
@@ -289,7 +292,7 @@ class MonthlyOverview:
     - gas_left = gas_planned - gas_actual
     - variable_variance = (groceries_planned - groceries_actual) + (gas_planned - gas_actual)
     - total_personal = income - savings - fixed_bills - pge - groceries_planned - gas_planned
-    - remaining_cushion = income - savings - total_personal - fixed_bills - pge - groceries_actual - gas_actual
+    - remaining_cushion = groceries_left + gas_left + dining_left (the "Flex left this month" rows)
     """
     month: str  # YYYY-MM e.g. "2026-10"
     status: str = "open"  # 'open' while month is active, 'closed' when PGE & actuals final
@@ -305,6 +308,8 @@ class MonthlyOverview:
     gas_actual_cents: int = 0
     notes: str = ""
     updated_at: int = 0
+    # Money moved into savings this month (measured from the ledger, not the plan).
+    savings_actual_cents: int = 0
 
     @property
     def all_bills_cents(self) -> int:
@@ -345,15 +350,10 @@ class MonthlyOverview:
 
     @property
     def remaining_cushion_cents(self) -> int:
-        """Dynamic remaining cushion."""
-        effective_groc = self.groceries_actual_cents if self.groceries_actual_cents > 0 else self.groceries_planned_cents
-        effective_gas = self.gas_actual_cents if self.gas_actual_cents > 0 else self.gas_planned_cents
-
-        cushion = (self.groceries_planned_cents - effective_groc) + (self.gas_planned_cents - effective_gas)
-        if self.dining_planned_cents > 0:
-            effective_dining = self.dining_actual_cents if self.dining_actual_cents > 0 else self.dining_planned_cents
-            cushion += (self.dining_planned_cents - effective_dining)
-        return cushion
+        """Flex left this month: the sum of each budget's planned minus spent (groceries, gas,
+        dining), so it always equals the rows listed above it. A budget with nothing spent yet
+        adds its whole plan; dining spent with no dining plan counts as over."""
+        return self.groceries_left_cents + self.gas_left_cents + self.dining_left_cents
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -523,6 +523,7 @@ DEFAULT_USER_ACCOUNTS: List[Account] = [
 
     # Income
     Account("Income:Salary", AccountType.INCOME, description="Bi-weekly payroll compensation"),
+    Account("Income:Interest", AccountType.INCOME, description="Interest paid into savings"),
 
     # Expenses
     Account("Expenses:Housing:Rent", AccountType.EXPENSE, description="Apartment rent (placeholder $0; dad pays until year ends)"),

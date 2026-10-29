@@ -5,6 +5,18 @@ Handles:
 - Variable recurring bills (PG&E) using rolling statistical averages and seasonal buffers.
 - 3-step lifecycle: SCHEDULED (estimated) -> BILLED (statement arrived) -> PAID (matched transaction).
 - Committed cash flow and Safe-to-Spend runway calculations.
+
+Credit card rule (until-payday math is checking-based cash):
+- A card purchase does not lower checking, so it does not change checking-based numbers on the day
+  it happens. It raises the Visa balance owed.
+- The whole balance owed on the card is treated as due on the card's next due day (setup.yaml
+  fixed_bills credit_card/visa due_day, default the 2nd). Statement closing dates are not tracked,
+  so this is conservative: charges made after a statement closes are counted a month early.
+- When that due day falls before the next payday, the amount owed is subtracted like a bill.
+- A card payment lowers checking AND the amount owed by the same amount, so it is never
+  subtracted twice. A partial payment leaves the rest due; a full payoff marks the bill paid;
+  an overpayment leaves a credit (negative owed), which counts as $0 due, never as extra cash.
+- The card bill is counted at most once per window, even when the window spans two due days.
 """
 from __future__ import annotations
 
@@ -12,6 +24,7 @@ import calendar
 from datetime import datetime, timedelta
 import math
 from pathlib import Path
+import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 import uuid
@@ -28,7 +41,34 @@ from telemachus.finance.models import (
     Transaction,
     is_variable_bill,
 )
+# parse_due_day lives in cards (shared with the card summary); kept importable from here.
+from telemachus.finance.cards import CARD_BILL_KEYS, VISA, parse_due_day  # noqa: F401
 from telemachus.finance.store import FinanceStore
+
+RENT_ACCOUNT = "Expenses:Housing:Rent"
+
+
+def bill_key(key: Any) -> str:
+    """setup.yaml fixed_bills key in one spelling: "Car Insurance" and "car-insurance" are car_insurance."""
+    return str(key).strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def custom_bill_account(key: Any) -> str:
+    """Expense account of a fixed bill with no built-in account: phone -> Expenses:Phone,
+    car_insurance -> Expenses:CarInsurance (the same name in setup, the bill engine and the cockpit)."""
+    parts = [p for p in bill_key(key).split("_") if p]
+    return "Expenses:" + ("".join(p[:1].upper() + p[1:] for p in parts) or "Bill")
+
+
+# Words a line that pays a setup.yaml bill may have besides the bill's own name ("phone bill",
+# "pay phone bill oct", "phone autopay").
+_BILL_LINE_WORDS = {
+    "bill", "bills", "payment", "payments", "pay", "paid", "pmt", "autopay", "autopaid", "auto",
+    "monthly", "month", "this", "the", "my", "for", "of", "due", "statement", "invoice",
+    "jan", "january", "feb", "february", "mar", "march", "apr", "april", "may", "jun", "june",
+    "jul", "july", "aug", "august", "sep", "sept", "september", "oct", "october", "nov",
+    "november", "dec", "december",
+}
 
 ESTIMATE_NOTE = "Estimate from past bills; the real amount is only known when the statement arrives"
 
@@ -433,7 +473,7 @@ class RecurringEngine:
         if "_parse_cents" not in locals():
             _parse_cents = lambda x: int(round(float(x) * 100)) if x is not None else None
 
-        if setup_data and setup_data.get("fixed_bills"):
+        if setup_data and setup_data.get("fixed_bills") and isinstance(setup_data.get("fixed_bills"), dict):
             configured_bills = setup_data["fixed_bills"]
             STD_BILL_METADATA = {
                 "kahram": ("Expenses:Family:Kahram", "Brother Payment", "Fixed Bill", 1),
@@ -444,7 +484,10 @@ class RecurringEngine:
                 "wifi": ("Expenses:Utilities:WiFi", "Wi-Fi", "Fixed Bill", 28),
                 "pge": ("Expenses:Utilities:PGE", "PG&E Electric & Gas", "Utility (Variable)", 28),
                 "credit_card": ("Liabilities:CreditCard:Visa", "Credit Card (Visa)", "Card Balance", 2),
-                "rent": ("Expenses:Home:Rent", "Apartment Rent", "Fixed Bill", 1),
+                "visa": ("Liabilities:CreditCard:Visa", "Credit Card (Visa)", "Card Balance", 2),
+                "visa_credit_card": ("Liabilities:CreditCard:Visa", "Credit Card (Visa)", "Card Balance", 2),
+                "credit_card_payment": ("Liabilities:CreditCard:Visa", "Credit Card (Visa)", "Card Balance", 2),
+                "rent": (RENT_ACCOUNT, "Apartment Rent", "Fixed Bill", 1),
             }
 
             bill_specs = []
@@ -452,12 +495,12 @@ class RecurringEngine:
             for k, v in configured_bills.items():
                 if not isinstance(v, dict) or not bool(v.get("active", True)):
                     continue
-                clean_k = k.lower().replace("-", "_").replace(" ", "_")
+                clean_k = bill_key(k)
                 seen_keys.add(clean_k)
                 acc, def_name, def_cat, def_day = STD_BILL_METADATA.get(
-                    clean_k, (f"Expenses:{k.title()}", k.title(), "Fixed Bill", 1)
+                    clean_k, (custom_bill_account(k), str(k).replace("_", " ").title(), "Fixed Bill", 1)
                 )
-                due_day = int(v.get("due_day", def_day))
+                due_day = parse_due_day(v.get("due_day"), def_day)
                 amt = _parse_cents(v.get("amount", 0.0)) or 0
                 is_estimate = is_variable_bill(clean_k, v)
                 if is_estimate and not amt:
@@ -473,12 +516,8 @@ class RecurringEngine:
                     "category": v.get("category") or def_cat,
                 })
 
-            if "pge" not in seen_keys:
-                pge_est = 7500
-                if setup_data.get("monthly_targets"):
-                    pval = _parse_cents(setup_data["monthly_targets"].get("pge_estimate"))
-                    if pval:
-                        pge_est = pval
+            pge_est = _parse_cents((setup_data.get("monthly_targets") or {}).get("pge_estimate")) or 0
+            if "pge" not in seen_keys and pge_est > 0:
                 bill_specs.append({
                     "id": "bill_pge",
                     "name": "PG&E Electric & Gas",
@@ -490,8 +529,15 @@ class RecurringEngine:
                     "category": "Utility (Variable)",
                 })
 
-            if not any(k in seen_keys for k in ("credit_card", "visa")):
-                card_bal = max(0, self.store.get_account_balance("Liabilities:CreditCard:Visa"))
+            # Any card key in setup.yaml (credit_card, visa, ...) is the same live-balance card bill.
+            for spec in bill_specs:
+                if spec["id"].replace("bill_", "", 1) in CARD_BILL_KEYS:
+                    spec["id"] = "bill_credit_card"
+                    spec["account_id"] = VISA
+            from telemachus.finance.cards import card_bill_switched_off
+
+            if not any(k in seen_keys for k in CARD_BILL_KEYS) and not card_bill_switched_off(setup_data):
+                card_bal = max(0, self.store.get_account_balance(VISA))
                 bill_specs.append({
                     "id": "bill_credit_card",
                     "name": "Credit Card (Visa)",
@@ -503,6 +549,7 @@ class RecurringEngine:
                 })
 
             obligations = []
+            card_counted = False
             for day_offset in range(days_ahead):
                 check_date = now + timedelta(days=day_offset)
                 d_str = check_date.strftime("%Y-%m-%d")
@@ -512,9 +559,14 @@ class RecurringEngine:
                 for spec in bill_specs:
                     if self._effective_due_day(spec["due_day"], check_date) == d_day:
                         if spec["id"] == "bill_credit_card":
-                            card_bal = self.store.get_account_balance("Liabilities:CreditCard:Visa")
+                            # Whole balance owed is due on the first due day ahead; later due
+                            # days in the range show $0 so it is never counted twice.
+                            card_bal = self.store.get_account_balance(VISA)
+                            if card_counted:
+                                card_bal = 0
                             status = "paid" if card_bal <= 0 else "due"
                             amt = max(0, card_bal)
+                            card_counted = True
                         elif spec["name"] == "Brother Payment" or "brother" in spec["id"]:
                             with self.store._get_connection() as conn:
                                 k_row = conn.execute(
@@ -602,7 +654,7 @@ class RecurringEngine:
         committed_cents = sum(
             item["amount_cents"]
             for item in upcoming
-            if item["status"] in (BillStatus.SCHEDULED.value, BillStatus.BILLED.value)
+            if item["status"] in (BillStatus.SCHEDULED.value, BillStatus.BILLED.value, "due")
         )
         checking_after_bills_cents = chk_cents - committed_cents
         safe_to_spend_cents = max(0, checking_after_bills_cents)
@@ -634,8 +686,10 @@ class RecurringEngine:
         day = min(due_day, calendar.monthrange(y, m)[1])
         return f"{y:04d}-{m:02d}-{day:02d}"
 
-    def _is_bill_paid_for_due_date(self, account_id: str, due_date: str) -> bool:
+    def _is_bill_paid_for_due_date(self, account_id: str, due_date: str, as_of: Optional[str] = None) -> bool:
         """True if a payment was logged within ~half a month of this due date.
+
+        as_of: payments dated later do not count yet (checking does not show them yet either).
 
         Bills are often paid at the turn of the month (e.g. the 1st) for the
         previous month's statement, so a calendar-month match wrongly credits
@@ -645,6 +699,8 @@ class RecurringEngine:
         due = datetime.strptime(due_date, "%Y-%m-%d")
         start_date = (due - timedelta(days=15)).strftime("%Y-%m-%d")
         end_date = (due + timedelta(days=14)).strftime("%Y-%m-%d")
+        if as_of and as_of < end_date:
+            end_date = as_of
         with self.store._get_connection() as conn:
             row = conn.execute(
                 """
@@ -657,11 +713,13 @@ class RecurringEngine:
             ).fetchone()
             return int(row["cnt"]) > 0 if row else False
 
-    def _paid_amount_for_due_date(self, account_id: str, due_date: str) -> int:
+    def _paid_amount_for_due_date(self, account_id: str, due_date: str, as_of: Optional[str] = None) -> int:
         """Amount of the payment logged closest to this due date (same window as _is_bill_paid_for_due_date)."""
         due = datetime.strptime(due_date, "%Y-%m-%d")
         start_date = (due - timedelta(days=15)).strftime("%Y-%m-%d")
         end_date = (due + timedelta(days=14)).strftime("%Y-%m-%d")
+        if as_of and as_of < end_date:
+            end_date = as_of
         with self.store._get_connection() as conn:
             row = conn.execute(
                 """
@@ -723,6 +781,151 @@ class RecurringEngine:
         elapsed = (today - anchor).days
         periods = elapsed // 14 + 1
         return anchor + timedelta(days=14 * periods)
+
+    def card_owed_as_of(self, as_of_date: str) -> int:
+        """Visa balance owed on `as_of_date`: entries dated later do not count yet.
+
+        Setup opening balances always count (they may be dated on the day setup ran).
+        """
+        return self.store.get_account_balance(VISA, as_of_date=as_of_date, setup_always=True)
+
+    def card_overdue_since(self, as_of_date: str, due_day: Optional[int]) -> Optional[str]:
+        """The card due date (YYYY-MM-DD) that passed unpaid, or None.
+
+        Overdue when all hold: money is owed today, money was already owed on the last due date
+        before today (a setup balance dated after that day does not count, it may be new
+        charges), and no card payment is logged after the due date before it, up to today.
+        Without this, an unpaid balance would drop out of the bills the day after its due date.
+        """
+        from telemachus.finance.cards import previous_due_date
+
+        if not due_day:
+            return None
+        today = datetime.strptime(as_of_date, "%Y-%m-%d").date()
+        if self.card_owed_as_of(as_of_date) <= 0:
+            return None
+        last_due = previous_due_date(due_day, today)
+        if self.store.get_account_balance(VISA, as_of_date=last_due.isoformat()) <= 0:
+            return None
+        prev_due = previous_due_date(due_day, last_due)
+        with self.store._get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS cnt
+                FROM postings p
+                JOIN transactions t ON p.transaction_id = t.id
+                WHERE p.account_id = ? AND p.amount_cents > 0
+                  AND (t.source IS NULL OR t.source != 'setup')
+                  AND t.date > ? AND t.date <= ?;
+                """,
+                (VISA, prev_due.isoformat(), as_of_date),
+            ).fetchone()
+        if row and int(row["cnt"]) > 0:
+            return None
+        return last_due.isoformat()
+
+    # Built-in bill accounts (the bullet parser already has a category for each of these).
+    _BUILTIN_BILL_ACCOUNTS = {
+        "kahram": "Expenses:Family:Kahram", "brother": "Expenses:Family:Kahram",
+        "gym": "Expenses:Subscriptions:Gym", "wifi": "Expenses:Utilities:WiFi",
+        "pge": "Expenses:Utilities:PGE", "apple_icloud": "Expenses:Subscriptions:AppleCloud",
+        "spotify": "Expenses:Subscriptions:Spotify", "rent": RENT_ACCOUNT,
+    }
+
+    def bill_accounts(self) -> Dict[str, str]:
+        """{account id: bill name} of every active fixed bill in setup.yaml (the card excluded)."""
+        target_yaml = self.yaml_path or self.store.get_setup_yaml_path()
+        if not target_yaml:
+            return {}
+        try:
+            from telemachus.finance.setup import load_setup_yaml
+            data = load_setup_yaml(target_yaml) or {}
+        except Exception:
+            return {}
+        fb = data.get("fixed_bills")
+        out: Dict[str, str] = {}
+        if not isinstance(fb, dict):
+            return out
+        for k, v in fb.items():
+            key = bill_key(k)
+            if key in CARD_BILL_KEYS or not isinstance(v, dict) or not bool(v.get("active", True)):
+                continue
+            acc = self._BUILTIN_BILL_ACCOUNTS.get(key) or custom_bill_account(key)
+            out[acc] = str(v.get("name") or key.replace("_", " ").title())
+        return out
+
+    def bill_account_for_text(self, text: str) -> Optional[Tuple[str, str]]:
+        """(account id, bill name) of the setup.yaml fixed bill that a typed line pays, or None.
+
+        Matches the bill's key ("phone", "car insurance") or its name, as whole words. Built-in
+        bills (gym, wifi, rent, ...) are already found by the bullet parser's categories; this
+        finds the rest, so "phone bill 80" marks the phone bill paid instead of being counted
+        again as a bill still due.
+
+        Every other word must be a bill word ("bill", "payment", "autopay", a month, ...) or a
+        word of that bill's name, so a purchase that only mentions the bill ("phone case 20",
+        "car wash 15") stays a purchase and never marks the bill paid.
+        """
+        low = " " + re.sub(r"[-_]+", " ", (text or "").lower()) + " "
+        words = set(re.findall(r"[a-z&']+", low))
+        target_yaml = self.yaml_path or self.store.get_setup_yaml_path()
+        if not target_yaml:
+            return None
+        try:
+            from telemachus.finance.setup import load_setup_yaml
+            data = load_setup_yaml(target_yaml) or {}
+        except Exception:
+            return None
+        fb = data.get("fixed_bills")
+        if not isinstance(fb, dict):
+            return None
+        for k, v in fb.items():
+            key = bill_key(k)
+            if key in CARD_BILL_KEYS or not isinstance(v, dict) or not bool(v.get("active", True)):
+                continue
+            name = str(v.get("name") or key.replace("_", " ").title())
+            phrases = {key.replace("_", " "), re.sub(r"[-_]+", " ", name.lower())}
+            allowed = _BILL_LINE_WORDS | set(re.findall(r"[a-z&']+", " ".join(phrases)))
+            if not words <= allowed:
+                continue
+            for ph in phrases:
+                ph = re.sub(r"\s+", " ", ph).strip()
+                if ph and re.search(rf"(?<![a-z0-9]){re.escape(ph)}(?![a-z0-9])", low):
+                    acc = self._BUILTIN_BILL_ACCOUNTS.get(key) or custom_bill_account(key)
+                    return acc, name
+        return None
+
+    def ensure_bill_account(self, account_id: str) -> None:
+        """Adds an Expense account for a custom bill when the chart of accounts lacks it."""
+        if self.store.get_account(account_id):
+            return
+        from telemachus.finance.models import Account, AccountType
+        try:
+            self.store.add_account(Account(account_id, AccountType.EXPENSE, description="Bill (setup.yaml)"))
+        except Exception:
+            if not self.store.get_account(account_id):
+                raise
+
+    def has_paycheck_plan(self, yaml_path: Optional[Path | str] = None) -> bool:
+        """True when payday is known: a paycheck_plan in setup.yaml or a saved plan in the ledger.
+
+        Without one, get_paycheck_allocation guesses (payday 14 days from today), so the cockpit
+        hides the until-payday numbers instead of showing made-up ones.
+        """
+        target_yaml = yaml_path or self.yaml_path or self.store.get_setup_yaml_path()
+        if target_yaml:
+            try:
+                from telemachus.finance.setup import load_setup_yaml, _parse_cents
+                data = load_setup_yaml(target_yaml) or {}
+                cfg = data.get("paycheck_plan") or {}
+                if isinstance(cfg, dict) and _parse_cents(cfg.get("paycheck_amount")):
+                    return True
+            except Exception:
+                pass
+        try:
+            return self.store.get_paycheck_plan() is not None
+        except Exception:
+            return False
 
     def get_paycheck_allocation(
         self, as_of_date: Optional[str] = None, yaml_path: Optional[Path | str] = None
@@ -791,7 +994,7 @@ class RecurringEngine:
 
         # 4. Map of active bills from setup.yaml (or database fallback)
         configured_bills = {}
-        if setup_data and setup_data.get("fixed_bills"):
+        if setup_data and setup_data.get("fixed_bills") and isinstance(setup_data.get("fixed_bills"), dict):
             fb = setup_data["fixed_bills"]
             for k, v in fb.items():
                 if isinstance(v, dict) and v.get("active", True):
@@ -806,7 +1009,7 @@ class RecurringEngine:
             "pge": ("Expenses:Utilities:PGE", "PG&E Electric & Gas", 28),
             "apple_icloud": ("Expenses:Subscriptions:AppleCloud", "Apple iCloud", 11),
             "spotify": ("Expenses:Subscriptions:Spotify", "Spotify", 25),
-            "rent": ("Expenses:Home:Rent", "Apartment Rent", 1),
+            "rent": (RENT_ACCOUNT, "Apartment Rent", 1),
             "credit_card": ("Liabilities:CreditCard:Visa", "Credit Card Payment (Visa)", 2),
             "visa": ("Liabilities:CreditCard:Visa", "Credit Card Payment (Visa)", 2),
             "visa_credit_card": ("Liabilities:CreditCard:Visa", "Credit Card Payment (Visa)", 2),
@@ -817,10 +1020,10 @@ class RecurringEngine:
         bill_specs = []
         seen_keys = set()
         for k, v in configured_bills.items():
-            clean_k = k.lower().replace("-", "_").replace(" ", "_")
+            clean_k = bill_key(k)
             seen_keys.add(clean_k)
-            acc, default_name, default_day = STD_BILL_ACCOUNTS.get(clean_k, (f"Expenses:{k.title()}", k.title(), 1))
-            due_day = int(v.get("due_day", default_day))
+            acc, default_name, default_day = STD_BILL_ACCOUNTS.get(clean_k, (custom_bill_account(k), str(k).replace("_", " ").title(), 1))
+            due_day = parse_due_day(v.get("due_day"), default_day)
             amt = _parse_cents(v.get("amount", 0.0)) or 0
             is_estimate = is_variable_bill(clean_k, v)
             if is_estimate and not amt:
@@ -837,9 +1040,11 @@ class RecurringEngine:
                 "is_active": bool(v.get("active", True)),
             })
 
-        # Ensure Credit Card is evaluated
+        # Ensure Credit Card is evaluated (not when setup.yaml switches the card bill off)
+        from telemachus.finance.cards import card_bill_switched_off
+
         has_cc = any(k in seen_keys for k in ("credit_card", "visa", "visa_credit_card", "credit_card_payment"))
-        if not has_cc:
+        if not has_cc and not card_bill_switched_off(setup_data):
             bill_specs.append({
                 "key": "credit_card",
                 "name": "Credit Card Payment (Visa)",
@@ -850,13 +1055,12 @@ class RecurringEngine:
                 "is_active": True,
             })
 
-        # Ensure PG&E is evaluated from monthly_targets if not in fixed_bills
-        if "pge" not in seen_keys:
-            pge_est = 7500
-            if setup_data and setup_data.get("monthly_targets"):
-                pge_val = _parse_cents(setup_data["monthly_targets"].get("pge_estimate"))
-                if pge_val:
-                    pge_est = pge_val
+        # Ensure PG&E is evaluated from monthly_targets if not in fixed_bills (only with a configured
+        # estimate: never a made-up amount)
+        pge_est = 0
+        if setup_data and setup_data.get("monthly_targets"):
+            pge_est = _parse_cents(setup_data["monthly_targets"].get("pge_estimate")) or 0
+        if "pge" not in seen_keys and pge_est > 0:
             bill_specs.append({
                 "key": "pge",
                 "name": "PG&E Electric & Gas",
@@ -872,6 +1076,27 @@ class RecurringEngine:
         window_bills = []
         other_bills = []
         handled_keys_in_window = set()
+        card_counted = False
+
+        # 5a. A card balance whose due date passed unpaid is still owed: it comes out today.
+        card_spec = next((sp for sp in bill_specs if sp["is_active"] and sp["key"] in CARD_BILL_KEYS), None)
+        overdue_since = self.card_overdue_since(now_str, card_spec["due_day"]) if card_spec else None
+        if card_spec and overdue_since:
+            card_bal = self.card_owed_as_of(now_str)
+            card_counted = True
+            handled_keys_in_window.add(card_spec["key"])
+            note_str = f"Card payment was due {overdue_since} and no payment is logged: ${card_bal / 100:,.2f} overdue"
+            window_bills.append({
+                "name": card_spec["name"],
+                "due_date": now_str,
+                "amount_cents": card_bal,
+                "status": "due",
+                "overdue_since": overdue_since,
+                "note": note_str,
+                "notes": note_str,
+                "account_id": card_spec["account_id"],
+                "is_autopay": True,
+            })
 
         for day_offset in range(days_in_cycle):
             check_date = start_dt + timedelta(days=day_offset)
@@ -888,7 +1113,9 @@ class RecurringEngine:
 
                     # A. Brother Payment (Kahram) - Strictly pull monthly installment amount, not multi-month debt total
                     if key in ("kahram", "brother"):
-                        monthly_amount = spec["amount_cents"] or 15000
+                        monthly_amount = spec["amount_cents"]
+                        if monthly_amount <= 0:
+                            continue  # no amount set: nothing to show or subtract
 
                         # Calculate actual payments in this month from database
                         with self.store._get_connection() as conn:
@@ -898,9 +1125,9 @@ class RecurringEngine:
                                 FROM postings p
                                 JOIN transactions t ON p.transaction_id = t.id
                                 WHERE p.account_id IN ('Expenses:Family:Kahram', 'Expenses:Family:Brother')
-                                  AND t.date >= ? AND t.date <= ?;
+                                  AND t.date >= ? AND t.date <= ? AND t.date <= ?;
                                 """,
-                                (f"{m_str}-01", f"{m_str}-31"),
+                                (f"{m_str}-01", f"{m_str}-31", now_str),
                             ).fetchone()
                             actual_paid_month = int(k_row["total"]) if k_row else 0
 
@@ -931,17 +1158,24 @@ class RecurringEngine:
                         })
 
                     # B. Credit Card Payment (Visa) - Always remind about payment date in this window
-                    elif key in ("credit_card", "visa", "visa_credit_card", "credit_card_payment"):
-                        card_bal = self.store.get_account_balance("Liabilities:CreditCard:Visa")
-                        due_bal = max(0, card_bal)
-                        if card_bal <= 0:
+                    elif key in CARD_BILL_KEYS:
+                        # See the module docstring: the whole balance owed is due on this day.
+                        card_bal = self.card_owed_as_of(now_str)
+                        if card_counted:
+                            continue
+                        card_counted = True
+                        if card_bal < 0:
                             status_str = "paid"
                             amt_due = 0
-                            note_str = f"💳 Payment date reminder: Due on {d_str} ($0.00 current balance due - Paid in full)"
+                            note_str = f"Card payment due {d_str}: nothing owed (${-card_bal / 100:,.2f} credit)"
+                        elif card_bal == 0:
+                            status_str = "paid"
+                            amt_due = 0
+                            note_str = f"Card payment due {d_str}: $0.00 current balance due, paid in full"
                         else:
                             status_str = "due"
-                            amt_due = due_bal
-                            note_str = f"💳 Payment date reminder: Due on {d_str} (${card_bal / 100:.2f} current balance due)"
+                            amt_due = card_bal
+                            note_str = f"Card payment due {d_str}: ${card_bal / 100:,.2f} current balance due"
 
                         window_bills.append({
                             "name": spec["name"],
@@ -956,7 +1190,7 @@ class RecurringEngine:
 
                     # C. Standard Fixed Bills (WiFi, PG&E, Gym, Rent, Subscriptions)
                     else:
-                        is_paid = self._is_bill_paid_for_due_date(spec["account_id"], d_str)
+                        is_paid = self._is_bill_paid_for_due_date(spec["account_id"], d_str, as_of=now_str)
                         if is_paid:
                             status_str = "paid"
                             amt_due = 0
@@ -991,9 +1225,9 @@ class RecurringEngine:
                     continue
                 if self._effective_due_day(spec["due_day"], check_date) != check_date.day:
                     continue
-                if not self._is_bill_paid_for_due_date(spec["account_id"], d_str):
+                if not self._is_bill_paid_for_due_date(spec["account_id"], d_str, as_of=now_str):
                     continue
-                paid_amt = self._paid_amount_for_due_date(spec["account_id"], d_str)
+                paid_amt = self._paid_amount_for_due_date(spec["account_id"], d_str, as_of=now_str)
                 paid_bills.append({
                     "name": spec["name"],
                     "due_date": d_str,
@@ -1007,7 +1241,7 @@ class RecurringEngine:
 
         # Collect bills outside this 14-day window for clear context
         for spec in bill_specs:
-            if not spec["is_active"] or spec["key"] in handled_keys_in_window or spec["key"] == "credit_card":
+            if not spec["is_active"] or spec["key"] in handled_keys_in_window or spec["key"] in CARD_BILL_KEYS:
                 continue
             out_note = f"Due on day {spec['due_day']} (outside this 2-week window)"
             other_bills.append({
@@ -1047,14 +1281,18 @@ class RecurringEngine:
         gas_alloc = round(gas_planned / 2)
         variable_needs_cents = groceries_alloc + dining_alloc + gas_alloc
 
-        # 8. Cash Position: Checking account ONLY (exclude Capital One Savings per user direction)
-        chk_cents = self.store.get_account_balance("Assets:Checking:WellsFargo")
+        # 8. Cash Position: Checking account ONLY (exclude Capital One Savings per user direction),
+        # as of today: an entry logged ahead (a card payment or a paycheck on a later day) does not
+        # count yet, the same way the card bill uses card_owed_as_of(today).
+        chk_cents = self.store.get_account_balance(
+            "Assets:Checking:WellsFargo", as_of_date=now_str, setup_always=True
+        )
         checking_after_bills_cents = chk_cents - bills_due_cents
 
         # 9. Credit card reminder extraction
         cc_reminder = ""
         for b in window_bills:
-            if any(term in b.get("name", "").lower() for term in ("credit", "visa")):
+            if b.get("account_id") == VISA:
                 cc_reminder = f"Payment date is on {b['due_date']} ({b.get('note', '')})"
                 break
 
@@ -1064,7 +1302,7 @@ class RecurringEngine:
 
         notes_str = f"2-Week allocation from {paycheck_date_str} to {end_window_str}"
         if cc_reminder:
-            notes_str += f" │ 💳 {cc_reminder}"
+            notes_str += f" │ {cc_reminder}"
 
         return PaycheckWindowAllocation(
             paycheck_date=paycheck_date_str,
@@ -1087,6 +1325,46 @@ class RecurringEngine:
             variable_needs_cents=variable_needs_cents,
             safe_to_spend_cents=safe_to_spend_cents,
             notes=notes_str,
+        )
+
+    def get_card_summary(
+        self, as_of_date: Optional[str] = None, next_paycheck_date: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Visa card state for the cockpit (shape in CONTRACT.md section 7).
+
+        owed = live Visa balance (positive owed, negative credit). due_before_payday is True exactly
+        when get_paycheck_allocation subtracts the card balance as a bill before the next payday.
+        """
+        from telemachus.finance.cards import build_card_summary, card_due_day
+
+        today_str = as_of_date or datetime.now().strftime("%Y-%m-%d")
+        today = datetime.strptime(today_str, "%Y-%m-%d").date()
+        setup_data = None
+        target_yaml = self.yaml_path or self.store.get_setup_yaml_path()
+        if target_yaml:
+            try:
+                from telemachus.finance.setup import load_setup_yaml
+                setup_data = load_setup_yaml(target_yaml)
+            except Exception:
+                setup_data = None
+        due_day = card_due_day(setup_data)
+        # As of `today`: entries dated later do not count yet.
+        owed = self.card_owed_as_of(today_str)
+        overdue = self.card_overdue_since(today_str, due_day)
+        txs = [
+            t for t in self.store.list_transactions(account_id=VISA, end_date=today_str, limit=100000)
+            if t.source != "setup"
+        ]
+        next_payday = None
+        try:
+            if not next_paycheck_date and self.has_paycheck_plan():
+                next_paycheck_date = self.get_paycheck_allocation(as_of_date=today_str).next_paycheck_date
+            next_payday = datetime.strptime(next_paycheck_date, "%Y-%m-%d").date()
+        except Exception:
+            next_payday = None
+        return build_card_summary(
+            txs, owed, today, due_day, next_payday,
+            overdue_since=datetime.strptime(overdue, "%Y-%m-%d").date() if overdue else None,
         )
 
     def get_all_recurring_bills_breakdown(
@@ -1118,7 +1396,7 @@ class RecurringEngine:
 
         # 2. Extract configured bills from setup.yaml (or database fallback)
         configured_bills = {}
-        if setup_data and setup_data.get("fixed_bills"):
+        if setup_data and setup_data.get("fixed_bills") and isinstance(setup_data.get("fixed_bills"), dict):
             fb = setup_data["fixed_bills"]
             for k, v in fb.items():
                 if isinstance(v, dict):
@@ -1133,19 +1411,22 @@ class RecurringEngine:
             "wifi": ("Expenses:Utilities:WiFi", "Wi-Fi", "Fixed Bill", 28),
             "pge": ("Expenses:Utilities:PGE", "PG&E Electric & Gas", "Utility (Variable)", 28),
             "credit_card": ("Liabilities:CreditCard:Visa", "Credit Card (Visa)", "Card Balance", 2),
-            "rent": ("Expenses:Home:Rent", "Apartment Rent", "Fixed Bill", 1),
+            "visa": ("Liabilities:CreditCard:Visa", "Credit Card (Visa)", "Card Balance", 2),
+            "visa_credit_card": ("Liabilities:CreditCard:Visa", "Credit Card (Visa)", "Card Balance", 2),
+            "credit_card_payment": ("Liabilities:CreditCard:Visa", "Credit Card (Visa)", "Card Balance", 2),
+            "rent": (RENT_ACCOUNT, "Apartment Rent", "Fixed Bill", 1),
         }
 
         bills: List[Dict[str, Any]] = []
         seen_keys = set()
 
         for k, v in configured_bills.items():
-            clean_k = k.lower().replace("-", "_").replace(" ", "_")
+            clean_k = bill_key(k)
             seen_keys.add(clean_k)
             acc, def_name, def_cat, def_day = STD_BILL_METADATA.get(
-                clean_k, (f"Expenses:{k.title()}", k.title(), "Fixed Bill", 1)
+                clean_k, (custom_bill_account(k), str(k).replace("_", " ").title(), "Fixed Bill", 1)
             )
-            due_day = int(v.get("due_day", def_day))
+            due_day = parse_due_day(v.get("due_day"), def_day)
             amt = _parse_cents(v.get("amount", 0.0)) or 0
             category = v.get("category") or def_cat
             name = v.get("name") or def_name
@@ -1156,7 +1437,15 @@ class RecurringEngine:
             status = "due"
             status_text = "⏳ Due"
 
-            if clean_k in ("kahram", "brother"):
+            if clean_k in CARD_BILL_KEYS:
+                # The card bill is the live balance owed, not a fixed amount (see module docstring).
+                acc = VISA
+                card_bal = self.card_owed_as_of(datetime.now().strftime("%Y-%m-%d"))
+                amt = max(0, card_bal)
+                status = "due" if card_bal > 0 else "paid"
+                status_text = f"⏳ Bal: ${card_bal/100:,.2f}" if card_bal > 0 else ("✅ $0" if card_bal == 0 else f"✅ Credit ${-card_bal/100:,.2f}")
+                clean_k = "credit_card"
+            elif clean_k in ("kahram", "brother"):
                 # Check already_paid from setup
                 already_paid = _parse_cents(v.get("already_paid"))
                 if already_paid is None and setup_data and setup_data.get("goals"):
@@ -1210,13 +1499,11 @@ class RecurringEngine:
                 "is_variable": is_variable,
             })
 
-        # Add PG&E variable bill if not explicitly added
-        if "pge" not in seen_keys:
-            pge_est = 7500
-            if setup_data and setup_data.get("monthly_targets"):
-                p = _parse_cents(setup_data["monthly_targets"].get("pge_estimate"))
-                if p:
-                    pge_est = p
+        # Add PG&E variable bill if not explicitly added (only with a configured estimate)
+        pge_est = 0
+        if setup_data and setup_data.get("monthly_targets"):
+            pge_est = _parse_cents(setup_data["monthly_targets"].get("pge_estimate")) or 0
+        if "pge" not in seen_keys and pge_est > 0:
             pge_paid = self._is_bill_paid_for_due_date(
                 "Expenses:Utilities:PGE", self._due_date_for_month(28, month)
             )
@@ -1235,10 +1522,10 @@ class RecurringEngine:
             })
 
         # Add Credit Card if not explicitly added
-        if "credit_card" not in seen_keys:
-            card_bal = self.store.get_account_balance("Liabilities:CreditCard:Visa")
+        if not any(k in seen_keys for k in CARD_BILL_KEYS):
+            card_bal = self.card_owed_as_of(datetime.now().strftime("%Y-%m-%d"))
             cc_status = "paid" if card_bal <= 0 else "due"
-            cc_text = "✅ $0" if card_bal <= 0 else f"⏳ Bal: ${card_bal/100:.2f}"
+            cc_text = f"⏳ Bal: ${card_bal/100:,.2f}" if card_bal > 0 else ("✅ $0" if card_bal == 0 else f"✅ Credit ${-card_bal/100:,.2f}")
             bills.append({
                 "key": "credit_card",
                 "name": "Credit Card (Visa)",

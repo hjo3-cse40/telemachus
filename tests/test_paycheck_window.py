@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 from telemachus.cockpit.finance_panel import FinanceTuiPanel
-from telemachus.cockpit.tui import _char_width, _clip_pad
+from telemachus.cockpit.theme import char_width as _char_width, clip_pad as _clip_pad
 from telemachus.finance.models import PaycheckPlan
 from telemachus.finance.recurring import RecurringEngine
 from telemachus.finance.setup import apply_setup_yaml
@@ -127,8 +127,9 @@ class TestPaidEarlierInCycle(unittest.TestCase):
         self.panel.log_day_bullets("2026-10-25", "spotify - 9.50")
         pc = self._alloc("2026-10-26")
         self.assertTrue(all(b["due_date"] >= "2026-10-26" for b in pc.bills))
-        # Still due: WiFi $23.23 plus the default $75.00 PG&E estimate the engine adds when PG&E isn't configured.
-        self.assertEqual(pc.bills_due_cents, 2323 + 7500)
+        # Still due: WiFi $23.23. PG&E is not configured and has no estimate, so no made-up
+        # $75.00 bill is added (the old default was a number Sam never entered).
+        self.assertEqual(pc.bills_due_cents, 2323)
 
     def test_unpaid_past_bill_is_not_listed_as_paid(self):
         pc = self._alloc("2026-10-26")

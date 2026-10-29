@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import subprocess
 import threading
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from telemachus.config.loader import load_env
@@ -21,6 +22,7 @@ from telemachus.fs.boundaries import (
     evaluate_tier0_path,
     resolve_clean_path,
 )
+from telemachus.fs import guard_log
 from telemachus.fs.checkpoint import create_git_checkpoint
 from telemachus.fs.models import (
     FileActionType,
@@ -139,6 +141,38 @@ def get_laya_fs_bridge() -> WarmLayaFsBridge:
     return _global_laya_fs_bridge
 
 
+def _rule_name(decision: GuardDecision) -> str:
+    """Short rule name for the guard event log."""
+    if decision.verdict == GuardVerdict.NEEDS_CONFIRMATION:
+        return guard_log.RULE_CONFIRM
+    if decision.tier == TierLevel.TIER_0_BOUNDARY:
+        return guard_log.RULE_COMMAND if decision.action_type == FileActionType.EXECUTE else guard_log.RULE_PATH
+    if decision.tier == TierLevel.TIER_1_INTENT_ALIGNMENT:
+        return guard_log.RULE_INTENT
+    if decision.tier == TierLevel.TIER_2_SOFT_RECOVERY:
+        return guard_log.RULE_SOFT_DELETE
+    return guard_log.RULE_CONFIRM
+
+
+def _log_decision(decision: GuardDecision, intent_ms: Optional[float]) -> None:
+    """Writes one guard decision to the event log. Never raises."""
+    try:
+        kind = {
+            GuardVerdict.BLOCK: "BLOCK",
+            GuardVerdict.NEEDS_CONFIRMATION: "CONFIRM",
+        }.get(decision.verdict, "ALLOW")
+        guard_log.record(
+            kind,
+            target=decision.target,
+            rule=_rule_name(decision),
+            detail=decision.reason,
+            latency_ms=intent_ms,
+            action=decision.action_type.value,
+        )
+    except Exception:
+        pass
+
+
 class LayaGuard:
     """The central coordinator enforcing Tier 0 through Tier 3 guardrails."""
 
@@ -152,7 +186,24 @@ class LayaGuard:
         user_intent: Optional[str] = None,
         details: Optional[Dict[str, Any]] = None,
     ) -> GuardDecision:
-        """Evaluates any proposed file operation or shell command against the 4 tiers."""
+        """Evaluates any proposed file operation or shell command against the 4 tiers.
+
+        Every decision is also written to the guard event log (telemachus.fs.guard_log),
+        with the intent-check time when the Laya worker answered. Logging never raises.
+        """
+        timing: Dict[str, float] = {}
+        decision = self._evaluate(action_type, target, user_intent, details, timing)
+        _log_decision(decision, timing.get("intent_ms"))
+        return decision
+
+    def _evaluate(
+        self,
+        action_type: FileActionType,
+        target: str,
+        user_intent: Optional[str],
+        details: Optional[Dict[str, Any]],
+        timing: Dict[str, float],
+    ) -> GuardDecision:
         details_map = details or {}
         is_write = action_type in (
             FileActionType.EDIT,
@@ -213,12 +264,15 @@ class LayaGuard:
         # -------------------------------------------------------------
         if user_intent and user_intent.strip():
             details_str = json.dumps(details_map)
+            started = time.perf_counter()
             laya_eval = self.bridge.evaluate_record(
                 action_type=action_type.value,
                 target=target,
                 user_intent=user_intent,
                 details=details_str,
             )
+            if laya_eval:
+                timing["intent_ms"] = (time.perf_counter() - started) * 1000.0
 
             if laya_eval:
                 alignment = laya_eval.get("intent_alignment")

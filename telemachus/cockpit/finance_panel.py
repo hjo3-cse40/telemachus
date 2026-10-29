@@ -16,7 +16,18 @@ from pathlib import Path
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from telemachus.finance.import_text import parse_bullet_line
+from telemachus.finance.cards import (
+    CHECKING,
+    KIND_CARD_PAYMENT,
+    KIND_INCOME,
+    KIND_OPENING,
+    KIND_SPEND,
+    KIND_TRANSFER,
+    SAVINGS,
+    VISA,
+    classify_transaction,
+)
+from telemachus.finance.import_text import explain_bullet_line, parse_bullet_line, preview_bullet_line
 from telemachus.finance.models import (
     CashFlowSummary,
     MonthlyOverview,
@@ -42,10 +53,39 @@ EDIT_CATEGORIES: List[Tuple[str, Optional[str]]] = [
     ("Spotify", "spotify"),
     ("iCloud", "icloud"),
     ("Brother", "kahram"),
+    ("Rent", "rent"),
 ]
 
 
 PACE_WINDOW_DAYS = 7
+
+# Expense accounts covered by the grocery + dining + gas allowance.
+ALLOWANCE_ACCOUNTS = frozenset({
+    "Expenses:Food:Groceries", "Expenses:Groceries",
+    "Expenses:Food:Dining", "Expenses:Dining",
+    "Expenses:Transport:Gas", "Expenses:Gas",
+})
+
+
+# Bill accounts that never count toward the "lately $X a day" pace (bills are subtracted on
+# their own, so a rent payment must not make the pace look high for a week).
+BILL_ACCOUNT_PREFIXES = ("Expenses:Housing:", "Expenses:Utilities:", "Expenses:Subscriptions:", "Expenses:Family:")
+
+
+def bill_spend_cents(tx: Any, bill_accounts: Any = ()) -> int:
+    """Bill payments in one transaction: built-in bill accounts plus the setup.yaml bill accounts."""
+    return sum(
+        p.amount_cents for p in (getattr(tx, "postings", None) or [])
+        if p.account_id.startswith("Expenses:")
+        and (p.account_id.startswith(BILL_ACCOUNT_PREFIXES) or p.account_id in bill_accounts)
+    )
+
+
+def allowance_spend_cents(tx: Any) -> int:
+    """Groceries, dining and gas spent in one transaction (bills and other spending excluded)."""
+    return sum(
+        p.amount_cents for p in (getattr(tx, "postings", None) or []) if p.account_id in ALLOWANCE_ACCOUNTS
+    )
 
 
 @dataclass
@@ -68,6 +108,10 @@ class RunwayInfo:
     after_allowances_cents: int  # left_cents minus allowance_cents
     bill_marks: List[Tuple[str, int]] = field(default_factory=list)  # (due date, cents) still due
     month_spent_cents: int = 0
+    period_days: int = 14  # length of the whole pay period (last payday to next payday)
+    # allowance_cents spread over the whole pay period (a fixed budget per day, e.g. 260 / 14).
+    # Compare it with a day's allowance_spent_cents (groceries, dining, gas), not with all spending.
+    daily_allowance_cents: int = 0
 
 
 def _rounded_div(cents: int, n: int) -> int:
@@ -92,6 +136,8 @@ def compute_runway(
     left = checking - paycheck.bills_due_cents
     per_day = _rounded_div(left, days_left)
 
+    # Pace = everyday spending only: bill payments (rent, wifi, ...) are left out, because the
+    # bills still due are subtracted on their own.
     window_start = today_dt - timedelta(days=PACE_WINDOW_DAYS - 1)
     spent = 0
     for d in days:
@@ -100,7 +146,7 @@ def compute_runway(
         except (KeyError, ValueError):
             continue
         if window_start <= d_dt <= today_dt:
-            spent += d["outflow_cents"]
+            spent += d.get("pace_spent_cents", d["outflow_cents"])
     pace = _rounded_div(spent, PACE_WINDOW_DAYS)
 
     due_by_date: Dict[str, int] = {}
@@ -108,9 +154,13 @@ def compute_runway(
         if b.get("status") == "due" and b.get("amount_cents", 0) > 0:
             due_by_date[b["due_date"]] = due_by_date.get(b["due_date"], 0) + b["amount_cents"]
 
+    # Day-by-day balance: bills due today come out first (they are part of left_cents too),
+    # then each later day loses the pace plus that day's bills.
     run_out: Optional[str] = None
-    if pace > 0:
-        balance = checking
+    balance = checking - due_by_date.get(today, 0)
+    if balance < 0:
+        run_out = today
+    elif pace > 0 or due_by_date:
         for offset in range(1, days_left + 1):
             day = (today_dt + timedelta(days=offset)).isoformat()
             balance -= pace + due_by_date.get(day, 0)
@@ -119,7 +169,18 @@ def compute_runway(
                 break
 
     month_prefix = today[:7]
-    month_spent = sum(d["outflow_cents"] for d in days if d["date"].startswith(month_prefix))
+    # Entries logged ahead (a later day this month) are not spent yet.
+    month_spent = sum(d["outflow_cents"] for d in days if d["date"].startswith(month_prefix) and d["date"] <= today)
+
+    period_days = 14
+    try:
+        start_dt = datetime.strptime(paycheck.cycle_start_date, "%Y-%m-%d").date()
+        if 0 < (next_dt - start_dt).days <= 31:
+            period_days = (next_dt - start_dt).days
+    except (TypeError, ValueError, AttributeError):
+        pass
+    allowance = paycheck.variable_needs_cents
+    daily_allowance = _rounded_div(allowance, period_days) if allowance > 0 else 0
 
     return RunwayInfo(
         today=today,
@@ -135,6 +196,8 @@ def compute_runway(
         after_allowances_cents=left - paycheck.variable_needs_cents,
         bill_marks=sorted(due_by_date.items()),
         month_spent_cents=month_spent,
+        period_days=period_days,
+        daily_allowance_cents=daily_allowance,
     )
 
 
@@ -152,6 +215,8 @@ class FinanceTuiPanel:
         self._cached_cashflow: Optional[CashFlowSummary] = None
         self._cached_paycheck: Optional[PaycheckWindowAllocation] = None
         self._cached_balances: Dict[str, Any] = {}
+        self._cached_card: Optional[Dict[str, Any]] = None
+        self._setup_error: Optional[str] = None
         self._cache_time: float = 0.0
 
     def _is_cache_stale(self) -> bool:
@@ -189,18 +254,33 @@ class FinanceTuiPanel:
         start_date = f"{month_str}-01"
         end_date = f"{month_str}-31"
 
+        self._setup_error = self._read_setup_error()
+
         # 1. Monthly Overview & Paycheck Plan & Cash Flow
         try:
-            self._cached_overview = self.store.get_monthly_overview(month_str)
-            self._cached_cashflow = self.store.get_cash_flow_summary(start_date, end_date)
-            self._cached_paycheck = self.recurring.get_paycheck_allocation(as_of_date=now_str)
-            self._cached_balances = self.store.get_all_balances()
+            # As of today, like "Oct: $X spent": entries logged ahead are not spent yet.
+            self._cached_overview = self.store.get_monthly_overview(month_str, as_of_date=now_str)
+            self._cached_cashflow = self.store.get_cash_flow_summary(start_date, min(end_date, now_str))
+            # No paycheck plan: no payday, so no until-payday numbers (never a guessed payday).
+            # A broken setup.yaml: the bills are unknown, so no "left after bills" either.
+            self._cached_paycheck = (
+                self.recurring.get_paycheck_allocation(as_of_date=now_str)
+                if self.recurring.has_paycheck_plan() and not self._setup_error else None
+            )
+            # As of today: entries logged on a later day do not count yet.
+            self._cached_balances = self.store.get_all_balances(as_of_date=now_str, setup_always=True)
         except Exception as e:
             logger.debug(f"Error refreshing overview/paycheck: {e}")
 
-        # 2. Daily Ledger (last 60 days of transactions grouped by date)
+        # 2. Daily Ledger: every entry since the start of the month (or the pace window, if earlier),
+        # plus the newest 300 for older history. Totals must not depend on how many items exist.
         try:
-            all_txs = self.store.list_transactions(limit=300)
+            today_dt = datetime.strptime(now_str, "%Y-%m-%d").date()
+            range_start = min(today_dt.replace(day=1), today_dt - timedelta(days=PACE_WINDOW_DAYS - 1))
+            all_txs = self.store.list_transactions(start_date=range_start.isoformat(), limit=10_000_000)
+            seen_ids = {t.id for t in all_txs}
+            all_txs += [t for t in self.store.list_transactions(limit=300) if t.id not in seen_ids]
+            bill_accounts = set(self.recurring.bill_accounts())
             grouped: Dict[str, List[Transaction]] = {}
             for t in all_txs:
                 if t.source == "setup" and t.payee == "Opening Balance":
@@ -212,71 +292,53 @@ class FinanceTuiPanel:
             for date_key in sorted(grouped.keys(), reverse=True):
                 txs = grouped[date_key]
                 inflow_cents = 0
-                outflow_cents = 0
+                outflow_cents = 0  # spending only: expense postings, any funding account
                 savings_cents = 0
+                card_payment_cents = 0
+                card_spend_cents = 0
+                allowance_spent_cents = 0  # groceries + dining + gas only
+                bill_paid_cents = 0  # rent, wifi, gym, ... (left out of the pace)
                 items: List[Dict[str, Any]] = []
 
                 for t in txs:
-                    amount_cents = 0
-                    cat_name = "Personal"
-                    account_short = "Checking"
-                    is_income = False
-                    is_savings_transfer = False
-
-                    source_postings = [p for p in t.postings if p.amount_cents < 0]
-                    target_postings = [p for p in t.postings if p.amount_cents > 0]
-
-                    # 1. Determine funding account from negative posting (source)
-                    if source_postings:
-                        src_acc = source_postings[0].account_id
-                        if "Checking" in src_acc:
-                            account_short = "Checking"
-                        elif "Visa" in src_acc or "CreditCard" in src_acc:
-                            account_short = "Visa"
-                        elif "Savings" in src_acc:
-                            account_short = "Savings"
-                        elif "Income:" in src_acc:
-                            account_short = "Checking"
-
-                    # 2. Determine category and amount from positive posting (destination)
-                    if target_postings:
-                        tgt_p = target_postings[0]
-                        amount_cents = tgt_p.amount_cents
-                        tgt_acc = tgt_p.account_id
-
-                        if tgt_acc == "Assets:Savings:CapitalOne":
-                            cat_name = "Savings"
-                            is_savings_transfer = True
-                        elif tgt_acc.startswith("Expenses:"):
-                            cat_name = tgt_acc.split(":")[-1]
-                        elif tgt_acc.startswith("Liabilities:CreditCard") or "CreditCard" in tgt_acc or "Visa" in tgt_acc:
-                            cat_name = "Credit Card"
-                        elif tgt_acc.startswith("Assets:Checking"):
-                            is_income = True
-                            cat_name = "Income"
-                        elif tgt_acc.startswith("Income:"):
-                            is_income = True
-                            cat_name = "Income"
-                    elif source_postings:
-                        amount_cents = abs(source_postings[0].amount_cents)
-
-                    if is_income:
+                    info = classify_transaction(t)
+                    kind = info["kind"]
+                    if kind == KIND_OPENING:
+                        continue
+                    amount_cents = info["amount_cents"]
+                    if kind == KIND_INCOME:
                         inflow_cents += amount_cents
-                    elif is_savings_transfer:
-                        savings_cents += amount_cents
-                    else:
+                    elif kind == KIND_SPEND:
                         outflow_cents += amount_cents
+                        allowance_spent_cents += allowance_spend_cents(t)
+                        bill_paid_cents += bill_spend_cents(t, bill_accounts)
+                        if info["account_short"] == "Visa":
+                            card_spend_cents += amount_cents
+                    elif kind == KIND_CARD_PAYMENT:
+                        # Moves money from checking to the card: not spending.
+                        card_payment_cents += amount_cents
+                    elif info["is_savings"]:
+                        savings_cents += amount_cents
 
                     items.append({
                         "id": t.id,
                         "payee": t.payee,
-                        "category": cat_name,
-                        "account": account_short,
+                        "category": info["category"],
+                        "account": info["account_short"],
+                        # "Checking" | "Visa" | "Savings": who paid (spend, payment, transfer) or
+                        # where it landed (income).
+                        "account_short": info["account_short"],
+                        "kind": kind,  # "spend" | "income" | "card_payment" | "transfer"
                         "amount_cents": amount_cents,
-                        "is_income": is_income,
-                        "is_savings": is_savings_transfer,
+                        "is_income": info["is_income"],
+                        "is_savings": info["is_savings"],
+                        # True for groceries, dining and gas (what the daily allowance covers)
+                        "is_allowance": kind == KIND_SPEND and allowance_spend_cents(t) > 0,
                         "memo": t.memo,
                     })
+
+                if not items:
+                    continue
 
                 try:
                     dt = datetime.strptime(date_key, "%Y-%m-%d")
@@ -289,7 +351,14 @@ class FinanceTuiPanel:
                     "day_title": day_title,
                     "inflow_cents": inflow_cents,
                     "outflow_cents": outflow_cents,
+                    "spent_cents": outflow_cents,
                     "savings_cents": savings_cents,
+                    "card_payment_cents": card_payment_cents,
+                    "card_spend_cents": card_spend_cents,
+                    "allowance_spent_cents": allowance_spent_cents,
+                    "bill_paid_cents": bill_paid_cents,
+                    # everyday spending: what the "lately $X a day" pace averages
+                    "pace_spent_cents": max(0, outflow_cents - bill_paid_cents),
                     "net_cents": inflow_cents - outflow_cents,
                     "items": items,
                 })
@@ -298,6 +367,31 @@ class FinanceTuiPanel:
             self._cache_time = time.time()
         except Exception as e:
             logger.debug(f"Error refreshing daily ledger: {e}")
+
+        # 3. Card summary (uses the cached paycheck for the next payday)
+        try:
+            next_pay = self._cached_paycheck.next_paycheck_date if self._cached_paycheck else None
+            self._cached_card = self.recurring.get_card_summary(as_of_date=now_str, next_paycheck_date=next_pay)
+        except Exception as e:
+            logger.debug(f"Error refreshing card summary: {e}")
+            self._cached_card = None
+
+    def _read_setup_error(self) -> Optional[str]:
+        path = self.store.get_setup_yaml_path()
+        if not path:
+            return None
+        try:
+            from telemachus.finance.setup import setup_yaml_error
+
+            return setup_yaml_error(path)
+        except Exception as e:
+            return f"setup.yaml cannot be read: {e}"
+
+    def get_setup_error(self) -> Optional[str]:
+        """One line saying why setup.yaml cannot be read, or None. While it is set, the
+        until-payday numbers are hidden (get_runway is None): the bills in the file are unknown."""
+        self.refresh()
+        return self._setup_error
 
     def get_daily_ledger(self) -> List[Dict[str, Any]]:
         self.refresh()
@@ -322,7 +416,14 @@ class FinanceTuiPanel:
         """Runway to the next paycheck, or None when no paycheck plan is configured."""
         self.refresh()
         today_str = today or datetime.now().strftime("%Y-%m-%d")
-        paycheck = self._cached_paycheck if today is None else self.recurring.get_paycheck_allocation(as_of_date=today_str)
+        if today is None:
+            paycheck = self._cached_paycheck
+        elif self._setup_error:
+            paycheck = None
+        elif self.recurring.has_paycheck_plan():
+            paycheck = self.recurring.get_paycheck_allocation(as_of_date=today_str)
+        else:
+            paycheck = None
         if paycheck is None:
             return None
         try:
@@ -334,25 +435,83 @@ class FinanceTuiPanel:
         self.refresh()
         return self._cached_balances
 
+    def get_card_summary(self, today: Optional[str] = None) -> Dict[str, Any]:
+        """Visa card state for the Money tab (CONTRACT.md section 7).
+
+        Keys: owed_cents (int, positive = owed, negative = credit), charged_since_last_payment_cents,
+        paid_this_month_cents, last_payment (None or {"date": "YYYY-MM-DD", "amount_cents": int}),
+        due_day (int), next_due_date ("YYYY-MM-DD"), status ("clear" | "owed" | "credit"),
+        due_before_payday (bool: the until-payday math subtracts the balance owed).
+        Overdue (a due date passed with no payment logged): next_due_date is that past date,
+        before today, and due_before_payday is True.
+        """
+        if today is not None:
+            return self.recurring.get_card_summary(as_of_date=today)
+        self.refresh()
+        if self._cached_card is not None:
+            return dict(self._cached_card)
+        return {
+            "owed_cents": 0,
+            "charged_since_last_payment_cents": 0,
+            "paid_this_month_cents": 0,
+            "last_payment": None,
+            "due_day": None,
+            "next_due_date": None,
+            "status": "clear",
+            "due_before_payday": False,
+        }
+
+    def preview_bullet_line(self, line: str) -> Dict[str, Any]:
+        """Live preview of one typed line (nothing is written). See import_text.preview_bullet_line.
+
+        A line that pays a custom setup.yaml bill ("phone bill 80") is shown as that bill.
+        """
+        out = preview_bullet_line(line)
+        if out.get("ok") and out.get("kind") == KIND_SPEND and out.get("category_label") == "Discretionary":
+            match = self.recurring.bill_account_for_text(out.get("payee") or "")
+            if match:
+                old_label = out["category_label"]
+                out["category_label"] = match[1]
+                out["summary_text"] = match[1] + out["summary_text"][len(old_label):]
+        return out
+
+    def match_bill(self, item: Dict[str, Any]) -> None:
+        """Points a plain spend line at the setup.yaml bill it pays (custom keys like phone), so
+        the bill shows as paid and is not subtracted again."""
+        if item.get("kind") != KIND_SPEND or item.get("category") != "personal" or item.get("to_account"):
+            return
+        match = self.recurring.bill_account_for_text(item.get("payee") or "")
+        if match:
+            self.recurring.ensure_bill_account(match[0])
+            item["to_account"] = match[0]
+
     def log_day_bullets(self, date_str: str, bullet_text: str) -> List[Transaction]:
-        """Parses lines of bullet text and logs all items for date_str."""
+        """Parses lines of bullet text and logs all items for date_str.
+
+        Every typed line is its own entry: two identical lines both count (Sam logs each item).
+        Lines that cannot be read are skipped; use preview_bullet_line to show why.
+        """
         lines = bullet_text.splitlines()
         batch_items = []
         for line in lines:
             item = parse_bullet_line(line)
             if item:
                 item["date"] = date_str
+                self.match_bill(item)
                 batch_items.append(item)
 
         if not batch_items:
             return []
 
-        logged = self.store.log_batch_transactions(batch_items, default_date=date_str)
+        logged = self.store.log_batch_transactions(batch_items, default_date=date_str, allow_duplicates=True)
         self.refresh(force=True)
         return logged
 
     def delete_transaction(self, tx_id: str) -> bool:
-        """Deletes a transaction and invalidates caches."""
+        """Deletes a transaction and invalidates caches.
+
+        Deleting a card payment puts its amount back on the card (owed goes up) and back in checking.
+        """
         success = self.store.delete_transaction(tx_id)
         if success:
             self.refresh(force=True)
@@ -364,6 +523,20 @@ class FinanceTuiPanel:
         self.refresh(force=True)
         return count
 
+    @staticmethod
+    def _account_from_choice(account_choice: Optional[str]) -> Optional[str]:
+        """Edit-box account label -> "Checking" | "Visa" | "Savings" (None when not given)."""
+        if not account_choice:
+            return None
+        choice = account_choice.lower()
+        if "checking" in choice or "wells" in choice:
+            return "Checking"
+        if "visa" in choice or "card" in choice or "credit" in choice:
+            return "Visa"
+        if "savings" in choice or "capital" in choice:
+            return "Savings"
+        return None
+
     def edit_transaction(
         self,
         tx_id: str,
@@ -372,50 +545,123 @@ class FinanceTuiPanel:
         account_choice: Optional[str] = None,
         category_choice: Optional[str] = None,
     ) -> Optional[Transaction]:
-        """Edits an existing transaction by replacing it with a newly parsed bullet and optional account/category overrides.
+        """Replaces a transaction with a newly parsed bullet plus the Edit box's account/category.
 
-        category_choice is a key from EDIT_CATEGORIES (e.g. "personal" for Discretionary); None keeps the
-        category the bullet text implies.
+        Kind (spend, income, card payment, savings transfer):
+        - Text with a kind word wins ("visa payment 200", "savings + 50", "payday + 1480").
+        - Plain text ("250", "bonus 200") keeps the original kind, so editing a payment's amount
+          never turns it into spending.
+        - Picking a category (category_choice, e.g. "personal") makes it a purchase.
+
+        Account (account_choice "Checking" | "Visa" | "CapitalOne"):
+        - Purchase: the account that paid. Checking <-> Visa moves the charge between checking and
+          the card. A card word typed in the text ("lunch 13 visa") counts when the box's account
+          was left unchanged.
+        - Income: the account the money lands in.
+        - Card payment: the account that paid the card (Checking or Savings); Visa is ignored.
+        - Savings transfer: always from checking.
+        The new entry is logged before the old one is deleted, so a failure keeps the old entry.
         """
-        parsed = parse_bullet_line(new_bullet_line)
+        parsed, _err = explain_bullet_line(new_bullet_line)
         if not parsed:
             return None
         parsed["date"] = date_str
 
+        original = self.store.get_transaction(tx_id)
+        orig = classify_transaction(original) if original else None
+        orig_kind = orig["kind"] if orig else None
+        orig_acct = orig["account_short"] if orig else None
+        choice = self._account_from_choice(account_choice)
+        user_changed = choice is not None and choice != orig_acct
+        kind = parsed["kind"]
+
+        if not category_choice:
+            self.match_bill(parsed)
         if category_choice:
+            kind = KIND_SPEND
             parsed["category"] = category_choice
             # Drop any destination the text implied (e.g. a "savings" word) so the chosen category wins.
-            parsed.pop("to_account", None)
-            parsed.pop("account_id", None)
+            for key in ("to_account", "account_id"):
+                parsed.pop(key, None)
+        elif kind == KIND_SPEND and orig_kind in (KIND_CARD_PAYMENT, KIND_INCOME) or (
+            kind == KIND_SPEND and orig_kind == KIND_TRANSFER and orig
+            and (orig["is_savings"] or orig["account_short"] == "Savings")
+        ):
+            kind = orig_kind
+            text_payee = parsed.get("payee")
+            for key in ("to_account", "account_id", "from_account"):
+                parsed.pop(key, None)
+            if kind == KIND_CARD_PAYMENT:
+                parsed.update(category="credit_card_payment", to_account=VISA, from_account=CHECKING, payee="Visa payment")
+                if orig_acct == "Savings":
+                    parsed["from_account"] = SAVINGS
+            elif kind == KIND_INCOME:
+                parsed.update(category="payday", account_id=CHECKING, payee=text_payee or "Payday Payroll")
+            elif orig["is_savings"]:
+                parsed.update(category="savings", to_account=SAVINGS, account_id=SAVINGS, from_account=CHECKING)
+            else:
+                parsed.update(category="savings_withdrawal", to_account=CHECKING, from_account=SAVINGS,
+                              payee="Savings to checking")
 
-        if account_choice:
-            choice = account_choice.lower()
-            if "checking" in choice or "wells" in choice:
-                parsed["from_account"] = "Assets:Checking:WellsFargo"
-            elif "visa" in choice or "card" in choice:
-                parsed["from_account"] = "Liabilities:CreditCard:Visa"
-            elif "savings" in choice or "capital" in choice:
-                parsed["from_account"] = "Assets:Savings:CapitalOne"
+        accounts = {"Checking": CHECKING, "Visa": VISA, "Savings": SAVINGS}
+        if kind == KIND_SPEND:
+            text_says_card = parsed.get("from_account") == VISA
+            if user_changed:
+                parsed["from_account"] = accounts[choice]
+            elif text_says_card and orig_acct != "Visa":
+                parsed["from_account"] = VISA
+            elif choice:
+                parsed["from_account"] = accounts[choice]
+        elif kind == KIND_INCOME:
+            if choice:
+                parsed.pop("account_id", None)
+                parsed["to_account"] = accounts[choice]
+                # Interest keeps its own income account; everything else is pay.
+                if not str(parsed.get("from_account") or "").startswith("Income:"):
+                    parsed["from_account"] = "Income:Salary"
+        elif kind == KIND_CARD_PAYMENT:
+            if choice in ("Checking", "Savings") and (user_changed or parsed.get("from_account") == CHECKING):
+                parsed["from_account"] = accounts[choice]
+            parsed["to_account"] = VISA
+        elif parsed.get("from_account") != SAVINGS:
+            # Into savings: always from checking. (Savings -> checking keeps its direction.)
+            parsed["from_account"] = CHECKING
 
+        logged = self.store.log_batch_transactions([parsed], default_date=date_str, allow_duplicates=True)
         self.store.delete_transaction(tx_id)
-        logged = self.store.log_batch_transactions([parsed], default_date=date_str)
+        if logged and original is not None and original.date == date_str:
+            # Same day: the edited entry keeps the old one's place among that day's entries.
+            self.store.restore_position(logged[0].id, original.seq, original.created_at)
+            logged[0].created_at, logged[0].seq = original.created_at, original.seq
         self.refresh(force=True)
         return logged[0] if logged else None
 
     def item_to_bullet(self, item: Dict[str, Any]) -> str:
-        """Converts an item dict back into a clean bullet representation."""
+        """Converts a day item back into a bullet line that parses to the same kind and account."""
         amt = abs(item["amount_cents"]) / 100.0
         amt_str = f"{amt:.2f}".rstrip("0").rstrip(".") if amt == int(amt) else f"{amt:.2f}"
         cat = item.get("category") or "personal"
         payee = item.get("payee") or ""
+        kind = item.get("kind")
+        acct = item.get("account_short") or item.get("account") or ""
 
-        if cat.lower() == "savings" or "savings" in payee.lower() or "capitalone" in item.get("account", "").lower():
+        if kind == KIND_CARD_PAYMENT or (kind is None and cat == "Credit Card"):
+            return f"visa payment {amt_str}" + (" from savings" if acct == "Savings" else "")
+        if kind == KIND_TRANSFER and acct == "Savings" and not item.get("is_savings"):
+            return f"savings to checking {amt_str}"
+        if kind == KIND_TRANSFER or cat.lower() == "savings" or item.get("is_savings"):
             return f"savings + {amt_str}"
-        elif item.get("is_income"):
+        if kind == KIND_INCOME or item.get("is_income"):
             return f"{payee or 'payday'} + {amt_str}"
-        elif payee and payee.lower() != cat.lower():
-            return f"- {payee} - {amt_str}"
-        return f"- {cat.lower()} - {amt_str}"
+        if payee and payee.lower() != cat.lower():
+            line = f"- {payee} - {amt_str}"
+        else:
+            line = f"- {cat.lower()} - {amt_str}"
+        if acct == "Visa":
+            line += " visa"
+        elif acct == "Savings":
+            line += " from savings"
+        return line
 
     def get_goals_progress(self, month: Optional[str] = None) -> List[Any]:
         """Returns visual GoalProgress objects for monthly tracking bars."""
