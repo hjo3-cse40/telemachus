@@ -38,6 +38,10 @@ def add_launch_arguments(p: argparse.ArgumentParser) -> None:
                       help="dashboard on top, OpenCode below")
     mode.add_argument("--side", dest="stacked", action="store_const", const=False,
                       help="dashboard on the left, OpenCode on the right")
+    p.add_argument(
+        "--theme", choices=("golden-hour", "tokyo-night"), default=None,
+        help="cockpit theme (remembered for the next launch); default: the last one used, else golden-hour",
+    )
 
 
 def cmd_launch(args):
@@ -46,6 +50,7 @@ def cmd_launch(args):
         socket_name=args.socket,
         split=args.split,
         stacked=args.stacked,
+        theme=getattr(args, "theme", None),
     )
     sys.exit(launcher.launch(attach=not args.no_attach))
 

@@ -6,7 +6,8 @@ which imports the whole TUI (about 100 ms). Only the standard library is needed 
 for RAM when the venv has it).
 
 Commands:
-  status                           print the tmux status-right text (LM Studio state + RAM)
+  status [--theme NAME]            print the tmux status-right text (LM Studio state + RAM) in
+                                   the colors of theme NAME (no flag: Tokyo Night, as before)
   save-layout TMUX SOCKET WINDOW GEN
                                    store the last split in the settings file. Debounced: waits
                                    a moment, then saves only if no newer layout change happened
@@ -34,6 +35,14 @@ DEFAULT_STACKED_PCT = 50  # dashboard height in stacked mode
 MIN_PCT = 15
 MAX_PCT = 85
 
+# Look: the theme ("theme") and the Golden Hour sky mode ("sky"). Same names as
+# telemachus/cockpit/theme.py THEME_NAMES and art_city.SKY_MODES (a test keeps them in step; this
+# file cannot import the package, see above).
+THEME_NAMES = ("golden-hour", "tokyo-night")
+DEFAULT_THEME = "golden-hour"
+SKY_MODES = ("clock", "golden", "dusk", "night", "day")
+DEFAULT_SKY = "clock"
+
 # Status line ----------------------------------------------------------------
 
 PROBE_MAX_AGE_S = 4.0  # reuse the LM Studio answer for this long (tmux asks every 2 s)
@@ -51,6 +60,23 @@ C = {
     "blue": "#7aa2f7",
     "bg": "#1a1b26",
 }
+# tmux colors per theme (status bar, borders). Golden Hour uses exact xterm-256 colors.
+TMUX_COLORS: Dict[str, Dict[str, str]] = {
+    "tokyo-night": dict(C, accent=C["cyan"]),
+    "golden-hour": {
+        "cyan": "#ffaf5f",
+        "text": "#ffd7af",
+        "muted": "#d7afaf",
+        "dim": "#875f87",
+        "green": "#afd787",
+        "yellow": "#ffd787",
+        "red": "#ff5f5f",
+        "blue": "#afafff",
+        "bg": "#262626",
+        "accent": "#ff875f",
+    },
+}
+_COLORS: Dict[str, str] = dict(C)  # the status line's colors; main() switches them with --theme
 SEP = "   "
 
 
@@ -94,6 +120,38 @@ def load_settings(path: Optional[Path] = None) -> Dict[str, Any]:
         "stacked_pct": clamp_pct(raw.get("stacked_pct"), DEFAULT_STACKED_PCT),
         "stacked": bool(raw.get("stacked", False)),
     }
+
+
+def load_look(path: Optional[Path] = None) -> Dict[str, str]:
+    """{'theme': a known theme name or '' (not set), 'sky': a sky mode}. Bad values are ignored."""
+    path = path or settings_path()
+    raw: Dict[str, Any] = {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            raw = data
+    except (OSError, ValueError):
+        pass
+    theme = raw.get("theme")
+    sky = raw.get("sky")
+    return {
+        "theme": theme if theme in THEME_NAMES else "",
+        "sky": sky if sky in SKY_MODES else DEFAULT_SKY,
+    }
+
+
+def theme_name(path: Optional[Path] = None, env: Optional[Dict[str, str]] = None) -> str:
+    """The theme to use: TELEMACHUS_THEME, else "theme" in the settings file, else DEFAULT_THEME."""
+    env = os.environ if env is None else env
+    forced = (env.get("TELEMACHUS_THEME") or "").strip().lower()
+    if forced in THEME_NAMES:
+        return forced
+    return load_look(path)["theme"] or DEFAULT_THEME
+
+
+def colors(name: str) -> Dict[str, str]:
+    """tmux colors for a theme name (unknown names get the default theme's colors)."""
+    return TMUX_COLORS.get(name) or TMUX_COLORS[DEFAULT_THEME]
 
 
 def save_settings(updates: Dict[str, Any], path: Optional[Path] = None) -> bool:
@@ -221,7 +279,7 @@ def _esc(text: str) -> str:
 
 
 def _fg(color: str) -> str:
-    return f"#[fg={C[color]}]"
+    return f"#[fg={_COLORS.get(color, C.get(color, C['text']))}]"
 
 
 def _fmt_tokens(n: int) -> str:
@@ -264,6 +322,15 @@ def format_status(info: Any) -> str:
     return SEP.join(parts) + "#[default]"
 
 
+def use_status_theme(name: str) -> bool:
+    """Switches the status line to a theme's colors. Unknown names change nothing."""
+    if name not in TMUX_COLORS:
+        return False
+    _COLORS.clear()
+    _COLORS.update(TMUX_COLORS[name])
+    return True
+
+
 def status_line() -> str:
     try:
         return format_status(header_info())
@@ -280,6 +347,8 @@ def _deadline(_signum: int, _frame: Any) -> None:
 def main(argv: Optional[list] = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     cmd = args[0] if args else "status"
+    if cmd == "status" and len(args) >= 3 and args[1] == "--theme":
+        use_status_theme(args[2])
     if cmd == "status":
         if hasattr(signal, "SIGALRM"):
             signal.signal(signal.SIGALRM, _deadline)
@@ -289,7 +358,7 @@ def main(argv: Optional[list] = None) -> int:
     if cmd == "save-layout" and len(args) == 5:
         save_layout_from_tmux(*args[1:5])
         return 0
-    print("usage: tmux_helper.py status | save-layout TMUX SOCKET WINDOW GEN", file=sys.stderr)
+    print("usage: tmux_helper.py status [--theme NAME] | save-layout TMUX SOCKET WINDOW GEN", file=sys.stderr)
     return 2
 
 

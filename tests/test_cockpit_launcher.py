@@ -265,7 +265,7 @@ class TestCommandLists(TempSettingsMixin, unittest.TestCase):
         self.assertTrue(right.startswith("#("))
         self.assertIn("tmux_helper.py", right)
         self.assertIn(" -I ", right)
-        self.assertIn("status)", right)
+        self.assertRegex(right, r" status --theme (golden-hour|tokyo-night)\)")  # the status line in the theme's colors
         self.assertIn("%H:%M", right)
         self.assertIn("telemachus", opts["status-left"])
         self.assertTrue(braces_balanced(opts["status-left"]))

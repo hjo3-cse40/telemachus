@@ -97,12 +97,16 @@ class Frame:
     keys: footer / help key groups for this screen (the shell adds GLOBAL_KEYS).
     rows: body line index -> (target kind, index) for mouse clicks, e.g. {5: ("email", 2)}.
     state: values the view adjusted and the TUI should keep, e.g. {"email_scroll_offset": 3}.
+    art: room the view left for the theme's art (the Golden Hour city), or None:
+         ("window", cols) = the right `cols` columns of the whole pane, every row (the header, tabs,
+         toast and footer get shorter too); ("strip", row, rows) = body rows row..row+rows-1, full width.
     """
 
     lines: List[Line]
     keys: List[KeyGroup] = field(default_factory=list)
     rows: Dict[int, Tuple[str, int]] = field(default_factory=dict)
     state: Dict[str, Any] = field(default_factory=dict)
+    art: Optional[Tuple[Any, ...]] = None
 
 
 @dataclass

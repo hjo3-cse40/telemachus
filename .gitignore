@@ -80,8 +80,9 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# OpenCode & Local AI Artifacts
-.opencode/
+# OpenCode & Local AI Artifacts (the cockpit's OpenCode theme in .opencode/themes is tracked)
+.opencode/*
+!.opencode/themes/
 *.dat
 *.session.json
 *.transcript.jsonl
