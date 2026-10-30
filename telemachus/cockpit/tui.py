@@ -27,7 +27,8 @@ import sys
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from telemachus.cockpit import finance_view, guard_view, home_view, memory_view, shell
+from telemachus.cockpit import art_city, finance_view, guard_view, home_view, memory_view, shell, tmux_helper
+from telemachus.cockpit import theme as theme_mod
 from telemachus.cockpit.email_panel import EmailTriagePanel
 from telemachus.cockpit.finance_modals import FinanceModals, ModalResult, selection_after_delete
 from telemachus.cockpit.finance_panel import EDIT_CATEGORIES, FinanceTuiPanel  # noqa: F401 (re-export)
@@ -45,7 +46,7 @@ from telemachus.cockpit.launcher import home_overridden
 from telemachus.cockpit.safety_memory_panel import SafetyMemoryPanel
 from telemachus.cockpit.shell import Frame, Layout, Overlay, Panels
 from telemachus.cockpit.telemetry import CockpitTelemetry, HeaderInfo
-from telemachus.cockpit.theme import GLYPHS, Line, attr, cell_width, fit, init_colors, section
+from telemachus.cockpit.theme import THEME, GLYPHS, Line, attr, cell_width, fit, init_colors, section
 
 _VS16 = "️"
 
@@ -135,7 +136,7 @@ def _modal_proxy(name: str) -> property:
 
 
 class CockpitTUI:
-    """Curses-driven Terminal Cockpit (Tokyo Night, "Quiet" shell)."""
+    """Curses-driven Terminal Cockpit ("Quiet" shell; Golden Hour or Tokyo Night theme)."""
 
     # Old attribute names (tests and older callers) map onto the FinanceModals controller.
     modal_stage = _modal_proxy("add_stage")
@@ -167,6 +168,12 @@ class CockpitTUI:
         self.notification = ""
         self.notification_kind = "info"
         self.notification_expiry = 0.0
+
+        # Golden Hour city: sky mode (s key, saved in cockpit.json) and where the art sits now.
+        self.sky_mode = self._load_sky()
+        self._art_t0 = time.time()
+        self._art_rect: Optional[Tuple[int, int, int, int]] = None  # (y, x, rows, cols) on screen
+        self._chrome_w: Optional[int] = None  # header / tabs / toast / footer width beside a window
 
         # Per-tab data (from each view's load()) and per-tab UI state (selection, scroll, ...).
         self.view_data: Dict[str, Any] = {}
@@ -640,18 +647,93 @@ class CockpitTUI:
                 pass
             cx += cell_width(text)
 
+    @staticmethod
+    def _load_sky() -> str:
+        try:
+            return tmux_helper.load_look()["sky"]
+        except Exception:
+            return art_city.DEFAULT_SKY
+
+    def _chrome_width(self, lay: Layout) -> int:
+        """Width of the header, tabs, toast and footer: shorter when the city window is on the right."""
+        w = getattr(self, "_chrome_w", None)
+        return w if w and 0 < w < lay.width else lay.width
+
+    def _art_geometry(self, frame: Frame, lay: Layout) -> Tuple[Optional[Tuple[int, int, int, int]], Optional[int]]:
+        """(art rect on screen, chrome width) for the room the view left (Frame.art)."""
+        art = getattr(frame, "art", None)
+        if not art or not THEME.art_ready():
+            return None, None
+        if art[0] == "window":
+            cols = int(art[1])
+            x0 = lay.width - cols  # the last screen column stays unwritten, as everywhere
+            if x0 <= home_view.ART_GAP:
+                return None, None
+            return (0, x0, lay.rows, cols), x0 - home_view.ART_GAP
+        if art[0] == "strip":
+            row, rows = int(art[1]), int(art[2])
+            if rows <= 0:
+                return None, None
+            return (lay.body_top + row, 0, rows, lay.width), None
+        return None, None
+
+    def _in_art(self, y: int, x: int) -> bool:
+        rect = getattr(self, "_art_rect", None)
+        if not rect:
+            return False
+        ry, rx, rows, cols = rect
+        return ry <= y < ry + rows and rx <= x < rx + cols
+
+    def _draw_art(self, now: float) -> None:
+        """Draws the city into the art rect: one run of cells per color pair, from the art pool."""
+        rect = getattr(self, "_art_rect", None)
+        if not rect:
+            return
+        y0, x0, rows, cols = rect
+        hour = art_city.hour_for(getattr(self, "sky_mode", art_city.DEFAULT_SKY), now)
+        cells = art_city.render(cols, rows, now - getattr(self, "_art_t0", now), hour)
+        THEME.begin_art_frame()
+        for j, row in enumerate(cells):
+            x, run, key = x0, [], None
+            for ch, fg, bg in row:
+                if (fg, bg) != key and run:
+                    self._art_put(y0 + j, x, "".join(run), key)
+                    x += len(run)
+                    run = []
+                key = (fg, bg)
+                run.append(ch)
+            if run:
+                self._art_put(y0 + j, x, "".join(run), key)
+
+    def _art_put(self, y: int, x: int, text: str, key: Optional[Tuple[int, int]]) -> None:
+        try:
+            self.stdscr.addstr(y, x, text, THEME.art_attr(*key) if key else 0)
+        except curses.error:
+            pass
+
+    def _update_art_only(self, now: float) -> None:
+        """Redraws only the city (8 frames a second), never while a box or the help card is open."""
+        if not getattr(self, "_art_rect", None):
+            return
+        if self._get_modals().active or getattr(self, "help_open", False):
+            return
+        self._draw_art(now)
+        self.stdscr.refresh()
+
     def _draw_header(self, lay: Layout, now: float) -> None:
         info: HeaderInfo = self.telemetry.header_info(now)
         self._header_active = info.active
-        line = shell.build_header(info, lay.width, now, datetime.now().strftime("%H:%M"))
-        self._put(shell.HEADER_ROW, 0, line, lay.width)
+        w = self._chrome_width(lay)
+        line = shell.build_header(info, w, now, datetime.now().strftime("%H:%M"))
+        self._put(shell.HEADER_ROW, 0, line, w)
         self._last_header = line
 
     def _draw_tabs(self, lay: Layout) -> None:
-        row, under, spans = shell.build_tabs(self.current_tab, lay.width)
+        w = self._chrome_width(lay)
+        row, under, spans = shell.build_tabs(self.current_tab, w)
         self._tab_spans = spans
-        self._put(shell.TAB_ROW, 0, row, lay.width)
-        self._put(shell.UNDERLINE_ROW, 0, under, lay.width)
+        self._put(shell.TAB_ROW, 0, row, w)
+        self._put(shell.UNDERLINE_ROW, 0, under, w)
 
     def _draw_body(self, frame: Frame, lay: Layout, dim: bool = False) -> None:
         for i, line in enumerate(frame.lines[: lay.body_height]):
@@ -682,7 +764,8 @@ class CockpitTUI:
         if self.notification and getattr(self, "notification_tab", None) not in (None, self.current_tab):
             self.notification = ""
         text = self.notification if self.notification and time.time() < self.notification_expiry else ""
-        self._put(lay.toast_row, 0, shell.build_toast(text, getattr(self, "notification_kind", "info"), lay.width), lay.width)
+        w = self._chrome_width(lay)
+        self._put(lay.toast_row, 0, shell.build_toast(text, getattr(self, "notification_kind", "info"), w), w)
 
     def _footer_groups(self) -> Tuple[List[shell.KeyGroup], bool]:
         if self._get_modals().active:
@@ -697,26 +780,31 @@ class CockpitTUI:
 
     def _draw_footer(self, lay: Layout) -> None:
         groups, with_global = self._footer_groups()
-        self._put(lay.footer_row, 0, shell.build_footer(groups, lay.width, with_global), lay.width)
+        w = self._chrome_width(lay)
+        self._put(lay.footer_row, 0, shell.build_footer(groups, w, with_global), w)
 
     def render(self) -> None:
         """Full frame: header, tabs, body, overlays, toast, footer."""
         max_y, max_x = self.stdscr.getmaxyx()
         lay = shell.layout(max_y, max_x)
         self.stdscr.erase()
+        self._art_rect, self._chrome_w = None, None
         if max_y < shell.MIN_ROWS or max_x < shell.MIN_COLS:
             for i, line in enumerate(shell.too_small(lay.width, max_y)):
                 self._put(i, 0, line, lay.width)
             self.stdscr.refresh()
             return
         now = time.time()
+        # The body first: it says whether the theme's art takes the right side of every row.
+        frame = self._build_body(lay)
+        self._art_rect, self._chrome_w = self._art_geometry(frame, lay)
         self._draw_header(lay, now)
         self._draw_tabs(lay)
-        frame = self._build_body(lay)
         modal = self._get_modals().active
         help_open = bool(getattr(self, "help_open", False)) and not modal
         # A box or the help card is open: the screen behind it steps back.
         self._draw_body(frame, lay, dim=modal or help_open)
+        self._draw_art(now)  # still while a box or the help card is open (they draw over it)
         if modal:
             self._draw_overlay(self._get_modals().render(max_x, max_y), lay)
         elif help_open:
@@ -733,10 +821,11 @@ class CockpitTUI:
         lay = shell.layout(max_y, max_x)
         info = self.telemetry.header_info(now)
         self._header_active = info.active
-        line = shell.build_header(info, lay.width, now, datetime.now().strftime("%H:%M"))
+        w = self._chrome_width(lay)
+        line = shell.build_header(info, w, now, datetime.now().strftime("%H:%M"))
         if line == self._last_header:
             return
-        self._put(shell.HEADER_ROW, 0, line, lay.width)
+        self._put(shell.HEADER_ROW, 0, line, w)
         self._last_header = line
         self.stdscr.refresh()
 
@@ -906,6 +995,15 @@ class CockpitTUI:
             self.trigger_opencode_action("Triage my unread emails and summarize urgent items using telemachus-email")
         elif cmd == "mask":  # Home m key: the same hide-amounts toggle as on Money
             self.handle_finance_key(ord("m"), 0)
+        elif cmd == "sky":  # Home s key: next sky mode for the city, remembered in cockpit.json
+            self.sky_mode = art_city.next_sky(getattr(self, "sky_mode", art_city.DEFAULT_SKY))
+            try:
+                tmux_helper.save_settings({"sky": self.sky_mode})
+            except Exception:
+                pass
+            word = art_city.SKY_WORDS[self.sky_mode]
+            note = f" ({datetime.now():%H:%M} now)" if self.sky_mode == "clock" else ""
+            self.set_notification(f"Sky: {word}{note}", "info")
         elif cmd == "refresh":
             self.refresh_data(retry_finance=True)
             self.set_notification("Refreshed.", "ok")
@@ -972,6 +1070,8 @@ class CockpitTUI:
                 return
             if not bstate & CLICK_MASK:
                 return  # ignore releases so one click acts once
+            if self._in_art(my, mx):
+                return  # the city is a picture: clicks on it do nothing
             if my in (shell.TAB_ROW, shell.UNDERLINE_ROW):
                 tab = shell.tab_at(self._tab_spans, mx)
                 if tab:
@@ -1100,6 +1200,7 @@ class CockpitTUI:
         prev_view = self._view_key()
         needs_render = True
         next_header = 0.0
+        next_art = 0.0
 
         while True:
             now = time.time()
@@ -1133,6 +1234,7 @@ class CockpitTUI:
                 self._debug(f"frame {self.stdscr.getmaxyx()} draw_ms={(time.time() - start) * 1000:.1f}")
                 needs_render = False
                 next_header = now + (ANIM_INTERVAL if self._header_active else IDLE_HEADER_INTERVAL)
+                next_art = now + ANIM_INTERVAL
             else:
                 if toast_expired:
                     self._update_toast_only()
@@ -1140,6 +1242,10 @@ class CockpitTUI:
                     # Only row 0 changes here, so the body never flickers while the spinner runs.
                     self._update_header_only(now)
                     next_header = now + (ANIM_INTERVAL if self._header_active else IDLE_HEADER_INTERVAL)
+                if getattr(self, "_art_rect", None) and now >= next_art:
+                    # Only the city changes here; it is drawn whole, so its recycled pairs stay right.
+                    self._update_art_only(now)
+                    next_art = now + ANIM_INTERVAL
 
             try:
                 ch = self.stdscr.getch()
@@ -1220,7 +1326,11 @@ class CockpitTUI:
 
 
 def main() -> None:
-    """Terminal entry point."""
+    """Terminal entry point. Picks the theme first: TELEMACHUS_THEME, then cockpit.json, then Golden Hour."""
+    try:
+        theme_mod.use_theme(tmux_helper.theme_name())
+    except Exception:
+        theme_mod.use_theme(theme_mod.DEFAULT_THEME)
     try:
         curses.wrapper(lambda scr: CockpitTUI(scr).run())
     except KeyboardInterrupt:

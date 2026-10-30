@@ -157,7 +157,9 @@ def empty_state(message: str, width: int, command: str = "", before: str = "Run 
     """Centered muted message, and a 'Run  <command>  ...' line with the command in cyan."""
     lines: List[Line] = [centered([(message, "muted")], width)]
     if extra:
-        lines.append(centered([(extra, "muted")], width))
+        # A narrow column (next to the Golden Hour city) wraps the hint instead of cutting it.
+        for part in (wrap(extra, width - 2, 3) if cell_width(extra) > width - 2 else [extra]):
+            lines.append(centered([(part, "muted")], width))
     if command:
         parts: Line = [(before, "muted"), (command, "cyan")]
         if after:

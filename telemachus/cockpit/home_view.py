@@ -4,6 +4,11 @@ Four blocks: MONEY (one line from the finance data), INBOX (triage rows with a 2
 the selected mail), MEMORY (latest facts) and GUARD (one status line). Wide panes (120+ cells)
 show two columns: INBOX on the left, the other blocks on the right.
 
+Golden Hour theme: Home leaves room for the city (art_city). A wide pane (130+ cells) gives the
+city a 48-column window on the right of the whole pane (Frame.art = ("window", 48)) and packs the
+blocks into the rest; a narrow pane with 30+ body rows gets a strip of city under the blocks
+(("strip", row, rows)). The s key cycles the sky (the "sky" command; the TUI keeps the mode).
+
 View protocol (same for home_view, memory_view, guard_view):
     load(panels: shell.Panels) -> HomeData          called on every data refresh (10 s, r key)
     build_home(data, state, width, height) -> Frame pure; state is this tab's dict kept by the TUI
@@ -22,10 +27,11 @@ import calendar
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from telemachus.cockpit import theme as theme_mod
 from telemachus.cockpit import view_common as vc
 from telemachus.cockpit.finance_view import mask_badge, setup_error_lines
 from telemachus.cockpit.shell import Frame, KeyGroup, KeyHint, Panels
-from telemachus.cockpit.theme import GLYPHS, GUTTER, Line, cell_width, clip, fit, line_width, lpad, money_text, rpad, section
+from telemachus.cockpit.theme import GLYPHS, GUTTER, Line, cell_width, clip, fit, line_text, line_width, lpad, money_text, rpad, section
 
 LIST_KEYS = KeyGroup.of(
     "LISTS",
@@ -33,6 +39,17 @@ LIST_KEYS = KeyGroup.of(
     KeyHint("↵", "open", "longer preview of the selected mail"),
 )
 TRIAGE_KEY = KeyHint("t", "triage", "triage email in OpenCode (right pane)")
+SKY_KEY = KeyHint("s", "sky", "change the city sky: my clock, golden hour, dusk, night, day")
+
+# Room for the Golden Hour city (see the module docstring).
+ART_WINDOW_MIN = 130  # body width from which the city gets a window on the right
+ART_WINDOW_COLS = 48
+ART_GAP = 2  # blank columns between the blocks and the window
+TWO_COLUMN_ART_MIN = 96  # next to the window, two columns from this content width
+ART_LEFT_W = 56  # left column next to the window: keeps the inbox sender column (54+ inner cells)
+ART_STRIP_MIN_ROWS = 30  # body rows from which a narrow pane gets a strip of city under Home
+ART_STRIP_MAX_ROWS = 14
+ART_STRIP_KEEP_ROWS = 22  # body rows the blocks always keep above the strip
 HOME_KEYS: List[KeyGroup] = [LIST_KEYS, KeyGroup.of("HOME", TRIAGE_KEY)]
 
 
@@ -46,6 +63,8 @@ def home_keys(d: "HomeData", mask: bool = False) -> List[KeyGroup]:
         hints.append(TRIAGE_KEY)
     if (d.money or {}).get("available"):
         hints.append(KeyHint("m", "show $" if mask else "hide $", "show or hide amounts (Money too)"))
+    if theme_mod.art_enabled():
+        hints.append(SKY_KEY)
     if hints:
         groups.append(KeyGroup.of("HOME", *hints))
     return groups
@@ -306,6 +325,8 @@ def handle_key(ch: int, state: Dict[str, Any], d: HomeData) -> Optional[str]:
         return "triage"
     if ch in (ord("m"), ord("M")):
         return "mask"
+    if ch in (ord("s"), ord("S")) and theme_mod.art_enabled():
+        return "sky"
     return None
 
 
@@ -703,11 +724,12 @@ def _single_column(d: HomeData, state: Dict[str, Any], width: int, height: int, 
     return lines, hits, offset
 
 
-def _two_columns(d: HomeData, state: Dict[str, Any], width: int, height: int, today: date):
+def _two_columns(d: HomeData, state: Dict[str, Any], width: int, height: int, today: date,
+                 left_w: Optional[int] = None):
     """Left (wider): INBOX, then GUARD (its line needs the width). Right: MONEY with one bill per
-    row, then MEMORY filling the rest of the height."""
+    row, then MEMORY filling the rest of the height. `left_w` overrides the 11:9 split."""
     gap = 3
-    left_w = (width - gap) * 11 // 20
+    left_w = left_w if left_w else (width - gap) * 11 // 20
     right_w = width - gap - left_w
     inbox = _inbox(d)
     preview = 0
@@ -742,16 +764,45 @@ def build_home(d: HomeData, state: Optional[Dict[str, Any]], width: int, height:
     if lost:
         state["open"] = False
     today = datetime.fromtimestamp(vc.now_or(d.now)).date()
-    if width >= TWO_COLUMN_MIN:
-        lines, hits, offset = _two_columns(d, state, width, height, today)
+    art = art_layout(width, height)
+    content_w, content_h = width, height
+    if art and art[0] == "window":
+        content_w = width - art[1] - ART_GAP
+    elif art and art[0] == "strip":
+        content_h = art[1] - 1
+    if content_w >= TWO_COLUMN_MIN:
+        lines, hits, offset = _two_columns(d, state, content_w, content_h, today)
+    elif art and art[0] == "window" and content_w >= TWO_COLUMN_ART_MIN:
+        lines, hits, offset = _two_columns(d, state, content_w, content_h, today, left_w=ART_LEFT_W)
     else:
-        lines, hits, offset = _single_column(d, state, width, height, today)
-    lines = [fit(l, width) for l in lines[: max(0, height)]]
+        lines, hits, offset = _single_column(d, state, content_w, content_h, today)
+    lines = [fit(l, content_w) for l in lines[: max(0, content_h)]]
+    if art and art[0] == "strip":
+        # The strip starts one row under the last block and fills the pane: a short Home gets more city.
+        used = len(lines)
+        while used and not line_text(lines[used - 1]).strip():
+            used -= 1
+        lines = lines[:used]
+        row = used + 1
+        art = ("strip", row, height - row)
     out = {"scroll": offset, "sel": sel, "sel_key": state.get("sel_key")}
     if lost:
         out["open"] = False
-    return Frame(lines=lines, keys=home_keys(d, bool(state.get("mask"))), rows={k: v for k, v in hits.items() if k < height},
-                 state=out)
+    return Frame(lines=lines, keys=home_keys(d, bool(state.get("mask"))),
+                 rows={k: v for k, v in hits.items() if k < content_h}, state=out, art=art)
+
+
+def art_layout(width: int, height: int) -> Optional[Tuple[Any, ...]]:
+    """Where Home puts the theme's city for a body of width x height cells (see Frame.art), or None
+    when the theme has no art or the pane is too small for it."""
+    if not theme_mod.art_enabled():
+        return None
+    if width >= ART_WINDOW_MIN:
+        return ("window", ART_WINDOW_COLS)
+    if height >= ART_STRIP_MIN_ROWS:
+        rows = min(ART_STRIP_MAX_ROWS, height - ART_STRIP_KEEP_ROWS)
+        return ("strip", height - rows, rows)
+    return None
 
 
 DATA_CLASS = HomeData

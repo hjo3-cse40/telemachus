@@ -420,6 +420,33 @@ kept separately) and the current mode to `~/.config/telemachus/cockpit.json` aft
 the next launch starts from it. `--split`, `--stacked` and `--side` override it for that launch (and the
 new size is then remembered). Set `TELEMACHUS_COCKPIT_SETTINGS=/path/file.json` to use another file.
 
+### Themes
+
+Two themes: **Golden Hour** (the default) and **Tokyo Night** (the look before it).
+
+Golden Hour gives the text warm colors on your glass and puts a pixel city by a river on Home: a
+48-column window on the right when the dashboard is 130 or more cells wide (the stacked layout), or a
+strip under the blocks when the pane is narrow but tall. The city moves gently (water, cars on the
+bridge, office lights, birds) at 8 frames a second, about 0.3 ms of work per frame. The sky follows
+your clock: day, golden hour, dusk and night.
+
+| Key or setting | What it does |
+|---|---|
+| `s` on Home | cycle the sky: my clock, golden hour, dusk, night, day (saved as `"sky"` in cockpit.json) |
+| `--theme golden-hour` or `--theme tokyo-night` | launcher flag, remembered as `"theme"` in cockpit.json |
+| `TELEMACHUS_THEME=tokyo-night` | for one launch (wins over the saved theme; the flag wins over both) |
+
+The tmux status bar and the pane borders follow the theme. In Golden Hour the OpenCode pane gets the
+matching colors too: the launcher starts it with `OPENCODE_TUI_CONFIG=telemachus/cockpit/opencode_tui.json`,
+which selects `.opencode/themes/golden-hour.json`. OpenCode started anywhere else keeps its own theme.
+
+Colors: every Golden Hour color is an exact xterm-256 color, so the 256-color curses on this Mac draws
+it with no rounding. Python's curses can draw only color pairs 1-255 (`color_pair()` keeps 8 bits, even
+though the macOS ncurses reports 32767 pairs), so theme.py stops at 255, and the city recycles its own
+pool of pairs (121-255) as the sky changes. Full 24-bit color in the dashboard would need a Python built
+against ncurses 6.1+ with extended colors; every Python here (Homebrew and uv's standalone builds) links
+Apple's ncurses 5.4.
+
 ### Status bar
 
 Top line, refreshed every 2 seconds: `telemachus`, the focused pane (`dashboard` / `opencode`, plus
@@ -465,6 +492,8 @@ error until you press enter.
 If the money ledger (`finances.sqlite3`) is damaged or another program holds it locked, the dashboard
 still starts: Money shows the reason, Home says the finance vault could not be read, and the other
 tabs work. Press `r` (or wait 30 s) to try again.
+
+On Home in Golden Hour, `s` changes the sky of the city (see Themes).
 
 On Home, `t` sends the email triage prompt to the OpenCode pane next to it:
 into the OpenCode chat when OpenCode runs there, or as `opencode run '...'` at a shell prompt. It

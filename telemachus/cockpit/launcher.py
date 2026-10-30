@@ -59,7 +59,13 @@ FORWARDED_ENV_VARS = (
     "TELEMACHUS_COLORS",
     "TELEMACHUS_TUI_DEBUG",
     "TELEMACHUS_DEMO",
+    "TELEMACHUS_THEME",
 )
+
+# The OpenCode pane gets the Golden Hour colors from this TUI config (cockpit only: OpenCode started
+# anywhere else keeps its own theme). The theme file itself is .opencode/themes/golden-hour.json in
+# the project root, where the OpenCode pane starts.
+OPENCODE_TUI_CONFIGS = {"golden-hour": Path("telemachus") / "cockpit" / "opencode_tui.json"}
 
 # Pane and window options the hooks and key bindings use (user options, prefixed with @).
 ROLE = "@telemachus_role"
@@ -181,6 +187,7 @@ class CockpitLauncher:
         stacked: Optional[bool] = None,
         settings_path: Optional[Path] = None,
         python: Optional[str] = None,
+        theme: Optional[str] = None,
     ):
         self.session_name = session_name
         self.socket_name = socket_name or DEFAULT_SOCKET
@@ -192,6 +199,10 @@ class CockpitLauncher:
         env_path = os.environ.get("TELEMACHUS_COCKPIT_SETTINGS")
         self.settings_path = Path(settings_path) if settings_path else (Path(env_path) if env_path else None)
         self.layout = resolve_layout(load_settings(self.settings_path), split=split, stacked=stacked)
+        # --theme wins (and is remembered at launch), then TELEMACHUS_THEME, then cockpit.json.
+        self.theme_flag = theme if theme in tmux_helper.THEME_NAMES else None
+        self.theme = self.theme_flag or tmux_helper.theme_name(self.settings_path)
+        self.C = tmux_helper.colors(self.theme)
 
     # -- basics -------------------------------------------------------------
 
@@ -228,20 +239,43 @@ class CockpitLauncher:
         without it the shell would skip the error message once the dashboard exits. A trap with a
         command is reset to the default in the child, so the dashboard still gets SIGINT."""
         root = shlex.quote(str(self.project_root))
-        run = f"{forwarded_env_prefix()}{shlex.quote(self.python)} -m telemachus.cockpit dashboard"
+        # The dashboard gets the launcher's theme (so tmux and the TUI always match) and the same
+        # settings file (so the s key saves where the launcher reads).
+        env = forwarded_env_prefix() or "env "
+        env += f"TELEMACHUS_THEME={shlex.quote(self.theme)} "
+        if self.settings_path:
+            env += f"TELEMACHUS_COCKPIT_SETTINGS={shlex.quote(str(self.settings_path))} "
+        run = f"{env}{shlex.quote(self.python)} -m telemachus.cockpit dashboard"
         on_error = (
             "rc=$?; printf '\\n  dashboard stopped (exit %s). Press enter to close this pane.\\n' \"$rc\"; read -r _"
         )
         return f"cd {root} && trap : INT && {{ {run} || {{ {on_error}; }}; }}"
 
+    def remember_theme(self) -> bool:
+        """--theme is remembered for the next launch, like --split. Without the flag nothing changes."""
+        if not self.theme_flag:
+            return False
+        return tmux_helper.save_settings({"theme": self.theme_flag}, self.settings_path)
+
+    def opencode_tui_config(self) -> Optional[Path]:
+        """The cockpit-only OpenCode TUI config for this theme, when the theme has one and it exists."""
+        rel = OPENCODE_TUI_CONFIGS.get(self.theme)
+        if rel is None:
+            return None
+        path = Path(self.project_root) / rel
+        return path if path.is_file() else None
+
     def opencode_command(self) -> str:
         # Keep the pane open when OpenCode exits, so it can be started again.
+        brand, words = ("1;38;5;215", "38;5;181") if self.theme == "golden-hour" else ("1;36", "38;5;103")
         greeting = (
             "printf '\\033[?25h\\033[5 q'; "
-            "printf '\\033[1;36m  telemachus\\033[0m  \\033[38;5;103mOpenCode harness\\033[0m\\n'; "
-            "printf '\\033[38;5;103m  alt+h dashboard  alt+l OpenCode  alt+z zoom  alt+arrows resize\\033[0m\\n\\n'; "
+            f"printf '\\033[{brand}m  telemachus\\033[0m  \\033[{words}mOpenCode harness\\033[0m\\n'; "
+            f"printf '\\033[{words}m  alt+h dashboard  alt+l OpenCode  alt+z zoom  alt+arrows resize\\033[0m\\n\\n'; "
         )
-        return greeting + 'opencode; exec "${SHELL:-/bin/zsh}" -l'
+        tui = self.opencode_tui_config()
+        run = f"OPENCODE_TUI_CONFIG={shlex.quote(str(tui))} opencode" if tui else "opencode"
+        return greeting + run + '; exec "${SHELL:-/bin/zsh}" -l'
 
     def create_commands(self, private: bool, cols: int, rows: int) -> List[str]:
         """First command: the OpenCode pane in a new session (own server) or a new window (inside tmux).
@@ -271,15 +305,22 @@ class CockpitLauncher:
 
     def server_option_commands(self) -> List[List[str]]:
         """Global options. Only ever sent to the cockpit's own server (-L), never the default one."""
-        status_right = (
-            "#(" + self.helper_command("status").replace("%", "%%") + ")"
-            + "   #[fg=" + C["muted"] + "]%H:%M "
-        )
-        status_left = (
-            "#[fg=" + C["cyan"] + ",bold] telemachus #[nobold,fg=" + C["muted"] + "]"
-            "#{?#{==:#{" + ROLE + "},dashboard},dashboard,opencode}"
-            "#{?window_zoomed_flag, #[fg=" + C["yellow"] + "]zoomed,}#[default]"
-        )
+        C = self.C
+        status = "#(" + self.helper_command("status", "--theme", self.theme).replace("%", "%%") + ")"
+        role = "#{?#{==:#{" + ROLE + "},dashboard},dashboard,opencode}"
+        zoomed = "#{?window_zoomed_flag, #[fg=" + C["yellow"] + "]zoomed,}"
+        if self.theme == "golden-hour":
+            # An amber tab that fades into the bar (▓▒░), and a coral clock tab that fades in (░▒▓).
+            status_left = (
+                "#[fg=" + C["bg"] + ",bg=" + C["cyan"] + ",bold] telemachus "
+                "#[fg=" + C["cyan"] + ",bg=" + C["bg"] + ",nobold]▓▒░ #[fg=" + C["muted"] + "]" + role + zoomed + "#[default]"
+            )
+            status_right = (
+                status + "   #[fg=" + C["accent"] + "]░▒▓#[fg=" + C["bg"] + ",bg=" + C["accent"] + ",bold] %H:%M #[default]"
+            )
+        else:
+            status_right = status + "   #[fg=" + C["muted"] + "]%H:%M "
+            status_left = "#[fg=" + C["cyan"] + ",bold] telemachus #[nobold,fg=" + C["muted"] + "]" + role + zoomed + "#[default]"
         return [
             ["set-option", "-g", "mouse", "on"],
             ["set-option", "-s", "escape-time", "10"],
@@ -302,7 +343,7 @@ class CockpitLauncher:
         """Own server: the key hint replaces this session's status-right for HINT_S seconds, then
         a delayed background command unsets it, so the global status-right shows again."""
         return [
-            ["set-option", "-t", session, "status-right", f"#[fg={C['muted']}]{KEY_HINT} "],
+            ["set-option", "-t", session, "status-right", f"#[fg={self.C['muted']}]{KEY_HINT} "],
             ["run-shell", "-b", "-d", str(HINT_S), "-C", f"set-option -u -t {session} status-right"],
         ]
 
@@ -310,8 +351,8 @@ class CockpitLauncher:
         """Window-scoped options: borders, layout state and the hook that remembers the split."""
         lay = self.layout
         return [
-            ["set-option", "-w", "-t", window, "pane-border-style", f"fg={C['dim']}"],
-            ["set-option", "-w", "-t", window, "pane-active-border-style", f"fg={C['cyan']}"],
+            ["set-option", "-w", "-t", window, "pane-border-style", f"fg={self.C['dim']}"],
+            ["set-option", "-w", "-t", window, "pane-active-border-style", f"fg={self.C['cyan']}"],
             ["set-option", "-w", "-t", window, OPT_STACKED, "1" if lay.stacked else "0"],
             ["set-option", "-w", "-t", window, OPT_PCT_H, str(lay.split_pct)],
             ["set-option", "-w", "-t", window, OPT_PCT_V, str(lay.stacked_pct)],
@@ -436,6 +477,7 @@ class CockpitLauncher:
         if not self.is_tmux_available():
             print(f"Error: tmux is required but was not found at '{self.tmux_bin}'.", file=sys.stderr)
             return 1
+        self.remember_theme()
         private = not self.inside_tmux()
         if private:
             self._clear_old_session()

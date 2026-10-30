@@ -1,4 +1,12 @@
-"""Colors, styles, glyphs and the line model for the Cockpit TUI (Tokyo Night).
+"""Colors, styles, glyphs and the line model for the Cockpit TUI.
+
+Themes
+------
+Two themes share one set of color roles: "golden-hour" (warm text and a city window on Home whose
+sky follows the clock; the default) and "tokyo-night" (the quiet look before it). ``use_theme()``
+swaps PALETTE / BACKGROUNDS / PINNED_256 in place, so every module that imported them sees the
+active theme. The module starts in Tokyo Night so imports and tests stay stable; the TUI's main()
+picks the configured theme (TELEMACHUS_THEME, then "theme" in cockpit.json, then Golden Hour).
 
 The line model
 --------------
@@ -26,7 +34,7 @@ from __future__ import annotations
 
 import os
 import unicodedata
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 try:  # curses is optional so the pure helpers stay importable everywhere
     import curses
@@ -58,6 +66,41 @@ BACKGROUNDS: Dict[str, str] = {
     "panel": "#1f2335",  # help overlay card
 }
 COLOR_NAMES: Tuple[str, ...] = ("cyan", "text", "muted", "dim", "green", "yellow", "red", "blue", "magenta")
+
+# Every theme fills the same roles (see the module docstring). Golden Hour uses exact xterm-256
+# slots, so 256-color mode draws it with no rounding (slot numbers in the comments).
+THEMES: Dict[str, Dict[str, Any]] = {
+    "tokyo-night": {
+        "palette": dict(PALETTE),
+        "backgrounds": dict(BACKGROUNDS),
+        "pinned_256": {"text": 189, "sel": 17},
+        "art": False,
+    },
+    "golden-hour": {
+        "palette": {
+            "cyan": "#ffaf5f",  # 215 amber: focus, keys, active tab, brand
+            "text": "#ffd7af",  # 223 peach cream: values
+            "muted": "#d7afaf",  # 181 dusty rose: labels and hints
+            "dim": "#875f87",  # 96 mauve: lines and borders only
+            "green": "#afd787",  # 150 sage: good
+            "yellow": "#ffd787",  # 222 pale gold: attention
+            "red": "#ff5f5f",  # 203 coral red: problem
+            "blue": "#afafff",  # 147 periwinkle: data (bars, charts)
+            "magenta": "#d787ff",  # 177 violet: private memory tier
+            "ink": "#262626",  # 235: text on a light fill
+        },
+        "backgrounds": {
+            "sel": "#5f005f",  # 53 deep plum: selected row
+            "card": "#303030",  # 236: Add / Edit cards
+            "panel": "#262626",  # 235: help card
+        },
+        "pinned_256": {},
+        "art": True,
+    },
+}
+DEFAULT_THEME = "golden-hour"
+THEME_NAMES: Tuple[str, ...] = tuple(THEMES)
+_ACTIVE: Dict[str, str] = {"name": "tokyo-night"}
 
 ALIASES: Dict[str, str] = {
     "fg": "text",
@@ -303,8 +346,21 @@ PINNED_256: Dict[str, int] = {"text": 189, "sel": 17}
 SEL_BRIGHT_8: Dict[str, int] = {"green": 10, "red": 9, "magenta": 13}
 
 
+# Python's curses.color_pair() keeps only 8 bits of the pair number, so pairs 1-255 are all that can
+# be drawn, whatever COLOR_PAIRS says (the macOS ncurses reports 32767; pair 256 would turn into
+# A_STANDOUT with pair 0). MAX_PAIRS caps the allocator at that real limit.
+MAX_PAIRS = 256
+# When a theme has art, text styles use pairs 1..ART_FIRST_PAIR-1 and the art pool the rest. Text
+# styles need about 40 pairs; the city uses up to about 90 at once.
+ART_FIRST_PAIR = 121
+
+
 class Theme:
-    """Maps style strings to curses attributes. Pairs are created on first use."""
+    """Maps style strings to curses attributes. Pairs are created on first use.
+
+    Art (the Golden Hour city) gets its own pool of pairs at the top of the range. Its colors change
+    with the hour, so a pair the current art frame does not use is recycled for a new color combo.
+    That is safe because the art area is drawn completely on every art frame."""
 
     def __init__(self) -> None:
         self.mode = "none"  # "exact", "256", "8", "mono" or "none" (curses not started)
@@ -313,6 +369,13 @@ class Theme:
         self._attr_cache: Dict[str, int] = {}
         self._next_pair = 1
         self._max_pairs = 0
+        self._reset_art()
+
+    def _reset_art(self) -> None:
+        self._art_pairs: Dict[Tuple[int, int], int] = {}  # (fg slot, bg slot) -> pair number
+        self._art_seen: Dict[Tuple[int, int], int] = {}  # combo -> last art frame that used it
+        self._art_frame = 0
+        self._art_next = ART_FIRST_PAIR  # next never-used pair number of the pool
 
     # -- setup ---------------------------------------------------------------
 
@@ -322,6 +385,7 @@ class Theme:
         self._pairs.clear()
         self._attr_cache.clear()
         self._next_pair = 1
+        self._reset_art()
         if curses is None or not curses.has_colors():
             self.mode = "mono"
             return self.mode
@@ -332,7 +396,7 @@ class Theme:
         except curses.error:
             default_bg = curses.COLOR_BLACK
         self._default_bg = default_bg
-        self._max_pairs = getattr(curses, "COLOR_PAIRS", 64)
+        self._max_pairs = min(getattr(curses, "COLOR_PAIRS", 64), MAX_PAIRS)
         forced = os.environ.get("TELEMACHUS_COLORS", "").strip().lower()
         colors = getattr(curses, "COLORS", 8)
         if forced in ("8", "basic"):
@@ -393,11 +457,16 @@ class Theme:
 
     # -- lookup --------------------------------------------------------------
 
+    def _text_pair_limit(self) -> int:
+        """First pair number text styles may not use (the art pool starts there)."""
+        limit = max(2, self._max_pairs)
+        return min(limit, ART_FIRST_PAIR) if self.art_ready() else limit
+
     def _pair(self, fg: int, bg: int) -> int:
         key = (fg, bg)
         if key in self._pairs:
             return self._pairs[key]
-        if self._next_pair >= max(2, self._max_pairs):
+        if self._next_pair >= self._text_pair_limit():
             return 0
         n = self._next_pair
         try:
@@ -462,8 +531,87 @@ class Theme:
         self._attr_cache[style] = value
         return value
 
+    # -- art pool --------------------------------------------------------------
+
+    def art_ready(self) -> bool:
+        """True when the active theme has art and curses runs in 256-color mode with room for the pool."""
+        return bool(THEMES[_ACTIVE["name"]]["art"]) and self.mode == "256" and self._max_pairs > ART_FIRST_PAIR + 16
+
+    def begin_art_frame(self) -> None:
+        """Call before drawing a whole art frame; combos the frame does not use become recyclable."""
+        self._art_frame += 1
+
+    def art_attr(self, fg: int, bg: int) -> int:
+        """Attribute for an art cell with xterm slots fg / bg. 0 (default colors) when no pair is left."""
+        if curses is None or not self.art_ready():
+            return 0
+        key = (fg, bg)
+        n = self._art_pairs.get(key)
+        if n is None:
+            n = self._art_take()
+            if not n:
+                return 0
+            try:
+                curses.init_pair(n, fg, bg)
+            except curses.error:
+                return 0
+            self._art_pairs[key] = n
+        self._art_seen[key] = self._art_frame
+        return curses.color_pair(n)
+
+    def _art_take(self) -> int:
+        """A pair number for a new art combo: a never-used one, else the stalest combo that the
+        current frame does not use. 0 when every pool pair is in use by this frame."""
+        if self._art_next < self._max_pairs:
+            n = self._art_next
+            self._art_next += 1
+            return n
+        victim: Optional[Tuple[int, int]] = None
+        for key, frame in self._art_seen.items():
+            if frame < self._art_frame and (victim is None or frame < self._art_seen[victim]):
+                victim = key
+        if victim is None:
+            return 0
+        self._art_seen.pop(victim, None)
+        return self._art_pairs.pop(victim)
+
+    def art_pairs_in_use(self) -> int:
+        return len(self._art_pairs)
+
 
 THEME = Theme()
+
+
+def use_theme(name: Optional[str]) -> str:
+    """Makes `name` the active theme (unknown names fall back to DEFAULT_THEME). Swaps PALETTE,
+    BACKGROUNDS and PINNED_256 in place, then rebuilds the color pairs when curses already runs."""
+    key = name if name in THEMES else DEFAULT_THEME
+    spec = THEMES[key]
+    PALETTE.clear()
+    PALETTE.update(spec["palette"])
+    BACKGROUNDS.clear()
+    BACKGROUNDS.update(spec["backgrounds"])
+    PINNED_256.clear()
+    PINNED_256.update(spec["pinned_256"])
+    _ACTIVE["name"] = key
+    if THEME.mode not in ("none", "mono"):
+        THEME.init()
+    else:
+        THEME._attr_cache.clear()
+    return key
+
+
+def theme_name() -> str:
+    """The active theme's name."""
+    return _ACTIVE["name"]
+
+
+def art_enabled() -> bool:
+    """True when views should leave room for the theme's art. Before curses starts (tests, line
+    builders) this follows the theme alone; once it runs, the color mode must allow the art too."""
+    if not THEMES[_ACTIVE["name"]]["art"]:
+        return False
+    return THEME.mode == "none" or THEME.art_ready()
 
 
 def init_colors() -> str:

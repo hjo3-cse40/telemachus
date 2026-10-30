@@ -179,7 +179,8 @@ class TestCockpitLauncher(unittest.TestCase):
         self.assertIn("mouse", flat)
         self.assertIn("status-position", flat)
         self.assertIn("top", flat)
-        self.assertTrue(any("#1a1b26" in arg for arg in flat))  # Tokyo Night background
+        self.assertTrue(any(self.launcher.C["bg"] in arg for arg in flat))  # the theme's status background
+        self.assertIn(self.launcher.C["bg"], ("#1a1b26", "#262626"))  # Tokyo Night or Golden Hour
 
 
 if __name__ == "__main__":
